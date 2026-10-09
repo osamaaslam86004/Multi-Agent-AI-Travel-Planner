@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Context-Mode session logs and caches
+.github/context-mode/
+.context-mode/
+*.json.stats
