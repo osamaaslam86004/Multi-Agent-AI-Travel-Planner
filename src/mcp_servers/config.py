@@ -48,10 +48,7 @@ def _child_env(**overrides: str) -> dict:
 REMOTE_SERVERS = {
     "tavily": {
         "transport": "streamable_http",
-        "url": (
-            "https://mcp.tavily.com/mcp/"
-            f"?tavilyApiKey={TAVILY_API_KEY}"
-        ),
+        "url": ("https://mcp.tavily.com/mcp/" f"?tavilyApiKey={TAVILY_API_KEY}"),
     },
 }
 
@@ -63,21 +60,18 @@ REMOTE_SERVERS = {
 LOCAL_SERVERS = {
     "aviationstack": {
         "transport": "stdio",
-        "command": "uvx",
-
+        "command": sys.executable,
         # aviationstack-mcp still imports mcp.server.fastmcp, which mcp 2.x
         # renamed to MCPServer. Without this pin uvx resolves mcp 2.x into
         # the server's isolated environment and it dies on import - which
         # flight_agent then swallows as "Flight information unavailable".
-        "args": ["--with", "mcp<2", "aviationstack-mcp"],
+        "args": ["-m", "aviationstack_mcp"],
         "env": _child_env(
             AVIATION_STACK_API_KEY=AVIATIONSTACK_API_KEY,
         ),
     },
-
     "weather": {
         "transport": "stdio",
-
         # Use the same interpreter that runs the app, so the server
         # gets the project's virtualenv.
         "command": sys.executable,
