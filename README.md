@@ -77,16 +77,16 @@ Create a file named `.env` in the project root and add your keys:
 
 ```dotenv
 # Required
-GROQ_API_KEY=your_groq_key
-DATABASE_URL=postgresql://user:password@host:5432/dbname
+GROQ__API_KEY=your_groq_key
+DATABASE__URL=postgresql://user:password@host:5432/dbname
 
 # Service keys
-TAVILY_API_KEY=your_tavily_key
-AVIATIONSTACK_API_KEY=your_aviationstack_key
-OPENWEATHER_API_KEY=your_openweather_key
+TAVILY__API_KEY=your_tavily_key
+AVIATIONSTACK__API_KEY=your_aviationstack_key
+OPENWEATHER__API_KEY=your_openweather_key
 
 # Optional
-GROQ_MODEL=openai/gpt-oss-20b
+GROQ__MODEL=openai/gpt-oss-20b
 ```
 
 Here's what each one is for:

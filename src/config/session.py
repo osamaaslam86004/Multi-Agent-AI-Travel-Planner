@@ -1,21 +1,9 @@
-"""
-Per-session credentials.
-
-Keys can come from two places:
-
-* the server's .env  - shared by everyone, set once at deploy time
-* the browser session - typed into the settings panel, held in memory only
-
-Session values take precedence, are never written to disk, and disappear
-when the session expires. Resolution happens through a ContextVar so the
-agents can stay unaware of where a key came from.
-"""
-
+# src/config/session.py
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from src.config import settings
+from src.config.settings import settings
 
 
 @dataclass(frozen=True)
@@ -25,7 +13,6 @@ class Credentials:
 
 
 EMPTY = Credentials()
-
 _current: ContextVar[Credentials] = ContextVar("travelbrain_credentials", default=EMPTY)
 
 
@@ -34,7 +21,6 @@ class MissingCredentialsError(RuntimeError):
 
     def __init__(self, missing: list[str]):
         self.missing = missing
-
         super().__init__(
             "Missing credentials: "
             + ", ".join(missing)
@@ -48,10 +34,7 @@ def get_credentials() -> Credentials:
 
 @contextmanager
 def use_credentials(credentials: Credentials | None):
-    """Bind session credentials for the duration of one request."""
-
     token = _current.set(credentials or EMPTY)
-
     try:
         yield
     finally:
@@ -61,35 +44,35 @@ def use_credentials(credentials: Credentials | None):
 # =========================
 # Resolution
 # =========================
-
 def resolve_groq_api_key() -> str | None:
-    return get_credentials().groq_api_key or settings.GROQ_API_KEY
+    session_key = get_credentials().groq_api_key
+    if session_key:
+        return session_key
+    return settings.llm.groq_api_key.get_secret_value()
 
 
 def resolve_database_url() -> str | None:
-    url = get_credentials().database_url or settings.DATABASE_URL
-
-    return settings.normalize_database_url(url) if url else None
+    session_url = get_credentials().database_url
+    url = session_url or settings.db.url
+    if url and "sslmode=" not in url:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}sslmode=require"
+    return url
 
 
 def require(*names: str) -> None:
-    """Raise MissingCredentialsError listing whichever of these is absent."""
-
     resolvers = {
         "GROQ_API_KEY": resolve_groq_api_key,
         "DATABASE_URL": resolve_database_url,
     }
-
     missing = [name for name in names if not resolvers[name]()]
-
     if missing:
         raise MissingCredentialsError(missing)
 
 
 # =========================
-# Status, for the settings UI
+# Status, for Settings UI
 # =========================
-
 CREDENTIAL_LABELS = {
     "GROQ_API_KEY": {
         "label": "Groq API key",
@@ -105,26 +88,19 @@ CREDENTIAL_LABELS = {
 
 
 def credential_status() -> dict:
-    """
-    Describe what is configured and where it came from, without ever
-    returning the secret itself.
-    """
-
     session = get_credentials()
-
     sources = {
         "GROQ_API_KEY": (
-            "session" if session.groq_api_key
-            else "env" if settings.GROQ_API_KEY
+            "session"
+            if session.groq_api_key
+            else "env"
+            if settings.llm.groq_api_key
             else None
         ),
         "DATABASE_URL": (
-            "session" if session.database_url
-            else "env" if settings.DATABASE_URL
-            else None
+            "session" if session.database_url else "env" if settings.db.url else None
         ),
     }
-
     credentials = {
         name: {
             **CREDENTIAL_LABELS[name],
@@ -133,9 +109,7 @@ def credential_status() -> dict:
         }
         for name, source in sources.items()
     }
-
     missing = [name for name, source in sources.items() if source is None]
-
     return {
         "ready": not missing,
         "missing": missing,

@@ -1,11 +1,10 @@
-"""Groq chat model, resolved per session and cached per distinct key."""
-
+# src/clients/llm.py
 from functools import lru_cache
 
 from langchain_groq import ChatGroq
 
 from src.config.session import require, resolve_groq_api_key
-from src.config.settings import GROQ_MODEL
+from src.config.settings import settings
 
 
 @lru_cache(maxsize=8)
@@ -14,11 +13,6 @@ def _build_llm(model: str, api_key: str) -> ChatGroq:
 
 
 def get_llm() -> ChatGroq:
-    """
-    The key comes from the current session if one supplied it, otherwise
-    from the server's .env. One client is reused per distinct key.
-    """
-
+    """Resolves Groq LLM client instance per session or environment key."""
     require("GROQ_API_KEY")
-
-    return _build_llm(GROQ_MODEL, resolve_groq_api_key())
+    return _build_llm(settings.llm.model, resolve_groq_api_key())

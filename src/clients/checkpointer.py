@@ -1,11 +1,9 @@
-"""PostgreSQL checkpointer used by LangGraph to persist conversation threads."""
-
+# src/clients/checkpointer.py
 from functools import lru_cache
 
 import psycopg
-from psycopg.rows import dict_row
-
 from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg.rows import dict_row
 
 from src.config.session import require, resolve_database_url
 
@@ -23,13 +21,9 @@ def get_connection(database_url: str) -> psycopg.Connection:
 def get_checkpointer(database_url: str) -> PostgresSaver:
     checkpointer = PostgresSaver(get_connection(database_url))
     checkpointer.setup()
-
     return checkpointer
 
 
 def get_session_checkpointer() -> PostgresSaver:
-    """Checkpointer for whichever database URL the current session resolves to."""
-
     require("DATABASE_URL")
-
     return get_checkpointer(resolve_database_url())

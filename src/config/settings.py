@@ -1,142 +1,116 @@
-"""
-Central configuration.
-
-Everything that reads the environment lives here, so the rest of the
-code never touches os.getenv directly.
-"""
-
+# src/config/settings.py
 import os
-from pathlib import Path
+from functools import lru_cache
+from typing import Literal
 
 import certifi
-from dotenv import load_dotenv
+from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
-
-
-# Windows / corporate networks need an explicit CA bundle for outbound TLS.
+# Corporate / secure network CA bundle fallback
 os.environ["SSL_CERT_FILE"] = certifi.where()
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 
-# =========================
-# Paths
-# =========================
-
-SRC_DIR = Path(__file__).resolve().parent.parent
-PROJECT_DIR = SRC_DIR.parent
-
-
-# =========================
-# API keys
-# =========================
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+class AppConfig(BaseModel):
+    name: str = "TravelBrain AI"
+    description: str = "LangGraph Multi-Agent Travel Planner with FastAPI Frontend"
+    version: str = "1.0.0"
+    env: Literal["development", "staging", "production"] = "development"
+    debug: bool = False
+    api_v1_prefix: str = "/api"
 
 
-# =========================
-# LLM
-# =========================
-
-# Groq retired the Llama 3.x chat models; check the live list with
-#   GET https://api.groq.com/openai/v1/models
-# if this ever starts returning model_not_found again.
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+class SecurityConfig(BaseModel):
+    session_cookie_name: str = "travelbrain_session"
+    session_ttl_seconds: int = 43200  # 12 hours
+    cors_origins: list[str] = Field(default_factory=list)
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    cookie_secure: bool = False
 
 
-# =========================
-# Prompt truncation limits
-# =========================
+class DatabaseConfig(BaseModel):
+    url: str = Field(..., description="PostgreSQL database connection string")
+    pool_size: int = 20
+    max_overflow: int = 10
 
-AIRPORT_DATA_CHAR_LIMIT = int(os.getenv("AIRPORT_DATA_CHAR_LIMIT", "3000"))
-AIRLINE_DATA_CHAR_LIMIT = int(os.getenv("AIRLINE_DATA_CHAR_LIMIT", "3000"))
-
-
-# =========================
-# Redis cache
-# =========================
-
-# No default. An unset REDIS_URL means "no cache", which is the safe answer
-# on a hosted service - guessing localhost there would point at nothing and
-# make every request pay a failed connection.
-REDIS_URL = os.getenv("REDIS_URL") or None
-
-# Explicit off switch. Caching also requires REDIS_URL to be set at all.
-CACHE_ENABLED = (
-    os.getenv("CACHE_ENABLED", "true").lower() not in ("false", "0", "no")
-    and REDIS_URL is not None
-)
-
-# How long to wait before retrying a Redis connection that failed. Without
-# this a single blip - a restart, a deploy - would disable the cache for the
-# whole life of the process.
-CACHE_RECONNECT_SECONDS = int(os.getenv("CACHE_RECONNECT_SECONDS", "60"))
-
-CACHE_KEY_PREFIX = os.getenv("CACHE_KEY_PREFIX", "travelbrain")
-
-# TTLs in seconds, chosen to match how fast each source actually changes.
-CACHE_TTL_AIRPORTS = int(os.getenv("CACHE_TTL_AIRPORTS", str(7 * 24 * 3600)))
-CACHE_TTL_AIRLINES = int(os.getenv("CACHE_TTL_AIRLINES", str(7 * 24 * 3600)))
-CACHE_TTL_HOTELS = int(os.getenv("CACHE_TTL_HOTELS", str(6 * 3600)))
-CACHE_TTL_WEATHER = int(os.getenv("CACHE_TTL_WEATHER", str(10 * 60)))
-CACHE_TTL_FORECAST = int(os.getenv("CACHE_TTL_FORECAST", str(3600)))
-CACHE_TTL_DESTINATION = int(os.getenv("CACHE_TTL_DESTINATION", str(24 * 3600)))
+    @field_validator("url")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """Enforces sslmode=require for managed cloud PostgreSQL providers."""
+        if v and "sslmode=" not in v:
+            separator = "&" if "?" in v else "?"
+            v = f"{v}{separator}sslmode=require"
+        return v
 
 
-# =========================
-# Cross-origin / cookies
-# =========================
-
-# Comma-separated origins allowed to call this API from a browser. Leave unset
-# when the frontend is proxied onto the same origin (see vercel.json), which
-# keeps the session cookie first-party.
-CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "").split(",")
-    if origin.strip()
-]
-
-# A cross-site cookie must be SameSite=None, and SameSite=None requires
-# Secure. Configuring CORS therefore implies both.
-COOKIE_SAMESITE = os.getenv(
-    "COOKIE_SAMESITE",
-    "none" if CORS_ORIGINS else "lax",
-).lower()
-
-COOKIE_SECURE = os.getenv(
-    "COOKIE_SECURE",
-    "true" if COOKIE_SAMESITE == "none" else "false",
-).lower() in ("true", "1", "yes")
+class RedisConfig(BaseModel):
+    url: str | None = Field(default=None, description="Redis cluster connection URL")
+    enabled: bool = True
+    reconnect_seconds: int = int(os.getenv("CACHE_RECONNECT_SECONDS", "60"))
+    key_prefix: str = "travelbrain"
+    ttl_airports: int = 7 * 24 * 3600
+    ttl_airlines: int = 7 * 24 * 3600
+    ttl_hotels: int = 6 * 3600
+    ttl_weather: int = 600
+    ttl_forecast: int = 3600
+    ttl_destination: int = 24 * 3600
 
 
-def get_groq_api_key() -> str:
-    if not GROQ_API_KEY:
-        raise ValueError(
-            "GROQ_API_KEY is missing. Please add it to your .env file."
-        )
+class LLMConfig(BaseModel):
+    groq_api_key: SecretStr = Field(..., description="Groq API Key for agent execution")
+    model: str = Field(
+        default="openai/gpt-oss-20b", description="Groq Model Identifier"
+    )
 
-    return GROQ_API_KEY
-
-
-def normalize_database_url(database_url: str) -> str:
-    """Default to sslmode=require, which managed Postgres providers expect."""
-
-    if "sslmode=" not in database_url:
-        separator = "&" if "?" in database_url else "?"
-        database_url = f"{database_url}{separator}sslmode=require"
-
-    return database_url
+    @field_validator("groq_api_key")
+    @classmethod
+    def validate_groq_api_key(cls, v: SecretStr) -> SecretStr:
+        raw_key = v.get_secret_value().strip()
+        if not raw_key or len(raw_key) < 5:
+            raise ValueError("GROQ_API_KEY appears invalid or too short.")
+        return v
 
 
-def get_database_url() -> str:
-    if not DATABASE_URL:
-        raise ValueError(
-            "DATABASE_URL is missing. Please add your Render PostgreSQL "
-            "External Database URL to .env"
-        )
+class ExternalAPIsConfig(BaseModel):
+    tavily_api_key: SecretStr = Field(
+        ..., description="Tavily API Key for hotel searches"
+    )
+    aviationstack_api_key: SecretStr = Field(
+        ..., description="AviationStack API Key for flight data"
+    )
+    openweather_api_key: SecretStr = Field(
+        ..., description="OpenWeather API Key for live weather/forecasts"
+    )
 
-    return normalize_database_url(DATABASE_URL)
+
+class TruncationConfig(BaseModel):
+    airport_data_char_limit: int = 3000
+    airline_data_char_limit: int = 3000
+
+
+class Settings(BaseSettings):
+    app: AppConfig = Field(default_factory=AppConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    db: DatabaseConfig
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    llm: LLMConfig
+    apis: ExternalAPIsConfig
+    truncation: TruncationConfig = Field(default_factory=TruncationConfig)
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        # Maps double underscore env vars (e.g., LLM__GROQ_API_KEY or DB__URL)
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
