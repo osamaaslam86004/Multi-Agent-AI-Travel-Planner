@@ -1,43 +1,31 @@
 name: Release Workflow
-
 on:
   push:
     tags:
-      - 'v*.*.*'
-
+      - "v*.*.*"
 permissions:
   contents: write
-
 jobs:
   build-and-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
-
-      - name: Build Frontend Artifacts
-        run: |
-          chmod +x scripts/build-frontend.sh
-          ./scripts/build-frontend.sh
-
+          python-version: "3.11"
       - name: Package Release Asset
         run: |
-          tar -czvf travelbrain-${{ github.ref_name }}.tar.gz dist/
-
+          tar -czvf travelbrain-${{ github.ref_name }}.tar.gz \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            --exclude='.pytest_cache' \
+            .
       - name: Create Release Notes & Tag Release
         uses: softprops/action-gh-release@v2
         with:
