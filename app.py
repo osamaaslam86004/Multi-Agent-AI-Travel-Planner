@@ -1,8 +1,10 @@
+# app.py
 import os
-from pathlib import Path
 import traceback
-import uvicorn
+from pathlib import Path
 
+import nest_asyncio
+import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -11,8 +13,6 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from src.api.sessions import (
-    SESSION_COOKIE,
-    SESSION_TTL_SECONDS,
     clear_credentials,
     get_credentials_for,
     new_session_id,
@@ -25,47 +25,32 @@ from src.config.session import (
     credential_status,
     use_credentials,
 )
-from src.config.settings import COOKIE_SAMESITE, COOKIE_SECURE, CORS_ORIGINS
+from src.config.settings import settings
 from src.graph.runner import run_travel_agent
 
-# This is to allow nested event loops for async calls in FastAPI
-import nest_asyncio
 nest_asyncio.apply()
-
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
 app = FastAPI(
-    title="TravelBrain AI",
-    description="LangGraph Multi-Agent Travel Planner with FastAPI Frontend",
-    version="1.0.0"
+    title=settings.app.name,
+    description=settings.app.description,
+    version=settings.app.version,
 )
 
-
-# Only needed when the browser talks to this API on a different origin. With
-# the Vercel rewrite the frontend is same-origin, so this stays inactive.
-if CORS_ORIGINS:
+# Configure CORS using settings.security
+if settings.security.cors_origins:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_origins=settings.security.cors_origins,
+        allow_credentials=settings.security.allow_credentials,
+        allow_methods=settings.security.allow_methods,
+        allow_headers=settings.security.allow_headers,
     )
 
-
-app.mount(
-    "/static",
-    StaticFiles(directory=str(FRONTEND_DIR / "static")),
-    name="static"
-)
-
-
-templates = Jinja2Templates(
-    directory=str(FRONTEND_DIR / "templates")
-)
-
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
 
 
 class TravelRequest(BaseModel):
@@ -83,36 +68,29 @@ class ConfigRequest(BaseModel):
     database_url: str | None = None
 
 
-
 def _session_id(request: Request) -> str | None:
-    return request.cookies.get(SESSION_COOKIE)
+    return request.cookies.get(settings.security.session_cookie_name)
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
     response.set_cookie(
-        SESSION_COOKIE,
+        settings.security.session_cookie_name,
         session_id,
-        max_age=SESSION_TTL_SECONDS,
+        max_age=settings.security.session_ttl_seconds,
         httponly=True,
-        samesite=COOKIE_SAMESITE,
-        secure=COOKIE_SECURE,
+        samesite=settings.security.cookie_samesite,
+        secure=settings.security.cookie_secure,
     )
-
 
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={}
-    )
+    return templates.TemplateResponse(request=request, name="index.html", context={})
 
 
 # =========================
 # Credentials
 # =========================
-
 @app.get("/api/config")
 async def read_config(request: Request):
     """What is configured, and where it came from. Never returns a secret."""
@@ -129,12 +107,10 @@ async def write_config(request: Request, body: ConfigRequest):
     Store credentials for this browser session. Each supplied value is
     checked against the real service before being accepted.
     """
-
     session_id = _session_id(request) or new_session_id()
-
     errors = {}
-
     groq_key = (body.groq_api_key or "").strip()
+
     if groq_key:
         ok, detail = check_groq_api_key(groq_key)
         if not ok:
@@ -182,29 +158,21 @@ async def reset_config(request: Request):
 # =========================
 # Planning
 # =========================
-
 @app.post("/api/travel")
 async def travel_planner(request: Request, request_data: TravelRequest):
     credentials = get_credentials_for(_session_id(request))
 
     try:
         user_message = request_data.message.strip()
-
         if not user_message:
             return JSONResponse(
                 status_code=400,
-                content={
-                    "success": False,
-                    "error": "Message cannot be empty."
-                }
+                content={"success": False, "error": "Message cannot be empty."},
             )
-
         with use_credentials(credentials):
             result = run_travel_agent(
-                user_input=user_message,
-                thread_id=request_data.thread_id
+                user_input=user_message, thread_id=request_data.thread_id
             )
-
         return JSONResponse(
             content={
                 "success": True,
@@ -217,30 +185,21 @@ async def travel_planner(request: Request, request_data: TravelRequest):
                 "llm_calls": result["llm_calls"],
             }
         )
-
     except MissingCredentialsError as e:
-        # The frontend turns this into a prompt to open Settings.
         return JSONResponse(
             status_code=428,
             content={
                 "success": False,
                 "error": str(e),
                 "missing": e.missing,
-            }
+            },
         )
-
     except Exception as e:
         print("ERROR:", e)
         traceback.print_exc()
-
         return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": str(e)
-            }
+            status_code=500, content={"success": False, "error": str(e)}
         )
-
 
 
 @app.head("/", include_in_schema=False)
@@ -259,7 +218,7 @@ async def health_check(request: Request):
 
     return {
         "status": "ok",
-        "message": "AI Travel Planner API is running",
+        "message": f"{settings.app.name} API is running",
         "ready": status["ready"],
         "missing": status["missing"],
         "cache": cache.status(),
@@ -271,13 +230,10 @@ async def favicon():
     return JSONResponse(content={})
 
 
-
 if __name__ == "__main__":
-    # Defaults suit local development. In Docker, HOST is set to 0.0.0.0
-    # so the port is reachable from outside the container.
     uvicorn.run(
         "app:app",
         host=os.getenv("HOST", "127.0.0.1"),
         port=int(os.getenv("PORT", "8000")),
-        reload=os.getenv("RELOAD", "true").lower() not in ("false", "0", "no")
+        reload=os.getenv("RELOAD", "true").lower() not in ("false", "0", "no"),
     )

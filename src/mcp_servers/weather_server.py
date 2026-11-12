@@ -1,7 +1,8 @@
-from mcp.server.fastmcp import FastMCP
+import os
+
 import requests
-import os 
 from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
@@ -16,11 +17,7 @@ def get_current_weather(city: str):
 
     response = requests.get(
         "https://api.openweathermap.org/data/2.5/weather",
-        params={
-            "q": city,
-            "appid": OPENWEATHER_API_KEY,
-            "units": "metric"
-        }
+        params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric"},
     )
 
     data = response.json()
@@ -34,28 +31,18 @@ def get_current_weather(city: str):
         "feels_like_c": data["main"]["feels_like"],
         "humidity": data["main"]["humidity"],
         "condition": data["weather"][0]["description"],
-        "wind_speed": data["wind"]["speed"]
+        "wind_speed": data["wind"]["speed"],
     }
-
 
 
 @mcp.tool()
 def get_forecast(city: str):
 
-    url = (
-        "https://api.openweathermap.org/data/2.5/forecast"
-    )
+    url = "https://api.openweathermap.org/data/2.5/forecast"
 
-    params = {
-        "q": city,
-        "appid": OPENWEATHER_API_KEY,
-        "units": "metric"
-    }
+    params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric"}
 
-    response = requests.get(
-        url,
-        params=params
-    )
+    response = requests.get(url, params=params)
 
     data = response.json()
 
@@ -63,21 +50,15 @@ def get_forecast(city: str):
 
     # Return first 5 forecast entries
     for item in data["list"][:5]:
-
         forecast.append(
             {
                 "datetime": item["dt_txt"],
                 "temperature": item["main"]["temp"],
-                "weather": item["weather"][0]["description"]
+                "weather": item["weather"][0]["description"],
             }
         )
 
-    return {
-        "city": city,
-        "forecast": forecast
-    }
-
-
+    return {"city": city, "forecast": forecast}
 
 
 if __name__ == "__main__":
