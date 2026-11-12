@@ -21,10 +21,12 @@ jobs:
       - name: Package Release Asset
         run: |
           tar -czvf travelbrain-${{ github.ref_name }}.tar.gz \
+            --exclude='travelbrain-*.tar.gz' \
             --exclude='.git' \
             --exclude='.venv' \
             --exclude='__pycache__' \
             --exclude='.pytest_cache' \
+            .
             .
       - name: Create Release Notes & Tag Release
         uses: softprops/action-gh-release@v2
