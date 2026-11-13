@@ -29,16 +29,13 @@ from src.config.settings import settings
 from src.graph.runner import run_travel_agent
 
 nest_asyncio.apply()
-
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
-
 app = FastAPI(
     title=settings.app.name,
     description=settings.app.description,
     version=settings.app.version,
 )
-
 # Configure CORS using settings.security
 if settings.security.cors_origins:
     app.add_middleware(
@@ -48,7 +45,6 @@ if settings.security.cors_origins:
         allow_methods=settings.security.allow_methods,
         allow_headers=settings.security.allow_headers,
     )
-
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
 
@@ -94,9 +90,7 @@ async def home(request: Request):
 @app.get("/api/config")
 async def read_config(request: Request):
     """What is configured, and where it came from. Never returns a secret."""
-
     credentials = get_credentials_for(_session_id(request))
-
     with use_credentials(credentials):
         return JSONResponse(content=credential_status())
 
@@ -110,18 +104,15 @@ async def write_config(request: Request, body: ConfigRequest):
     session_id = _session_id(request) or new_session_id()
     errors = {}
     groq_key = (body.groq_api_key or "").strip()
-
     if groq_key:
         ok, detail = check_groq_api_key(groq_key)
         if not ok:
             errors["groq_api_key"] = detail
-
     database_url = (body.database_url or "").strip()
     if database_url:
         ok, detail = check_database_url(database_url)
         if not ok:
             errors["database_url"] = detail
-
     if errors:
         response = JSONResponse(
             status_code=400,
@@ -129,28 +120,22 @@ async def write_config(request: Request, body: ConfigRequest):
         )
         _set_session_cookie(response, session_id)
         return response
-
     credentials = store_credentials(
         session_id,
         groq_api_key=body.groq_api_key,
         database_url=body.database_url,
     )
-
     with use_credentials(credentials):
         payload = {"success": True, **credential_status()}
-
     response = JSONResponse(content=payload)
     _set_session_cookie(response, session_id)
-
     return response
 
 
 @app.delete("/api/config")
 async def reset_config(request: Request):
     """Drop session keys and fall back to whatever the server's .env has."""
-
     clear_credentials(_session_id(request))
-
     with use_credentials(None):
         return JSONResponse(content={"success": True, **credential_status()})
 
@@ -161,7 +146,6 @@ async def reset_config(request: Request):
 @app.post("/api/travel")
 async def travel_planner(request: Request, request_data: TravelRequest):
     credentials = get_credentials_for(_session_id(request))
-
     try:
         user_message = request_data.message.strip()
         if not user_message:
@@ -205,17 +189,14 @@ async def travel_planner(request: Request, request_data: TravelRequest):
 @app.head("/", include_in_schema=False)
 async def home_head():
     """Hosting platforms probe with HEAD to detect an open port."""
-
     return Response(status_code=200)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check(request: Request):
     credentials = get_credentials_for(_session_id(request))
-
     with use_credentials(credentials):
         status = credential_status()
-
     return {
         "status": "ok",
         "message": f"{settings.app.name} API is running",

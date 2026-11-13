@@ -1,5 +1,4 @@
 name: travelbrain
-
 services:
   app:
     build:
@@ -13,12 +12,10 @@ services:
       # the network, which is what the healthcheck targets.
       #   APP_PORT=8001 docker compose up -d
       - "${APP_PORT:-8000}:8000"
-
     # API keys and DATABASE_URL come from .env. Nothing secret is baked
     # into the image - see .dockerignore.
     env_file:
       - .env
-
     environment:
       # Overrides the .env value: inside the compose network Redis is
       # reachable by service name, not on localhost.
@@ -26,11 +23,9 @@ services:
       CACHE_ENABLED: "true"
       HOST: 0.0.0.0
       PORT: "8000"
-
     depends_on:
       redis:
         condition: service_healthy
-
     volumes:
       # Download cache for uv. The aviationstack MCP server itself is already
       # baked into the image at UV_TOOL_DIR (/home/app/.local/share/uv/tools),
@@ -38,14 +33,13 @@ services:
       # even on a cold volume. This just avoids re-downloading on the fallback
       # path where the build-time install did not succeed.
       - uv-cache:/home/app/.cache/uv
-
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
+      test:
+        ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
       interval: 30s
       timeout: 5s
       start_period: 20s
       retries: 3
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -53,7 +47,6 @@ services:
       # Exposed so you can run the app outside Docker against this Redis.
       # Drop this line in production.
       - "${REDIS_PORT:-6379}:6379"
-
     # Redis is a pure cache here - LangGraph checkpoints live in PostgreSQL -
     # so evicting under memory pressure is safe. appendonly keeps a warm cache
     # across restarts.
@@ -62,17 +55,14 @@ services:
       --appendonly yes
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
-
     volumes:
       - redis-data:/data
-
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       start_period: 5s
       retries: 5
-
   # Optional local PostgreSQL for the LangGraph checkpointer, for working
   # offline instead of against Render. Not started by default.
   #
@@ -98,7 +88,6 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 5
-
 volumes:
   redis-data:
   postgres-data:

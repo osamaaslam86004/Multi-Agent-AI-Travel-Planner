@@ -1,0 +1,5622 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+The content has been processed where empty lines have been removed.
+
+# File Summary
+
+## Purpose
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+## File Format
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  a. A header with the file path (## File: path/to/file)
+  b. The full contents of the file in a code block
+
+## Usage Guidelines
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+- Pay special attention to the Repository Description. These contain important context and guidelines specific to this project.
+
+## Notes
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: **/migrations/*, **/*lock*, poetry.lock, Pipfile.lock, pdm.lock, requirements*.txt, **/__pycache__/**, **/*.pyc, **/*.pyo, **/*.pyd, **/.pytest_cache/**, **/.mypy_cache/**, **/.ruff_cache/**, **/.coverage, **/htmlcov/**, **/*.log, **/*.sqlite3, **/*.db, **/media/**, **/dist/**, **/build/**, **/.gitignore, **/LICENSE*, **/CHANGELOG*, **/GEMINI*, **/.env*, **/secrets.*, **/*.pem, **/*.key, **/id_rsa*, **/id_ed25519*, **/credentials.json, **/service-account*.json, **/*.tfstate*, **/*.tfvars, **/*.sql, **/*.dump
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Empty lines have been removed from all files
+- Files are sorted by Git change count (files with more changes are at the bottom)
+
+# User Provided Header
+Codebase snapshot generated for architectural audit.
+
+# Directory Structure
+`````
+.github/
+  workflows/
+    release.yml
+frontend/
+  static/
+    css/
+      styles.css
+    js/
+      app.js
+      markdown.js
+  templates/
+    index.html
+src/
+  agents/
+    __init__.py
+    base.py
+    destination.py
+    final_agent.py
+    flight_agent.py
+    hotel_agent.py
+    itinerary_agent.py
+    prompts_registry.py
+    prompts.py
+    weather_agent.py
+  api/
+    __init__.py
+    sessions.py
+    validation.py
+  clients/
+    __init__.py
+    cache.py
+    checkpointer.py
+    llm_provider.py
+    llm.py
+  config/
+    __init__.py
+    session.py
+    settings.py
+  graph/
+    __init__.py
+    graph.py
+    runner.py
+    state.py
+  mcp_servers/
+    __init__.py
+    config.py
+    diagnostics.py
+    local.py
+    registry.py
+    remote.py
+    weather_server.py
+  utils/
+    __init__.py
+    async_utils.py
+    telemetry.py
+  __init__.py
+.dockerignore
+.python-version
+app.py
+docker-compose.yml
+Dockerfile
+pyproject.toml
+README.md
+repomix.config.json
+`````
+
+# Files
+
+## File: src/agents/base.py
+`````python
+"""Base interfaces, abstract protocols, and foundation classes for TravelBrain agents."""
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+if TYPE_CHECKING:
+    from src.graph.state import TravelState
+else:
+    TravelState = dict[str, Any]
+@runtime_checkable
+class AgentProtocol(Protocol):
+    """Runtime-checkable protocol defining the execution contract for all agent nodes."""
+    def __call__(self, state: TravelState) -> dict[str, Any]:
+        """Execute the agent given the current workflow state."""
+        ...
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        """Execute the agent given the current workflow state (explicit method)."""
+        ...
+class BaseAgent(ABC, AgentProtocol):
+    """Abstract base class for all enterprise TravelBrain agents."""
+    def __init__(self, name: str | None = None) -> None:
+        self.name = name or self.__class__.__name__
+    @abstractmethod
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        """Core execution logic to be implemented by concrete agents."""
+    def __call__(self, state: TravelState) -> dict[str, Any]:
+        """Enables the agent instance to be invoked directly as a LangGraph node callable."""
+        return self.execute(state)
+`````
+
+## File: src/agents/prompts_registry.py
+`````python
+"""Centralized registry for managing agent prompt templates and configuration."""
+from typing import Any
+class PromptRegistry:
+    """Centralized registry housing all agent system and user prompt templates."""
+    def __init__(self) -> None:
+        self._prompts: dict[str, str] = {
+            "flight_system": "You are an expert travel flight planner.",
+            "flight_user": """You are a travel flight expert.
+User Query:
+{query}
+Airport Information:
+{airport_data}
+Airline Information:
+{airline_data}
+Generate:
+1. Likely departure airport
+2. Likely arrival airport
+3. Airlines serving this route
+4. Typical flight duration
+5. Estimated airfare range
+6. Peak season pricing warning
+7. Booking advice
+Return concise travel guidance.""",
+            "hotel_search_query": "Best hotels for {user_query}",
+            "destination_extraction": """Extract only the destination city or country.
+Query:
+{query}
+Return only destination name.""",
+            "weather_results_template": """Current Weather:
+{weather_data}
+Forecast:
+{forecast_data}""",
+            "itinerary_system": "You are an expert travel planner.",
+            "itinerary_user": """Create a complete travel itinerary.
+User Query:
+{user_query}
+Flight Results:
+{flight_results}
+Hotel Results:
+{hotel_results}
+Weather Results:
+{weather_results}
+Make the itinerary practical, budget-aware, and easy to follow.""",
+            "final_system": "You are a professional AI travel booking assistant.",
+            "final_user": """Generate the final travel response for the user.
+User Request:
+{user_query}
+Flights:
+{flight_results}
+Hotels:
+{hotel_results}
+Weather:
+{weather_results}
+Itinerary:
+{itinerary}
+Format the final answer beautifully using these sections:
+1. Trip Summary
+2. Flight Information
+3. Hotel Suggestions
+4. Weather Information
+5. Day-by-Day Itinerary
+6. Estimated Budget
+7. Final Recommendations
+Important:
+- Be clear and practical.
+- Mention that live flight API may not provide ticket prices if pricing is unavailable.
+- Include weather-based travel advice.
+- Keep the response useful for real travel planning.""",
+        }
+    def register_prompt(self, name: str, template: str) -> None:
+        """Register or override a prompt template."""
+        self._prompts[name] = template
+    def get_prompt(self, name: str) -> str:
+        """Retrieve a raw prompt template by name."""
+        if name not in self._prompts:
+            raise KeyError(f"Prompt '{name}' not found in registry.")
+        return self._prompts[name]
+    def format_prompt(self, name: str, **kwargs: Any) -> str:
+        """Retrieve and format a prompt template with provided variables."""
+        template = self.get_prompt(name)
+        return template.format(**kwargs)
+# Singleton prompt registry instance
+default_prompt_registry = PromptRegistry()
+`````
+
+## File: src/clients/llm_provider.py
+`````python
+"""Standardized LLM provider interfaces and implementations isolating vendor client logic."""
+from abc import ABC, abstractmethod
+from functools import lru_cache
+from typing import Any
+from langchain_core.messages import AnyMessage, BaseMessage
+from langchain_groq import ChatGroq
+from src.config.session import require, resolve_groq_api_key
+from src.config.settings import settings
+class BaseLLMProvider(ABC):
+    """Abstract base provider isolating LLM vendor and client interaction logic."""
+    @abstractmethod
+    def invoke(self, messages: list[BaseMessage] | str, **kwargs: Any) -> AnyMessage:
+        """Invoke the underlying LLM provider synchronously."""
+    @abstractmethod
+    async def ainvoke(
+        self, messages: list[BaseMessage] | str, **kwargs: Any
+    ) -> AnyMessage:
+        """Invoke the underlying LLM provider asynchronously."""
+    @abstractmethod
+    def get_client(self) -> Any:
+        """Retrieve the underlying model client instance."""
+class GroqLLMProvider(BaseLLMProvider):
+    """Concrete Groq LLM Provider implementation."""
+    def __init__(
+        self, model_name: str | None = None, api_key: str | None = None
+    ) -> None:
+        self.model_name = model_name or settings.llm.model
+        self._explicit_api_key = api_key
+    def _resolve_client(self) -> ChatGroq:
+        require("GROQ_API_KEY")
+        api_key = self._explicit_api_key or resolve_groq_api_key()
+        return _cached_groq_client(self.model_name, api_key)
+    def get_client(self) -> ChatGroq:
+        return self._resolve_client()
+    def invoke(self, messages: list[BaseMessage] | str, **kwargs: Any) -> AnyMessage:
+        client = self.get_client()
+        return client.invoke(messages, **kwargs)
+    async def ainvoke(
+        self, messages: list[BaseMessage] | str, **kwargs: Any
+    ) -> AnyMessage:
+        client = self.get_client()
+        return await client.ainvoke(messages, **kwargs)
+@lru_cache(maxsize=8)
+def _cached_groq_client(model: str, api_key: str) -> ChatGroq:
+    """Cached ChatGroq client factory preventing redundant client reinstantiations."""
+    return ChatGroq(model=model, api_key=api_key)
+class LLMProviderRegistry:
+    """Registry managing available LLM providers."""
+    def __init__(self) -> None:
+        self._providers: dict[str, BaseLLMProvider] = {}
+        # Pre-register default Groq provider
+        self._providers["groq"] = GroqLLMProvider()
+    def get(self, name: str = "groq") -> BaseLLMProvider:
+        if name not in self._providers:
+            raise KeyError(f"LLM Provider '{name}' not found.")
+        return self._providers[name]
+    def register(self, name: str, provider: BaseLLMProvider) -> None:
+        self._providers[name] = provider
+default_llm_provider_registry = LLMProviderRegistry()
+def get_llm_provider(name: str = "groq") -> BaseLLMProvider:
+    """Retrieve an LLM provider instance from the registry."""
+    return default_llm_provider_registry.get(name)
+`````
+
+## File: src/mcp_servers/registry.py
+`````python
+"""Centralized tool registry and tool adapters decoupling tool execution from agent nodes."""
+import asyncio
+import inspect
+from collections.abc import Callable
+from typing import (
+    Any,
+    Protocol,
+    runtime_checkable,
+)
+@runtime_checkable
+class ToolAdapter(Protocol):
+    """Protocol for decoupling tool execution mechanics from agent logic."""
+    name: str
+    def execute(self, **kwargs: Any) -> Any:
+        """Execute tool synchronously."""
+        ...
+    async def aexecute(self, **kwargs: Any) -> Any:
+        """Execute tool asynchronously."""
+        ...
+class BaseToolAdapter(ToolAdapter):
+    """Wrapper adapting functions into standard ToolAdapter objects."""
+    def __init__(
+        self, name: str, func: Callable[..., Any], description: str = ""
+    ) -> None:
+        self.name = name
+        self.func = func
+        self.description = description
+        self.is_async = inspect.iscoroutinefunction(func)
+    def execute(self, **kwargs: Any) -> Any:
+        if self.is_async:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.func(**kwargs))
+            else:
+                # If running inside an existing event loop, create a task or run via nest_asyncio / run_async
+                from src.utils.async_utils import run_async
+                return run_async(self.func(**kwargs))
+        return self.func(**kwargs)
+    async def aexecute(self, **kwargs: Any) -> Any:
+        if self.is_async:
+            return await self.func(**kwargs)
+        return self.func(**kwargs)
+class ToolRegistry:
+    """Centralized registry for managing and invoking tool adapters across MCP servers."""
+    def __init__(self) -> None:
+        self._registry: dict[str, ToolAdapter] = {}
+    def register(self, adapter: ToolAdapter) -> None:
+        """Register a ToolAdapter instance."""
+        self._registry[adapter.name] = adapter
+    def register_function(
+        self, name: str, func: Callable[..., Any], description: str = ""
+    ) -> ToolAdapter:
+        """Helper to register a callable directly as a tool."""
+        adapter = BaseToolAdapter(name=name, func=func, description=description)
+        self.register(adapter)
+        return adapter
+    def get_tool(self, name: str) -> ToolAdapter:
+        """Retrieve a registered tool adapter by name."""
+        if name not in self._registry:
+            available = ", ".join(sorted(self._registry.keys())) or "none"
+            raise KeyError(
+                f"Tool '{name}' not found in registry. Available tools: {available}"
+            )
+        return self._registry[name]
+    def execute_tool(self, tool_name: str, **kwargs: Any) -> Any:
+        """Execute a tool synchronously by name."""
+        tool = self.get_tool(tool_name)
+        return tool.execute(**kwargs)
+    async def aexecute_tool(self, tool_name: str, **kwargs: Any) -> Any:
+        """Execute a tool asynchronously by name."""
+        tool = self.get_tool(tool_name)
+        return await tool.aexecute(**kwargs)
+    def list_tools(self) -> list[str]:
+        """List names of all registered tools."""
+        return sorted(list(self._registry.keys()))
+# Global default ToolRegistry instance
+default_tool_registry = ToolRegistry()
+def _initialize_default_registry(registry: ToolRegistry) -> None:
+    """Populate default MCP tools into the registry."""
+    from src.mcp_servers.local import (
+        aviation_mcp_call,
+        forecast_mcp_search,
+        weather_mcp_search,
+    )
+    from src.mcp_servers.remote import tavily_mcp_search
+    registry.register_function(
+        "aviation_mcp_call", aviation_mcp_call, "Call AviationStack MCP tool"
+    )
+    registry.register_function(
+        "weather_mcp_search", weather_mcp_search, "Get current weather conditions"
+    )
+    registry.register_function(
+        "forecast_mcp_search", forecast_mcp_search, "Get weather forecast"
+    )
+    registry.register_function(
+        "tavily_mcp_search", tavily_mcp_search, "Search hotels / web via Tavily"
+    )
+_initialize_default_registry(default_tool_registry)
+`````
+
+## File: src/utils/telemetry.py
+`````python
+"""Unified logging, performance monitoring, and telemetry tracing hooks."""
+import functools
+import inspect
+import logging
+import time
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
+# Setup structured logger for telemetry
+logger = logging.getLogger("travelbrain.telemetry")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+class TelemetryCollector:
+    """In-memory telemetry collector recording performance metrics and execution traces."""
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+    def record(
+        self,
+        operation_name: str,
+        duration_sec: float,
+        success: bool,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        record_data = {
+            "timestamp": time.time(),
+            "operation": operation_name,
+            "duration_ms": round(duration_sec * 1000, 2),
+            "success": success,
+            "error": error,
+            "metadata": metadata or {},
+        }
+        self.records.append(record_data)
+    def get_records(self) -> list[dict[str, Any]]:
+        return list(self.records)
+    def clear(self) -> None:
+        self.records.clear()
+# Global telemetry collector instance
+global_telemetry = TelemetryCollector()
+F = TypeVar("F", bound=Callable[..., Any])
+def track_performance(name: str | None = None) -> Callable[[F], F]:
+    """
+    Decorator for tracking performance, logging duration, and collecting telemetry traces
+    for both sync and async agent operations and tool calls.
+    """
+    def decorator(func: F) -> F:
+        op_name = name or func.__name__
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                start_time = time.perf_counter()
+                logger.info(f"Starting async operation: {op_name}")
+                try:
+                    result = await func(*args, **kwargs)
+                    duration = time.perf_counter() - start_time
+                    logger.info(
+                        f"Completed async operation: {op_name} in {duration * 1000:.2f}ms"
+                    )
+                    global_telemetry.record(op_name, duration, success=True)
+                    return result
+                except Exception as e:
+                    duration = time.perf_counter() - start_time
+                    logger.error(
+                        f"Failed async operation: {op_name} after {duration * 1000:.2f}ms with error: {e}"
+                    )
+                    global_telemetry.record(
+                        op_name, duration, success=False, error=str(e)
+                    )
+                    raise
+            return cast(F, async_wrapper)
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                start_time = time.perf_counter()
+                logger.info(f"Starting operation: {op_name}")
+                try:
+                    result = func(*args, **kwargs)
+                    duration = time.perf_counter() - start_time
+                    logger.info(
+                        f"Completed operation: {op_name} in {duration * 1000:.2f}ms"
+                    )
+                    global_telemetry.record(op_name, duration, success=True)
+                    return result
+                except Exception as e:
+                    duration = time.perf_counter() - start_time
+                    logger.error(
+                        f"Failed operation: {op_name} after {duration * 1000:.2f}ms with error: {e}"
+                    )
+                    global_telemetry.record(
+                        op_name, duration, success=False, error=str(e)
+                    )
+                    raise
+            return cast(F, sync_wrapper)
+    return decorator
+`````
+
+## File: frontend/static/css/styles.css
+`````css
+/* ============================================================
+   TravelBrain AI — design tokens
+   ============================================================ */
+:root {
+  /* light theme (default) */
+  --bg: #f4f6fb;
+  --bg-solid: #eef1f8;
+  --surface: rgba(255, 255, 255, 0.78);
+  --surface-solid: #ffffff;
+  --surface-2: rgba(255, 255, 255, 0.55);
+  --elevated: rgba(255, 255, 255, 0.92);
+  --text: #131a2a;
+  --text-soft: #4a5568;
+  --text-muted: #7b869c;
+  --border: rgba(19, 26, 42, 0.1);
+  --border-strong: rgba(19, 26, 42, 0.18);
+  --accent: #0d9488;
+  --accent-2: #0891b2;
+  --accent-soft: rgba(13, 148, 136, 0.12);
+  --accent-text: #0f766e;
+  --amber: #d97706;
+  --violet: #7c3aed;
+  --rose: #e11d48;
+  --shadow-sm:
+    0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --shadow-md:
+    0 4px 12px rgba(16, 24, 40, 0.07), 0 12px 28px rgba(16, 24, 40, 0.07);
+  --shadow-lg:
+    0 8px 24px rgba(16, 24, 40, 0.09), 0 24px 60px rgba(16, 24, 40, 0.12);
+  --blob-1: #14b8a6;
+  --blob-2: #6366f1;
+  --blob-3: #f59e0b;
+  --blob-opacity: 0.28;
+  --grid-color: rgba(19, 26, 42, 0.045);
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --font:
+    "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    Arial, sans-serif;
+  --mono:
+    "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono",
+    monospace;
+}
+[data-theme="dark"] {
+  --bg: #070b16;
+  --bg-solid: #050810;
+  --surface: rgba(20, 27, 45, 0.62);
+  --surface-solid: #111827;
+  --surface-2: rgba(30, 41, 66, 0.45);
+  --elevated: rgba(24, 32, 52, 0.88);
+  --text: #e8edf7;
+  --text-soft: #a9b4c9;
+  --text-muted: #6f7c96;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --accent: #2dd4bf;
+  --accent-2: #38bdf8;
+  --accent-soft: rgba(45, 212, 191, 0.14);
+  --accent-text: #5eead4;
+  --amber: #fbbf24;
+  --violet: #a78bfa;
+  --rose: #fb7185;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.38);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.5);
+  --blob-1: #0d9488;
+  --blob-2: #4338ca;
+  --blob-3: #b45309;
+  --blob-opacity: 0.4;
+  --grid-color: rgba(255, 255, 255, 0.035);
+}
+/* ============================================================
+   base
+   ============================================================ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+/* The `hidden` attribute must always win. Without this, any class that sets
+   `display` (e.g. .modal { display: flex }) silently overrides it, because a
+   class selector outranks the user-agent [hidden] rule. */
+[hidden] {
+  display: none !important;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+p {
+  margin: 0;
+}
+button {
+  font: inherit;
+  color: inherit;
+}
+svg {
+  width: 1em;
+  height: 1em;
+  display: block;
+}
+::selection {
+  background: var(--accent);
+  color: #04121a;
+}
+/* scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: content-box;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+/* ============================================================
+   ambient background
+   ============================================================ */
+.aurora {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: var(--blob-opacity);
+  will-change: transform;
+}
+.blob-1 {
+  width: 46vw;
+  height: 46vw;
+  background: var(--blob-1);
+  top: -12vw;
+  left: -8vw;
+  animation: drift1 26s ease-in-out infinite;
+}
+.blob-2 {
+  width: 40vw;
+  height: 40vw;
+  background: var(--blob-2);
+  bottom: -14vw;
+  right: -6vw;
+  animation: drift2 32s ease-in-out infinite;
+}
+.blob-3 {
+  width: 30vw;
+  height: 30vw;
+  background: var(--blob-3);
+  top: 40%;
+  left: 55%;
+  animation: drift3 38s ease-in-out infinite;
+}
+.grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--grid-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(
+    ellipse 90% 70% at 50% 30%,
+    #000 30%,
+    transparent 78%
+  );
+  -webkit-mask-image: radial-gradient(
+    ellipse 90% 70% at 50% 30%,
+    #000 30%,
+    transparent 78%
+  );
+}
+@keyframes drift1 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(6vw, 5vh) scale(1.14);
+  }
+}
+@keyframes drift2 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-7vw, -6vh) scale(1.1);
+  }
+}
+@keyframes drift3 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-5vw, 7vh) scale(0.88);
+  }
+}
+/* ============================================================
+   layout
+   ============================================================ */
+.layout {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+}
+/* ---------------- brand ---------------- */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  flex: none;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: var(--shadow-sm);
+  font-size: 19px;
+}
+.brand-text {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 17px;
+  letter-spacing: -0.03em;
+}
+.brand-text strong {
+  font-weight: 680;
+}
+.brand-text em {
+  font-style: normal;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+/* ---------------- api status chip ---------------- */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 5px 12px 5px 10px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-soft);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color 0.18s,
+    background 0.18s;
+}
+.status:hover {
+  border-color: var(--border-strong);
+  background: var(--elevated);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex: none;
+}
+.status[data-state="ok"] .status-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+}
+.status[data-state="down"] .status-dot {
+  background: var(--rose);
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.18);
+}
+.status[data-state="setup"] .status-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.2);
+}
+.status[data-state="setup"] {
+  color: var(--amber);
+  border-color: rgba(217, 119, 6, 0.35);
+}
+.status[data-state="down"] {
+  color: var(--rose);
+  border-color: rgba(225, 29, 72, 0.32);
+}
+.status[data-state="checking"] .status-dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+/* ---------------- main ---------------- */
+.main {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(to bottom, var(--surface), transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+/* ---------------- conversation ---------------- */
+.conversation {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  padding: 0 24px;
+}
+.messages {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+/* ---------------- hero ---------------- */
+.hero {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 8vh 0 24px;
+  text-align: center;
+  animation: rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.hero.is-hidden {
+  display: none;
+}
+.grad {
+  background: linear-gradient(
+    110deg,
+    var(--accent),
+    var(--accent-2) 55%,
+    var(--violet)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero-sub {
+  max-width: 560px;
+  margin: 16px auto 0;
+  font-size: 15.5px;
+  color: var(--text-soft);
+}
+.suggestions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+  margin-top: 34px;
+  text-align: left;
+}
+.suggestion {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.18s,
+    box-shadow 0.18s;
+}
+.suggestion:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+}
+.suggestion-emoji {
+  font-size: 24px;
+  flex: none;
+}
+.suggestion-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.suggestion-body strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.suggestion-body small {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* ---------------- messages ---------------- */
+.msg {
+  display: flex;
+  flex-direction: column;
+  animation: rise 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.msg-user {
+  align-items: flex-end;
+}
+.bubble-user {
+  max-width: min(600px, 88%);
+  padding: 12px 17px;
+  border-radius: var(--radius-lg) var(--radius-lg) 5px var(--radius-lg);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #04121a;
+  font-weight: 500;
+  box-shadow: 0 8px 24px -12px var(--accent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* result card */
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.card-avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 9px;
+  font-size: 16px;
+  color: #04121a;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.card-title {
+  flex: 1;
+  min-width: 0;
+}
+.card-title strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.card-title small {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.card-tools {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+.card-body {
+  padding: 20px 22px 22px;
+  animation: fade 0.25s ease both;
+}
+/* ---------------- progress bar ---------------- */
+.progress-card {
+  padding: 16px 20px 18px;
+}
+.progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.progress-label {
+  font-size: 13.5px;
+  font-weight: 550;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.progress-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.progress-meta b {
+  color: var(--accent-text);
+  font-weight: 650;
+}
+.progress-sep {
+  opacity: 0.45;
+}
+.progress-track {
+  height: 8px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  transition: width 0.3s linear;
+}
+.error-card {
+  border-color: rgba(225, 29, 72, 0.35);
+  background: linear-gradient(var(--surface), var(--surface));
+}
+.error-body {
+  display: flex;
+  gap: 12px;
+  padding: 16px 18px;
+}
+.error-body .error-ico {
+  color: var(--rose);
+  font-size: 20px;
+  flex: none;
+  margin-top: 2px;
+}
+.error-body strong {
+  display: block;
+  font-size: 13.5px;
+  margin-bottom: 3px;
+}
+.error-body p {
+  font-size: 13px;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+.error-body code {
+  display: block;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-x: auto;
+}
+/* ---------------- composer ---------------- */
+.composer-wrap {
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(to top, var(--surface) 60%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.composer {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 8px 8px 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--elevated);
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+.composer:focus-within {
+  border-color: var(--accent);
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 4px var(--accent-soft);
+}
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 200px;
+  padding: 8px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.55;
+  resize: none;
+  outline: none;
+}
+.composer textarea::placeholder {
+  color: var(--text-muted);
+}
+.composer-tool {
+  flex: none;
+  margin-bottom: 3px;
+}
+.composer-tool.is-on {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+.send-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+}
+.send-btn .spinner {
+  display: none;
+}
+.send-btn.is-busy .ico-send {
+  display: none;
+}
+.send-btn.is-busy .spinner {
+  display: block;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.28);
+  border-top-color: currentColor;
+  animation: spin 0.7s linear infinite;
+}
+/* ---------------- trip builder ---------------- */
+.builder {
+  max-width: 880px;
+  margin: 0 auto 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--elevated);
+  box-shadow: var(--shadow-md);
+  animation: rise 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.builder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 11px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.field-sm {
+  max-width: 110px;
+}
+.field > span,
+.field-span {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.field input {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+.field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.field input::placeholder {
+  color: var(--text-muted);
+}
+[data-theme="dark"]
+  .field
+  input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.75);
+}
+.builder-interests {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 550;
+}
+.builder-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 15px;
+}
+/* ---------------- buttons ---------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 15px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 0.12s,
+    filter 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn svg {
+  font-size: 15px;
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #04121a;
+  box-shadow: 0 6px 18px -8px var(--accent);
+}
+.btn-primary:hover {
+  filter: brightness(1.07);
+}
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+.btn-soft {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-color: var(--border);
+}
+.btn-soft:hover {
+  border-color: var(--accent);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--text-soft);
+  border-color: var(--border);
+}
+.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.btn-block {
+  width: 100%;
+}
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+.btn-xs {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+/* busy state for text buttons (the settings save button) */
+.btn .spinner {
+  display: none;
+}
+.btn.is-busy .btn-label {
+  opacity: 0.55;
+}
+.btn.is-busy .spinner {
+  display: block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.28);
+  border-top-color: currentColor;
+  animation: spin 0.7s linear infinite;
+}
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 17px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.icon-btn.sm {
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  border-radius: 7px;
+}
+[data-theme="dark"] .ico-sun {
+  display: block;
+}
+[data-theme="dark"] .ico-moon {
+  display: none;
+}
+[data-theme="light"] .ico-sun {
+  display: none;
+}
+[data-theme="light"] .ico-moon {
+  display: block;
+}
+/* ---------------- markdown output ---------------- */
+.md {
+  font-size: 14.5px;
+  color: var(--text-soft);
+  overflow-wrap: break-word;
+}
+.md > *:first-child {
+  margin-top: 0;
+}
+.md > *:last-child {
+  margin-bottom: 0;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  color: var(--text);
+  margin: 26px 0 10px;
+  letter-spacing: -0.02em;
+}
+.md h1 {
+  font-size: 21px;
+}
+.md h2 {
+  font-size: 18px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.md h3 {
+  font-size: 15.5px;
+}
+.md h4 {
+  font-size: 14px;
+  color: var(--text-soft);
+}
+.md p {
+  margin: 0 0 12px;
+}
+.md strong {
+  color: var(--text);
+  font-weight: 650;
+}
+.md em {
+  font-style: italic;
+}
+.md del {
+  opacity: 0.6;
+}
+.md ul,
+.md ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+.md li {
+  margin-bottom: 5px;
+}
+.md li::marker {
+  color: var(--accent);
+}
+.md ul ul,
+.md ol ol,
+.md ul ol,
+.md ol ul {
+  margin: 5px 0 0;
+}
+.md a {
+  color: var(--accent-text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-soft);
+}
+.md a:hover {
+  border-bottom-color: currentColor;
+}
+.md blockquote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--accent);
+  color: var(--text-muted);
+}
+.md hr {
+  margin: 20px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.md code {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.87em;
+  color: var(--accent-text);
+}
+.md pre {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow-x: auto;
+}
+.md pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.md th,
+.md td {
+  padding: 9px 13px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.md th {
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.md tr:last-child td {
+  border-bottom: 0;
+}
+.md-empty {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 20px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+/* ---------------- toast ---------------- */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 100;
+  transform: translate(-50%, 16px);
+  padding: 10px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 99px;
+  background: var(--elevated);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  font-weight: 550;
+  opacity: 0;
+  transition:
+    opacity 0.22s,
+    transform 0.22s;
+  pointer-events: none;
+}
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+/* ============================================================
+   responsive
+   ============================================================ */
+@media (max-width: 900px) {
+  .topbar {
+    padding: 10px 14px;
+    gap: 8px;
+  }
+  .conversation {
+    padding: 0 16px;
+  }
+  .composer-wrap {
+    padding: 10px 14px 14px;
+  }
+  .hero {
+    padding-top: 5vh;
+  }
+  .card-body {
+    padding: 16px 16px 18px;
+  }
+  .field-sm {
+    max-width: none;
+  }
+  /* keep the topbar to one line on small screens */
+  .topbar .btn-sm .btn-label {
+    display: none;
+  }
+  .topbar .btn-sm {
+    padding: 8px;
+  }
+  .status-text {
+    display: none;
+  }
+  .status {
+    padding: 7px;
+  }
+}
+@media (max-width: 560px) {
+  body {
+    font-size: 14.5px;
+  }
+  .suggestions {
+    grid-template-columns: 1fr;
+  }
+  .bubble-user {
+    max-width: 92%;
+  }
+  .brand-text em {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media print {
+  .aurora,
+  .topbar,
+  .gate,
+  .composer-wrap,
+  .progress-card,
+  .card-tools,
+  .modal,
+  .modal-scrim {
+    display: none !important;
+  }
+  body {
+    overflow: visible;
+    background: #fff;
+  }
+  .layout,
+  .main {
+    display: block;
+    height: auto;
+  }
+  .conversation {
+    overflow: visible;
+  }
+  .card {
+    border: 0;
+    box-shadow: none;
+    background: none;
+  }
+}
+/* ============================================================
+   settings modal
+   ============================================================ */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: fade 0.18s ease both;
+}
+.modal {
+  position: fixed;
+  z-index: 61;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow-lg);
+  animation: rise 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-heading {
+  flex: 1;
+  min-width: 0;
+}
+.modal-head h2 {
+  font-size: 16.5px;
+}
+.modal-head p {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.modal-body {
+  padding: 18px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.modal-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+}
+.cred-loading {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.cred {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.cred-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cred-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+}
+.badge {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+}
+.badge-env {
+  color: #16a34a;
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.badge-session {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: rgba(13, 148, 136, 0.3);
+}
+.badge-missing {
+  color: var(--amber);
+  background: rgba(217, 119, 6, 0.12);
+  border-color: rgba(217, 119, 6, 0.32);
+}
+.cred-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.cred-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cred-input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.cred-input::placeholder {
+  font-family: var(--font);
+  color: var(--text-muted);
+}
+.cred-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.cred-error {
+  font-size: 12px;
+  color: var(--rose);
+  line-height: 1.5;
+  word-break: break-word;
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* ============================================================
+   setup gate - shown in place of the hero when no keys are live
+   ============================================================ */
+.gate {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 8vh 0 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.gate-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  font-size: 26px;
+  color: var(--amber);
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+}
+.gate h2 {
+  font-size: clamp(24px, 4vw, 32px);
+  letter-spacing: -0.03em;
+}
+.gate-sub {
+  font-size: 14.5px;
+  color: var(--text-soft);
+  line-height: 1.65;
+  max-width: 46ch;
+}
+.gate-creds {
+  width: 100%;
+  margin-top: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  text-align: left;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.gate-actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+.gate-actions .btn {
+  min-width: 190px;
+  justify-content: center;
+}
+.gate-foot {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  max-width: 44ch;
+}
+.gate-foot code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+/* the composer is inert until at least one live API is configured */
+.composer-wrap.is-locked {
+  opacity: 0.5;
+  pointer-events: none;
+}
+`````
+
+## File: frontend/static/js/app.js
+`````javascript
+/* ============================================================
+   TravelBrain AI — frontend
+   Talks to:  POST   /api/travel  { message, thread_id }
+              GET    /api/config          credential status
+              POST   /api/config          set session keys
+              DELETE /api/config          fall back to server .env
+              GET    /health
+   ============================================================ */
+(function () {
+  "use strict";
+  /* ---------------- dom ---------------- */
+  var $ = function (id) {
+    return document.getElementById(id);
+  };
+  var conversation = $("conversation");
+  var messages = $("messages");
+  var hero = $("hero");
+  var input = $("input");
+  var composer = $("composer");
+  var sendBtn = $("sendBtn");
+  var builder = $("builder");
+  var toastEl = $("toast");
+  var composerWrap = document.querySelector(".composer-wrap");
+  var statusBtn = $("apiStatus");
+  var statusText = statusBtn.querySelector(".status-text");
+  var setupGate = $("setupGate");
+  var gateCreds = $("gateCreds");
+  var gateSub = $("gateSub");
+  var gateSave = $("gateSave");
+  var settingsModal = $("settingsModal");
+  var settingsScrim = $("settingsScrim");
+  var credList = $("credList");
+  var settingsSave = $("settingsSave");
+  /* ---------------- state ---------------- */
+  var THEME_KEY = "travelbrain.theme";
+  var threadId = null; // LangGraph conversation thread for the current trip
+  var busy = false;
+  var config = null; // last /api/config payload
+  var savingConfig = false;
+  /* One bar, not five rows. The backend answers once at the end, so these
+     weights are an estimate of how long each stage takes - the label is
+     indicative, not a live event feed. */
+  var PHASES = [
+    { label: "Fetching flights data", weight: 0.22 },
+    { label: "Searching hotels", weight: 0.18 },
+    { label: "Checking the weather", weight: 0.14 },
+    { label: "Building your itinerary", weight: 0.23 },
+    { label: "Writing your final plan", weight: 0.23 },
+  ];
+  var ESTIMATED_MS = 55000;
+  /* ---------------- utils ---------------- */
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  function icon(paths, cls) {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    if (cls) svg.setAttribute("class", cls);
+    var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", paths);
+    svg.appendChild(p);
+    return svg;
+  }
+  var toastTimer;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.hidden = false;
+    requestAnimationFrame(function () {
+      toastEl.classList.add("show");
+    });
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      toastEl.classList.remove("show");
+      setTimeout(function () {
+        toastEl.hidden = true;
+      }, 250);
+    }, 2800);
+  }
+  function scrollToEnd(smooth) {
+    requestAnimationFrame(function () {
+      conversation.scrollTo({
+        top: conversation.scrollHeight,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    });
+  }
+  /* ---------------- theme ---------------- */
+  function initTheme() {
+    var stored = null;
+    try {
+      stored = localStorage.getItem(THEME_KEY);
+    } catch (e) {}
+    var prefersLight =
+      window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: light)").matches;
+    document.documentElement.setAttribute(
+      "data-theme",
+      stored || (prefersLight ? "light" : "dark"),
+    );
+  }
+  $("themeToggle").addEventListener("click", function () {
+    var next =
+      document.documentElement.getAttribute("data-theme") === "dark"
+        ? "light"
+        : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (e) {}
+  });
+  /* ============================================================
+     credentials / settings
+     ============================================================ */
+  function isReady() {
+    return !!(config && config.ready);
+  }
+  /* The hero, the setup gate and the composer lock are all driven by one
+     question: does the server have live credentials yet? */
+  function updateEmptyState() {
+    var hasMessages = messages.children.length > 0;
+    var ready = isReady();
+    setupGate.hidden = ready || hasMessages;
+    hero.classList.toggle("is-hidden", !ready || hasMessages);
+    composerWrap.classList.toggle("is-locked", !ready);
+    input.disabled = !ready || busy;
+    sendBtn.disabled = !ready || busy;
+  }
+  function applyConfig(data) {
+    config = data;
+    var missing = (data && data.missing) || [];
+    if (data && data.ready) {
+      statusBtn.setAttribute("data-state", "ok");
+      statusText.textContent = "API connected";
+      statusBtn.title = "All keys configured — open settings";
+    } else {
+      statusBtn.setAttribute("data-state", "setup");
+      statusText.textContent = "No Live API";
+      statusBtn.title = "No API keys configured — open settings";
+      var labels = missing.map(function (name) {
+        return (data.credentials[name] && data.credentials[name].label) || name;
+      });
+      gateSub.textContent = labels.length
+        ? "The server has no " +
+          joinAnd(labels) +
+          " configured, so the agents cannot run. Add " +
+          (labels.length === 1 ? "it" : "them") +
+          " below to start planning."
+        : "The server has no API keys configured, so the agents cannot run.";
+      renderCreds(gateCreds);
+    }
+    if (!settingsModal.hidden) renderCreds(credList);
+    updateEmptyState();
+  }
+  function joinAnd(list) {
+    if (list.length <= 1) return list[0] || "";
+    return list.slice(0, -1).join(", ") + " and " + list[list.length - 1];
+  }
+  function markUnreachable() {
+    config = null;
+    statusBtn.setAttribute("data-state", "down");
+    statusText.textContent = "API unreachable";
+    statusBtn.title = "Could not reach the server";
+    updateEmptyState();
+  }
+  function refreshConfig() {
+    return fetch("/api/config", { cache: "no-store" })
+      .then(function (r) {
+        return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status));
+      })
+      .then(applyConfig)
+      .catch(markUnreachable);
+  }
+  /* Renders one row per credential into the given container, showing where
+     the value comes from and letting the user override it for this session.
+     Used by both the centred gate and the settings modal, so lookups are
+     scoped to the container rather than done by global id. */
+  function renderCreds(container) {
+    container.innerHTML = "";
+    if (!config || !config.credentials) {
+      container.appendChild(el("p", "cred-loading", "Loading…"));
+      return;
+    }
+    Object.keys(config.credentials).forEach(function (name) {
+      var info = config.credentials[name];
+      var row = el("div", "cred");
+      var head = el("div", "cred-head");
+      head.appendChild(el("label", "cred-label", info.label));
+      var badgeText =
+        info.source === "env"
+          ? "From server .env"
+          : info.source === "session"
+            ? "Set for this session"
+            : "Not configured";
+      head.appendChild(
+        el("span", "badge badge-" + (info.source || "missing"), badgeText),
+      );
+      row.appendChild(head);
+      row.appendChild(el("p", "cred-hint", info.hint));
+      var field = el("div", "cred-field");
+      var box = el("input", "cred-input");
+      box.type = "password";
+      box.placeholder = info.configured
+        ? "•••••••• (leave blank to keep)"
+        : info.placeholder;
+      box.autocomplete = "off";
+      box.spellcheck = false;
+      box.setAttribute("data-cred", name);
+      field.appendChild(box);
+      var reveal = el("button", "icon-btn sm");
+      reveal.type = "button";
+      reveal.title = "Show / hide";
+      reveal.setAttribute("aria-label", "Show or hide value");
+      reveal.appendChild(
+        icon("M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"),
+      );
+      reveal.addEventListener("click", function () {
+        box.type = box.type === "password" ? "text" : "password";
+      });
+      field.appendChild(reveal);
+      row.appendChild(field);
+      var err = el("p", "cred-error");
+      err.setAttribute("data-error-for", name);
+      err.hidden = true;
+      row.appendChild(err);
+      container.appendChild(row);
+    });
+  }
+  var FIELD_BY_NAME = {
+    GROQ_API_KEY: "groq_api_key",
+    DATABASE_URL: "database_url",
+  };
+  var NAME_BY_FIELD = {
+    groq_api_key: "GROQ_API_KEY",
+    database_url: "DATABASE_URL",
+  };
+  function openSettings() {
+    settingsModal.hidden = false;
+    settingsScrim.hidden = false;
+    renderCreds(credList);
+    refreshConfig();
+    var first = credList.querySelector(".cred-input");
+    if (first) first.focus();
+  }
+  function closeSettings() {
+    settingsModal.hidden = true;
+    settingsScrim.hidden = true;
+  }
+  function setSavingConfig(state, button) {
+    savingConfig = state;
+    [settingsSave, gateSave].forEach(function (b) {
+      b.disabled = state;
+    });
+    if (button) button.classList.toggle("is-busy", state);
+  }
+  function saveCredentials(container, button) {
+    if (savingConfig) return;
+    var payload = {};
+    var anything = false;
+    container.querySelectorAll(".cred-input").forEach(function (box) {
+      var value = box.value.trim();
+      if (!value) return;
+      anything = true;
+      payload[FIELD_BY_NAME[box.getAttribute("data-cred")]] = value;
+    });
+    container.querySelectorAll(".cred-error").forEach(function (n) {
+      n.hidden = true;
+    });
+    if (!anything) {
+      toast("Enter a key first.");
+      var empty = container.querySelector(".cred-input");
+      if (empty) empty.focus();
+      return;
+    }
+    setSavingConfig(true, button);
+    fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, data: data };
+        });
+      })
+      .then(function (out) {
+        if (!out.ok || out.data.success === false) {
+          var errors = out.data.errors || {};
+          var shown = 0;
+          Object.keys(errors).forEach(function (field) {
+            var node = container.querySelector(
+              '[data-error-for="' + NAME_BY_FIELD[field] + '"]',
+            );
+            if (node) {
+              node.textContent = errors[field];
+              node.hidden = false;
+              shown++;
+            }
+          });
+          toast(
+            shown
+              ? "Check the highlighted field."
+              : out.data.error || "Could not save.",
+          );
+          return;
+        }
+        applyConfig(out.data);
+        toast(out.data.ready ? "Connected." : "Saved — one key still missing.");
+      })
+      .catch(function () {
+        toast("Could not reach the server.");
+      })
+      .then(function () {
+        setSavingConfig(false, button);
+      });
+  }
+  function resetSettings() {
+    if (savingConfig) return;
+    setSavingConfig(true, settingsSave);
+    fetch("/api/config", { method: "DELETE" })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        applyConfig(data);
+        renderCreds(credList);
+        toast("Session keys cleared.");
+      })
+      .catch(function () {
+        toast("Could not reach the server.");
+      })
+      .then(function () {
+        setSavingConfig(false, settingsSave);
+      });
+  }
+  $("settingsBtn").addEventListener("click", openSettings);
+  statusBtn.addEventListener("click", openSettings);
+  $("settingsClose").addEventListener("click", closeSettings);
+  settingsScrim.addEventListener("click", closeSettings);
+  settingsSave.addEventListener("click", function () {
+    saveCredentials(credList, settingsSave);
+  });
+  gateSave.addEventListener("click", function () {
+    saveCredentials(gateCreds, gateSave);
+  });
+  $("settingsReset").addEventListener("click", resetSettings);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !settingsModal.hidden) closeSettings();
+  });
+  /* ============================================================
+     message rendering
+     ============================================================ */
+  function renderUser(text) {
+    var wrap = el("div", "msg msg-user");
+    wrap.appendChild(el("div", "bubble-user", text));
+    messages.appendChild(wrap);
+    return wrap;
+  }
+  /* Agent fields are not always strings: MCP tools return content blocks
+     (arrays of {type,text}) and raw tool payloads (objects). Coerce anything
+     into renderable text rather than assuming .trim() exists. */
+  function toText(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean")
+      return String(value);
+    if (Array.isArray(value)) {
+      return value.map(toText).filter(Boolean).join("\n\n");
+    }
+    if (typeof value === "object") {
+      // LangChain / MCP content block shapes
+      if (typeof value.text === "string") return value.text;
+      if (typeof value.content === "string") return value.content;
+      if (Array.isArray(value.content)) return toText(value.content);
+      try {
+        return "```json\n" + JSON.stringify(value, null, 2) + "\n```";
+      } catch (e) {
+        return String(value);
+      }
+    }
+    return String(value);
+  }
+  function mdBlock(source, emptyText) {
+    var box = el("div", "md");
+    var text = toText(source).trim();
+    if (!text) {
+      var empty = el("div", "md-empty");
+      empty.appendChild(
+        icon(
+          "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
+        ),
+      );
+      empty.appendChild(
+        el("span", null, emptyText || "No data returned for this section."),
+      );
+      box.appendChild(empty);
+      return box;
+    }
+    box.innerHTML = window.MD.render(text);
+    return box;
+  }
+  function toolButton(label, pathD, handler) {
+    var b = el("button", "icon-btn sm");
+    b.type = "button";
+    b.title = label;
+    b.setAttribute("aria-label", label);
+    b.appendChild(icon(pathD));
+    b.addEventListener("click", handler);
+    return b;
+  }
+  function plainTextOf(result) {
+    return [
+      "# " + (result.__query || "Trip plan"),
+      "",
+      toText(result.answer),
+    ].join("\n");
+  }
+  function renderResult(result) {
+    var card = el("article", "card");
+    /* head */
+    var head = el("div", "card-head");
+    var avatar = el("div", "card-avatar");
+    avatar.appendChild(
+      icon(
+        "M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2a.8.8 0 0 0-.8 1.3L8 11l-2 2-2.2-.5a.6.6 0 0 0-.6 1L5 16l2.5 1.8a.6.6 0 0 0 1-.6L8 15l2-2 3.5 4a.8.8 0 0 0 1.3-.8Z",
+      ),
+    );
+    head.appendChild(avatar);
+    var titleBox = el("div", "card-title");
+    titleBox.appendChild(el("strong", null, "TravelBrain AI"));
+    titleBox.appendChild(el("small", null, "Plan ready"));
+    head.appendChild(titleBox);
+    var tools = el("div", "card-tools");
+    tools.appendChild(
+      toolButton(
+        "Copy plan",
+        "M8 4h10a2 2 0 0 1 2 2v10M16 8H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2Z",
+        function () {
+          var text = plainTextOf(result);
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+              function () {
+                toast("Plan copied to clipboard");
+              },
+              function () {
+                toast("Could not copy");
+              },
+            );
+          } else {
+            toast("Clipboard not available");
+          }
+        },
+      ),
+    );
+    tools.appendChild(
+      toolButton(
+        "Download as Markdown",
+        "M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2",
+        function () {
+          var blob = new Blob([plainTextOf(result)], {
+            type: "text/markdown;charset=utf-8",
+          });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = url;
+          a.download = "travelbrain-plan.md";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function () {
+            URL.revokeObjectURL(url);
+          }, 1000);
+        },
+      ),
+    );
+    tools.appendChild(
+      toolButton(
+        "Print",
+        "M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M6 14h12v7H6z",
+        function () {
+          window.print();
+        },
+      ),
+    );
+    head.appendChild(tools);
+    card.appendChild(head);
+    /* one message: the final assembled plan. The per-agent flight, hotel,
+       weather and itinerary payloads still come back in the response and
+       feed this answer, they are just not surfaced as separate tabs. */
+    var body = el("div", "card-body");
+    body.appendChild(
+      mdBlock(result.answer, "The agent returned an empty response."),
+    );
+    card.appendChild(body);
+    var wrap = el("div", "msg");
+    wrap.appendChild(card);
+    messages.appendChild(wrap);
+    return wrap;
+  }
+  function renderError(message, kind) {
+    var card = el("article", "card error-card");
+    var body = el("div", "error-body");
+    body.appendChild(
+      icon(
+        "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
+        "error-ico",
+      ),
+    );
+    var copy = {
+      server: {
+        title: "The planner could not finish",
+        detail:
+          "The request reached the server but the agent run failed. Check the uvicorn console for the full traceback.",
+      },
+      network: {
+        title: "Could not reach the server",
+        detail:
+          "The request never completed. Check that the server is still running.",
+      },
+      render: {
+        title: "The plan came back, but could not be displayed",
+        detail:
+          "The agents returned data in an unexpected shape. This is a frontend issue, not an agent failure.",
+      },
+      setup: {
+        title: "Missing credentials",
+        detail:
+          "Add the required keys in Settings, or set them in the server's .env file.",
+      },
+    }[kind || "server"];
+    var textBox = el("div");
+    textBox.appendChild(el("strong", null, copy.title));
+    textBox.appendChild(el("p", null, copy.detail));
+    textBox.appendChild(el("code", null, message));
+    if (kind === "setup") {
+      var open = el("button", "btn btn-soft btn-sm", "Open settings");
+      open.type = "button";
+      open.addEventListener("click", openSettings);
+      textBox.appendChild(open);
+    }
+    body.appendChild(textBox);
+    card.appendChild(body);
+    var wrap = el("div", "msg");
+    wrap.appendChild(card);
+    messages.appendChild(wrap);
+    return wrap;
+  }
+  /* ---------------- pipeline (loading state) ---------------- */
+  function renderPipeline() {
+    var card = el("article", "card progress-card");
+    var head = el("div", "progress-head");
+    var label = el("span", "progress-label", PHASES[0].label);
+    var meta = el("span", "progress-meta");
+    var pct = el("b", null, "0%");
+    meta.appendChild(pct);
+    meta.appendChild(el("span", "progress-sep", "·"));
+    var timer = el("span", null, "0s");
+    meta.appendChild(timer);
+    head.appendChild(label);
+    head.appendChild(meta);
+    card.appendChild(head);
+    var track = el("div", "progress-track");
+    var fill = el("div", "progress-fill");
+    track.appendChild(fill);
+    card.appendChild(track);
+    var wrap = el("div", "msg");
+    wrap.appendChild(card);
+    messages.appendChild(wrap);
+    var started = Date.now();
+    var currentPhase = -1;
+    function tick() {
+      var elapsed = Date.now() - started;
+      // creep towards 97% so the bar never claims to be finished early
+      var ratio = Math.min(elapsed / ESTIMATED_MS, 0.97);
+      fill.style.width = (ratio * 100).toFixed(1) + "%";
+      pct.textContent = Math.round(ratio * 100) + "%";
+      timer.textContent = Math.floor(elapsed / 1000) + "s";
+      var acc = 0;
+      var index = PHASES.length - 1;
+      for (var i = 0; i < PHASES.length; i++) {
+        acc += PHASES[i].weight;
+        if (ratio < acc) {
+          index = i;
+          break;
+        }
+      }
+      if (index !== currentPhase) {
+        currentPhase = index;
+        label.textContent = PHASES[index].label;
+      }
+    }
+    tick();
+    var interval = setInterval(tick, 250);
+    return {
+      node: wrap,
+      finish: function () {
+        clearInterval(interval);
+        fill.style.width = "100%";
+        pct.textContent = "100%";
+      },
+    };
+  }
+  /* ---------------- sending ---------------- */
+  function setBusy(state) {
+    busy = state;
+    sendBtn.classList.toggle("is-busy", state);
+    updateEmptyState();
+  }
+  function send(text) {
+    if (busy) return;
+    var message = String(text == null ? input.value : text).trim();
+    if (!message) return;
+    if (!isReady()) {
+      toast("No live API — add your keys first.");
+      updateEmptyState();
+      return;
+    }
+    input.value = "";
+    autosize();
+    setBusy(true);
+    renderUser(message);
+    updateEmptyState();
+    var pipeline = renderPipeline();
+    scrollToEnd(true);
+    fetch("/api/travel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: message, thread_id: threadId }),
+    })
+      .catch(function (e) {
+        e.__kind = "network";
+        throw e;
+      })
+      .then(function (response) {
+        return response
+          .json()
+          .catch(function () {
+            throw new Error(
+              "Server returned a non-JSON response (HTTP " +
+                response.status +
+                ")",
+            );
+          })
+          .then(function (data) {
+            if (!response.ok || data.success === false) {
+              var err = new Error(
+                data.error || "Request failed with HTTP " + response.status,
+              );
+              // 428 Precondition Required = a credential is missing.
+              if (response.status === 428) err.__kind = "setup";
+              throw err;
+            }
+            return data;
+          });
+      })
+      .then(function (data) {
+        pipeline.finish();
+        pipeline.node.remove();
+        data.__query = message;
+        threadId = data.thread_id || threadId;
+        // A rendering bug here must not be reported as an agent failure.
+        try {
+          renderResult(data);
+        } catch (e) {
+          console.error("renderResult failed", e, data);
+          renderError(e.message || String(e), "render");
+        }
+        scrollToEnd(true);
+      })
+      .catch(function (err) {
+        pipeline.finish();
+        if (pipeline.node.parentNode) pipeline.node.remove();
+        renderError(err.message || String(err), err.__kind || "server");
+        scrollToEnd(true);
+        refreshConfig();
+      })
+      .then(function () {
+        setBusy(false);
+        input.focus();
+      });
+  }
+  /* ---------------- trips ---------------- */
+  function startNewTrip() {
+    if (busy) {
+      toast("Wait for the current plan to finish.");
+      return;
+    }
+    threadId = null;
+    messages.innerHTML = "";
+    updateEmptyState();
+    if (isReady()) input.focus();
+  }
+  $("newTripBtn").addEventListener("click", startNewTrip);
+  /* ---------------- composer ---------------- */
+  function autosize() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 200) + "px";
+  }
+  input.addEventListener("input", autosize);
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+  composer.addEventListener("submit", function (e) {
+    e.preventDefault();
+    send();
+  });
+  document.querySelectorAll(".suggestion").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      send(btn.getAttribute("data-prompt"));
+    });
+  });
+  /* ---------------- trip builder ---------------- */
+  var builderToggle = $("builderToggle");
+  builderToggle.addEventListener("click", function () {
+    var show = builder.hidden;
+    builder.hidden = !show;
+    builderToggle.classList.toggle("is-on", show);
+    if (show) $("fFrom").focus();
+  });
+  document.querySelectorAll("#interestChips .chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      chip.classList.toggle("on");
+    });
+  });
+  $("builderClear").addEventListener("click", function () {
+    ["fFrom", "fTo", "fDate", "fDays", "fPeople", "fBudget"].forEach(
+      function (id) {
+        $(id).value = "";
+      },
+    );
+    document.querySelectorAll("#interestChips .chip").forEach(function (c) {
+      c.classList.remove("on");
+    });
+  });
+  $("builderApply").addEventListener("click", function () {
+    var from = $("fFrom").value.trim();
+    var to = $("fTo").value.trim();
+    var date = $("fDate").value;
+    var days = $("fDays").value.trim();
+    var people = $("fPeople").value.trim();
+    var budget = $("fBudget").value.trim();
+    var interests = [];
+    document.querySelectorAll("#interestChips .chip.on").forEach(function (c) {
+      interests.push(c.getAttribute("data-value"));
+    });
+    if (!to) {
+      toast("Add a destination first.");
+      $("fTo").focus();
+      return;
+    }
+    var parts = ["Plan a"];
+    if (days) parts.push(days + " day");
+    parts.push("trip to " + to);
+    if (from) parts.push("from " + from);
+    if (date) {
+      var d = new Date(date + "T00:00:00");
+      if (!isNaN(d)) {
+        parts.push(
+          "departing " +
+            d.toLocaleDateString(undefined, {
+              day: "numeric",
+              month: "long",
+              year: "numeric",
+            }),
+        );
+      }
+    }
+    if (people)
+      parts.push(
+        "for " + people + (people === "1" ? " traveller" : " travellers"),
+      );
+    if (budget) parts.push("with a budget of " + budget);
+    if (interests.length) parts.push("focused on " + interests.join(", "));
+    var sentence =
+      parts.join(" ") +
+      ". Find flights, hotels, the weather outlook and a day-by-day itinerary.";
+    input.value = sentence;
+    autosize();
+    builder.hidden = true;
+    builderToggle.classList.remove("is-on");
+    input.focus();
+  });
+  /* ---------------- boot ---------------- */
+  initTheme();
+  updateEmptyState();
+  refreshConfig().then(function () {
+    if (isReady()) input.focus();
+  });
+  setInterval(refreshConfig, 60000);
+  autosize();
+})();
+`````
+
+## File: frontend/static/js/markdown.js
+`````javascript
+/* ============================================================
+   Tiny markdown renderer (no dependencies).
+   Escapes all HTML first, so LLM output can never inject markup.
+   Supports: headings, bold/italic/strike, inline + fenced code,
+   links, nested lists, blockquotes, tables, hr, paragraphs.
+   ============================================================ */
+(function (global) {
+  "use strict";
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+  /* ---------- inline ---------- */
+  /* Formats one run of text that is known to contain no code spans. */
+  function formatRun(text) {
+    var out = escapeHtml(text);
+    // links: [label](url) — only http(s), mailto and relative targets
+    out = out.replace(
+      /\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^)]*&quot;)?\)/g,
+      function (m, label, url) {
+        if (!/^(https?:\/\/|mailto:|\/|#)/i.test(url)) return m;
+        return (
+          '<a href="' +
+          url +
+          '" target="_blank" rel="noopener noreferrer">' +
+          (label || url) +
+          "</a>"
+        );
+      },
+    );
+    // bare urls that were not already turned into links above
+    out = out.replace(
+      /(^|[\s(])(https?:\/\/[^\s<)"']+[^\s<).,;:!?"'])/g,
+      function (m, pre, url) {
+        return (
+          pre +
+          '<a href="' +
+          url +
+          '" target="_blank" rel="noopener noreferrer">' +
+          url +
+          "</a>"
+        );
+      },
+    );
+    return out
+      .replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+      .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+      .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/(^|[^_\w])_([^_\n]+)_(?!_)/g, "$1<em>$2</em>");
+  }
+  /* Splits on code spans so their contents are never reformatted. */
+  function inline(text) {
+    if (text === null || text === undefined) return "";
+    var parts = String(text).split(/(`[^`]*`)/g);
+    var out = "";
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (!part) continue;
+      if (
+        part.length > 1 &&
+        part.charAt(0) === "`" &&
+        part.charAt(part.length - 1) === "`"
+      ) {
+        out += "<code>" + escapeHtml(part.slice(1, -1)) + "</code>";
+      } else {
+        out += formatRun(part);
+      }
+    }
+    return out;
+  }
+  /* ---------- helpers ---------- */
+  var BULLET = /^(\s*)([-*+])\s+(.*)$/;
+  var ORDERED = /^(\s*)(\d+)[.)]\s+(.*)$/;
+  var TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/;
+  function splitRow(line) {
+    var trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    return trimmed.split("|").map(function (c) {
+      return c.trim();
+    });
+  }
+  /* Consumes a list starting at `start`. Returns { html, next }. */
+  function parseList(lines, start) {
+    var stack = []; // [{ tag, indent }]
+    var parts = [];
+    var i = start;
+    function closeDeeperThan(indent) {
+      while (stack.length && stack[stack.length - 1].indent > indent) {
+        parts.push("</li></" + stack.pop().tag + ">");
+      }
+    }
+    while (i < lines.length) {
+      var line = lines[i];
+      var tag = "ul";
+      var m = line.match(BULLET);
+      if (!m) {
+        m = line.match(ORDERED);
+        tag = "ol";
+      }
+      if (!m) {
+        // an indented non-bullet line continues the current item
+        if (stack.length && line.trim() && /^\s{2,}/.test(line)) {
+          parts.push(" " + inline(line.trim()));
+          i++;
+          continue;
+        }
+        break;
+      }
+      var indent = m[1].replace(/\t/g, "    ").length;
+      if (!stack.length || indent > stack[stack.length - 1].indent) {
+        stack.push({ tag: tag, indent: indent });
+        parts.push("<" + tag + "><li>");
+      } else {
+        closeDeeperThan(indent);
+        if (!stack.length) {
+          stack.push({ tag: tag, indent: indent });
+          parts.push("<" + tag + "><li>");
+        } else if (stack[stack.length - 1].tag !== tag) {
+          // same level but the list type changed: close this one, open the other
+          parts.push("</li></" + stack.pop().tag + ">");
+          stack.push({ tag: tag, indent: indent });
+          parts.push("<" + tag + "><li>");
+        } else {
+          parts.push("</li><li>");
+        }
+      }
+      parts.push(inline(m[3]));
+      i++;
+    }
+    while (stack.length) parts.push("</li></" + stack.pop().tag + ">");
+    return { html: parts.join(""), next: i };
+  }
+  /* ---------- block parser ---------- */
+  function render(src) {
+    if (src === null || src === undefined) return "";
+    var lines = String(src).replace(/\r\n?/g, "\n").split("\n");
+    var html = [];
+    var para = [];
+    var i = 0;
+    function flushPara() {
+      if (!para.length) return;
+      html.push("<p>" + inline(para.join(" ")) + "</p>");
+      para = [];
+    }
+    while (i < lines.length) {
+      var line = lines[i];
+      /* fenced code */
+      var fence = line.match(/^\s*(```|~~~)/);
+      if (fence) {
+        flushPara();
+        var marker = fence[1];
+        var buf = [];
+        i++;
+        while (i < lines.length && lines[i].trim().indexOf(marker) !== 0) {
+          buf.push(lines[i]);
+          i++;
+        }
+        i++; // skip the closing fence
+        html.push("<pre><code>" + escapeHtml(buf.join("\n")) + "</code></pre>");
+        continue;
+      }
+      /* blank line */
+      if (!line.trim()) {
+        flushPara();
+        i++;
+        continue;
+      }
+      /* horizontal rule */
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        flushPara();
+        html.push("<hr />");
+        i++;
+        continue;
+      }
+      /* heading */
+      var heading = line.match(/^\s*(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (heading) {
+        flushPara();
+        var level = Math.min(heading[1].length, 4);
+        html.push(
+          "<h" + level + ">" + inline(heading[2]) + "</h" + level + ">",
+        );
+        i++;
+        continue;
+      }
+      /* table */
+      if (
+        line.indexOf("|") !== -1 &&
+        i + 1 < lines.length &&
+        TABLE_SEP.test(lines[i + 1])
+      ) {
+        flushPara();
+        var head = splitRow(line);
+        i += 2;
+        var body = [];
+        while (
+          i < lines.length &&
+          lines[i].trim() &&
+          lines[i].indexOf("|") !== -1
+        ) {
+          body.push(splitRow(lines[i]));
+          i++;
+        }
+        var t = ['<div class="md-table-wrap"><table><thead><tr>'];
+        head.forEach(function (c) {
+          t.push("<th>" + inline(c) + "</th>");
+        });
+        t.push("</tr></thead><tbody>");
+        body.forEach(function (row) {
+          t.push("<tr>");
+          for (var c = 0; c < head.length; c++) {
+            t.push("<td>" + inline(row[c] || "") + "</td>");
+          }
+          t.push("</tr>");
+        });
+        t.push("</tbody></table></div>");
+        html.push(t.join(""));
+        continue;
+      }
+      /* blockquote */
+      if (/^\s*>\s?/.test(line)) {
+        flushPara();
+        var quote = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          quote.push(lines[i].replace(/^\s*>\s?/, ""));
+          i++;
+        }
+        html.push("<blockquote>" + render(quote.join("\n")) + "</blockquote>");
+        continue;
+      }
+      /* lists, with nesting driven by indent width */
+      if (BULLET.test(line) || ORDERED.test(line)) {
+        flushPara();
+        var list = parseList(lines, i);
+        html.push(list.html);
+        i = list.next;
+        continue;
+      }
+      /* plain paragraph text */
+      para.push(line.trim());
+      i++;
+    }
+    flushPara();
+    return html.join("\n");
+  }
+  global.MD = { render: render, escape: escapeHtml };
+})(window);
+`````
+
+## File: frontend/templates/index.html
+`````html
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TravelBrain AI — Multi-Agent Travel Planner</title>
+    <meta
+      name="description"
+      content="A LangGraph multi-agent system that plans flights, hotels, weather and day-by-day itineraries."
+    />
+    <link rel="stylesheet" href="/static/css/styles.css" />
+  </head>
+  <body>
+    <!-- ambient background -->
+    <div class="aurora" aria-hidden="true">
+      <span class="blob blob-1"></span>
+      <span class="blob blob-2"></span>
+      <span class="blob blob-3"></span>
+      <span class="grid"></span>
+    </div>
+    <div class="layout">
+      <main class="main">
+        <header class="topbar">
+          <a class="brand" href="/">
+            <span class="brand-mark" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2a.8.8 0 0 0-.8 1.3L8 11l-2 2-2.2-.5a.6.6 0 0 0-.6 1L5 16l2.5 1.8a.6.6 0 0 0 1-.6L8 15l2-2 3.5 4a.8.8 0 0 0 1.3-.8Z"
+                />
+              </svg>
+            </span>
+            <span class="brand-text">
+              <strong>TravelBrain</strong>
+              <em>AI</em>
+            </span>
+          </a>
+          <div class="topbar-actions">
+            <button
+              class="status"
+              id="apiStatus"
+              data-state="checking"
+              type="button"
+              title="Open settings"
+            >
+              <span class="status-dot"></span>
+              <span class="status-text">Checking…</span>
+            </button>
+            <button class="btn btn-soft btn-sm" id="newTripBtn" type="button">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span class="btn-label">New trip</span>
+            </button>
+            <button
+              class="icon-btn"
+              id="settingsBtn"
+              type="button"
+              aria-label="Settings"
+              title="Settings"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"
+                />
+              </svg>
+            </button>
+            <button
+              class="icon-btn"
+              id="themeToggle"
+              type="button"
+              aria-label="Toggle colour theme"
+              title="Toggle theme"
+            >
+              <svg
+                class="ico-sun"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              >
+                <circle cx="12" cy="12" r="4" />
+                <path
+                  d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"
+                />
+              </svg>
+              <svg
+                class="ico-moon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+              </svg>
+            </button>
+          </div>
+        </header>
+        <div class="conversation" id="conversation">
+          <!-- ---------- no live API: shown instead of the hero ---------- -->
+          <section class="gate" id="setupGate" hidden>
+            <span class="gate-icon" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"
+                />
+              </svg>
+            </span>
+            <h2>No Live API</h2>
+            <p class="gate-sub" id="gateSub">
+              The server has no API keys configured, so the agents cannot run.
+              Add them below to start planning.
+            </p>
+            <div class="gate-creds" id="gateCreds"></div>
+            <div class="gate-actions">
+              <button class="btn btn-primary" id="gateSave" type="button">
+                <span class="btn-label">Connect</span>
+                <span class="spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+            <p class="gate-foot">
+              Keys entered here last for this browser session only. To configure
+              them once for everyone, add them to the server&rsquo;s
+              <code>.env</code> and restart.
+            </p>
+          </section>
+          <!-- ---------- empty / hero state ---------- -->
+          <section class="hero" id="hero">
+            <h2>
+              Tell us the trip.<br />We&rsquo;ll handle the
+              <span class="grad">logistics</span>.
+            </h2>
+            <p class="hero-sub">
+              Flights, hotels, weather and a realistic day-by-day itinerary —
+              researched by specialised agents and assembled into one plan.
+            </p>
+            <div class="suggestions" id="suggestions">
+              <button
+                class="suggestion"
+                type="button"
+                data-prompt="Plan a 7 day Japan trip from Dhaka in April with a mid-range budget, focused on food and temples."
+              >
+                <span class="suggestion-emoji">🇯🇵</span>
+                <span class="suggestion-body">
+                  <strong>7 days in Japan</strong>
+                  <small>From Dhaka · food &amp; temples</small>
+                </span>
+              </button>
+              <button
+                class="suggestion"
+                type="button"
+                data-prompt="I want a 5 day Paris trip in July from Delhi. Find flights, hotels near the centre and an itinerary under $2000."
+              >
+                <span class="suggestion-emoji">🗼</span>
+                <span class="suggestion-body">
+                  <strong>Paris under $2000</strong>
+                  <small>5 days · July · from Delhi</small>
+                </span>
+              </button>
+              <button
+                class="suggestion"
+                type="button"
+                data-prompt="Plan a 4 day beach getaway to Bali from Singapore next month for two people, relaxed pace."
+              >
+                <span class="suggestion-emoji">🏝️</span>
+                <span class="suggestion-body">
+                  <strong>Bali long weekend</strong>
+                  <small>4 days · 2 travellers</small>
+                </span>
+              </button>
+              <button
+                class="suggestion"
+                type="button"
+                data-prompt="Plan a 10 day Europe rail trip from London covering Amsterdam, Berlin and Prague on a backpacker budget."
+              >
+                <span class="suggestion-emoji">🚆</span>
+                <span class="suggestion-body">
+                  <strong>Europe by rail</strong>
+                  <small>10 days · backpacker</small>
+                </span>
+              </button>
+            </div>
+          </section>
+          <div class="messages" id="messages"></div>
+        </div>
+        <!-- ---------- composer ---------- -->
+        <div class="composer-wrap">
+          <div class="builder" id="builder" hidden>
+            <div class="builder-grid">
+              <label class="field">
+                <span>From</span>
+                <input
+                  type="text"
+                  id="fFrom"
+                  placeholder="Dhaka"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field">
+                <span>To</span>
+                <input
+                  type="text"
+                  id="fTo"
+                  placeholder="Tokyo"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field">
+                <span>Departure</span>
+                <input type="date" id="fDate" />
+              </label>
+              <label class="field field-sm">
+                <span>Days</span>
+                <input
+                  type="number"
+                  id="fDays"
+                  min="1"
+                  max="60"
+                  placeholder="7"
+                />
+              </label>
+              <label class="field field-sm">
+                <span>Travellers</span>
+                <input
+                  type="number"
+                  id="fPeople"
+                  min="1"
+                  max="20"
+                  placeholder="2"
+                />
+              </label>
+              <label class="field">
+                <span>Budget</span>
+                <input
+                  type="text"
+                  id="fBudget"
+                  placeholder="$2000"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+            <div class="builder-interests">
+              <span class="field-span">Interests</span>
+              <div class="chips" id="interestChips">
+                <button class="chip" type="button" data-value="food">
+                  🍜 Food
+                </button>
+                <button class="chip" type="button" data-value="history">
+                  🏛️ History
+                </button>
+                <button class="chip" type="button" data-value="nature">
+                  🌿 Nature
+                </button>
+                <button class="chip" type="button" data-value="nightlife">
+                  🌃 Nightlife
+                </button>
+                <button class="chip" type="button" data-value="shopping">
+                  🛍️ Shopping
+                </button>
+                <button class="chip" type="button" data-value="adventure">
+                  🧗 Adventure
+                </button>
+                <button class="chip" type="button" data-value="relaxation">
+                  🧘 Relaxation
+                </button>
+              </div>
+            </div>
+            <div class="builder-foot">
+              <button
+                class="btn btn-ghost btn-sm"
+                type="button"
+                id="builderClear"
+              >
+                Clear
+              </button>
+              <button
+                class="btn btn-soft btn-sm"
+                type="button"
+                id="builderApply"
+              >
+                Write my prompt
+              </button>
+            </div>
+          </div>
+          <form class="composer" id="composer" autocomplete="off">
+            <button
+              type="button"
+              class="icon-btn composer-tool"
+              id="builderToggle"
+              aria-label="Open trip builder"
+              title="Trip builder"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M4 6h16M4 12h10M4 18h6" />
+                <circle cx="18" cy="12" r="2" />
+                <circle cx="14" cy="18" r="2" />
+              </svg>
+            </button>
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Plan a 7 day trip to Tokyo from Dhaka in April, mid-range budget…"
+              aria-label="Describe your trip"
+            ></textarea>
+            <button
+              type="submit"
+              class="btn btn-primary send-btn"
+              id="sendBtn"
+              aria-label="Plan trip"
+            >
+              <svg
+                class="ico-send"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="m22 2-7 20-4-9-9-4 20-7Z" />
+              </svg>
+              <span class="spinner" aria-hidden="true"></span>
+            </button>
+          </form>
+        </div>
+      </main>
+    </div>
+    <!-- ============ SETTINGS ============ -->
+    <div class="modal-scrim" id="settingsScrim" hidden></div>
+    <div
+      class="modal"
+      id="settingsModal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settingsTitle"
+      hidden
+    >
+      <div class="modal-head">
+        <div class="modal-heading">
+          <h2 id="settingsTitle">Settings</h2>
+          <p>
+            Keys you enter here stay in server memory for this browser session
+            only — they are never written to disk.
+          </p>
+        </div>
+        <button
+          class="icon-btn"
+          id="settingsClose"
+          type="button"
+          aria-label="Close settings"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body" id="credList"></div>
+      <div class="modal-foot">
+        <button
+          class="btn btn-ghost btn-sm"
+          id="settingsReset"
+          type="button"
+          title="Discard session keys and fall back to the server .env"
+        >
+          Use server .env
+        </button>
+        <button class="btn btn-primary btn-sm" id="settingsSave" type="button">
+          <span class="btn-label">Save for this session</span>
+          <span class="spinner" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
+    <!-- toast -->
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/static/js/markdown.js"></script>
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>
+`````
+
+## File: src/agents/__init__.py
+`````python
+from src.agents.base import AgentProtocol, BaseAgent
+from src.agents.destination import extract_destination
+from src.agents.final_agent import FinalAgent, final_agent
+from src.agents.flight_agent import FlightAgent, flight_agent
+from src.agents.hotel_agent import HotelAgent, hotel_agent
+from src.agents.itinerary_agent import ItineraryAgent, itinerary_agent
+from src.agents.prompts_registry import PromptRegistry, default_prompt_registry
+from src.agents.weather_agent import WeatherAgent, weather_agent
+__all__ = [
+    "AgentProtocol",
+    "BaseAgent",
+    "FinalAgent",
+    "FlightAgent",
+    "HotelAgent",
+    "ItineraryAgent",
+    "PromptRegistry",
+    "WeatherAgent",
+    "default_prompt_registry",
+    "extract_destination",
+    "final_agent",
+    "flight_agent",
+    "hotel_agent",
+    "itinerary_agent",
+    "weather_agent",
+]
+`````
+
+## File: src/agents/final_agent.py
+`````python
+"""Formats everything the other agents produced into the user-facing answer."""
+from typing import Any
+from langchain_core.messages import HumanMessage, SystemMessage
+from src.agents.base import BaseAgent
+from src.agents.prompts_registry import default_prompt_registry
+from src.clients.llm_provider import get_llm_provider
+from src.graph.state import TravelState
+from src.utils.async_utils import bump_llm_calls
+from src.utils.telemetry import track_performance
+class FinalAgent(BaseAgent):
+    """Enterprise Final Synthesizer agent implementing AgentProtocol."""
+    def __init__(self) -> None:
+        super().__init__(name="final_agent")
+        self.llm_provider = get_llm_provider("groq")
+        self.prompt_registry = default_prompt_registry
+    @track_performance("final_agent")
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        prompt = self.prompt_registry.format_prompt(
+            "final_user",
+            user_query=state["user_query"],
+            flight_results=state["flight_results"],
+            hotel_results=state["hotel_results"],
+            weather_results=state["weather_results"],
+            itinerary=state["itinerary"],
+        )
+        system_prompt = self.prompt_registry.get_prompt("final_system")
+        response = self.llm_provider.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt),
+            ]
+        )
+        return {
+            "messages": [response],
+            "llm_calls": bump_llm_calls(state),
+        }
+# Singleton agent instance and node callable
+_final_agent_instance = FinalAgent()
+def final_agent(state: TravelState) -> dict[str, Any]:
+    """LangGraph node callable for final agent."""
+    return _final_agent_instance(state)
+`````
+
+## File: src/agents/hotel_agent.py
+`````python
+"""Finds hotel options for the destination through Tavily MCP server via ToolRegistry."""
+from typing import Any
+from langchain_core.messages import AIMessage
+from src.agents.base import BaseAgent
+from src.agents.prompts_registry import default_prompt_registry
+from src.graph.state import TravelState
+from src.mcp_servers.registry import default_tool_registry
+from src.utils.async_utils import bump_llm_calls
+from src.utils.telemetry import track_performance
+class HotelAgent(BaseAgent):
+    """Enterprise Hotel Planner agent implementing AgentProtocol."""
+    def __init__(self) -> None:
+        super().__init__(name="hotel_agent")
+        self.prompt_registry = default_prompt_registry
+        self.tool_registry = default_tool_registry
+    @track_performance("hotel_agent")
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        query = self.prompt_registry.format_prompt(
+            "hotel_search_query", user_query=state["user_query"]
+        )
+        hotel_results = self.tool_registry.execute_tool(
+            "tavily_mcp_search", query=query
+        )
+        return {
+            "hotel_results": hotel_results,
+            "messages": [AIMessage(content="Hotel information fetched.")],
+            "llm_calls": bump_llm_calls(state),
+        }
+# Singleton agent instance and node callable
+_hotel_agent_instance = HotelAgent()
+def hotel_agent(state: TravelState) -> dict[str, Any]:
+    """LangGraph node callable for hotel agent."""
+    return _hotel_agent_instance(state)
+`````
+
+## File: src/agents/itinerary_agent.py
+`````python
+"""Combines flight, hotel and weather results into a day-by-day itinerary."""
+from typing import Any
+from langchain_core.messages import HumanMessage, SystemMessage
+from src.agents.base import BaseAgent
+from src.agents.prompts_registry import default_prompt_registry
+from src.clients.llm_provider import get_llm_provider
+from src.graph.state import TravelState
+from src.utils.async_utils import bump_llm_calls
+from src.utils.telemetry import track_performance
+class ItineraryAgent(BaseAgent):
+    """Enterprise Itinerary Planner agent implementing AgentProtocol."""
+    def __init__(self) -> None:
+        super().__init__(name="itinerary_agent")
+        self.llm_provider = get_llm_provider("groq")
+        self.prompt_registry = default_prompt_registry
+    @track_performance("itinerary_agent")
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        prompt = self.prompt_registry.format_prompt(
+            "itinerary_user",
+            user_query=state["user_query"],
+            flight_results=state["flight_results"],
+            hotel_results=state["hotel_results"],
+            weather_results=state["weather_results"],
+        )
+        system_prompt = self.prompt_registry.get_prompt("itinerary_system")
+        response = self.llm_provider.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt),
+            ]
+        )
+        return {
+            "itinerary": response.content,
+            "messages": [response],
+            "llm_calls": bump_llm_calls(state),
+        }
+# Singleton agent instance and node callable
+_itinerary_agent_instance = ItineraryAgent()
+def itinerary_agent(state: TravelState) -> dict[str, Any]:
+    """LangGraph node callable for itinerary agent."""
+    return _itinerary_agent_instance(state)
+`````
+
+## File: src/agents/prompts.py
+`````python
+"""Backward-compatible prompt exports re-exporting from prompts_registry."""
+from src.agents.prompts_registry import default_prompt_registry
+FLIGHT_SYSTEM_PROMPT = default_prompt_registry.get_prompt("flight_system")
+FLIGHT_AGENT_PROMPT = default_prompt_registry.get_prompt("flight_user")
+HOTEL_SEARCH_QUERY = default_prompt_registry.get_prompt("hotel_search_query")
+DESTINATION_EXTRACTION_PROMPT = default_prompt_registry.get_prompt(
+    "destination_extraction"
+)
+WEATHER_RESULTS_TEMPLATE = default_prompt_registry.get_prompt(
+    "weather_results_template"
+)
+ITINERARY_SYSTEM_PROMPT = default_prompt_registry.get_prompt("itinerary_system")
+ITINERARY_AGENT_PROMPT = default_prompt_registry.get_prompt("itinerary_user")
+FINAL_SYSTEM_PROMPT = default_prompt_registry.get_prompt("final_system")
+FINAL_AGENT_PROMPT = default_prompt_registry.get_prompt("final_user")
+`````
+
+## File: src/api/__init__.py
+`````python
+from src.api.sessions import (
+    SESSION_COOKIE,
+    clear_credentials,
+    get_credentials_for,
+    new_session_id,
+    store_credentials,
+)
+from src.api.validation import check_database_url, check_groq_api_key
+__all__ = [
+    "SESSION_COOKIE",
+    "check_database_url",
+    "check_groq_api_key",
+    "clear_credentials",
+    "get_credentials_for",
+    "new_session_id",
+    "store_credentials",
+]
+`````
+
+## File: src/api/sessions.py
+`````python
+"""
+In-memory store for credentials a user typed into the settings panel.
+Deliberately NOT backed by Redis or PostgreSQL: these are live API keys and
+database URLs, and this store is the one place they exist on the server.
+Keeping them in process memory means they are never written to disk, never
+replicated, and are gone when the process restarts.
+"""
+import secrets
+import threading
+import time
+from src.config.session import Credentials
+SESSION_COOKIE = "travelbrain_session"
+# How long an idle session keeps its keys.
+SESSION_TTL_SECONDS = 12 * 3600
+# Guard against unbounded growth from repeated cookie-less requests.
+MAX_SESSIONS = 500
+_lock = threading.Lock()
+_sessions: dict[str, dict] = {}
+def new_session_id() -> str:
+    return secrets.token_urlsafe(24)
+def _prune(now: float) -> None:
+    """Caller must hold the lock."""
+    expired = [sid for sid, entry in _sessions.items() if entry["expires_at"] <= now]
+    for sid in expired:
+        del _sessions[sid]
+    if len(_sessions) > MAX_SESSIONS:
+        oldest = sorted(_sessions, key=lambda sid: _sessions[sid]["expires_at"])
+        for sid in oldest[: len(_sessions) - MAX_SESSIONS]:
+            del _sessions[sid]
+def get_credentials_for(session_id: str | None) -> Credentials | None:
+    if not session_id:
+        return None
+    now = time.time()
+    with _lock:
+        _prune(now)
+        entry = _sessions.get(session_id)
+        if entry is None:
+            return None
+        # Sliding expiry: an active session stays alive.
+        entry["expires_at"] = now + SESSION_TTL_SECONDS
+        return entry["credentials"]
+def store_credentials(
+    session_id: str,
+    groq_api_key: str | None = None,
+    database_url: str | None = None,
+) -> Credentials:
+    """
+    Merge new values into the session. Passing None leaves a field
+    untouched; passing "" clears it.
+    """
+    now = time.time()
+    with _lock:
+        _prune(now)
+        existing = _sessions.get(session_id, {}).get("credentials", Credentials())
+        credentials = Credentials(
+            groq_api_key=_merge(existing.groq_api_key, groq_api_key),
+            database_url=_merge(existing.database_url, database_url),
+        )
+        _sessions[session_id] = {
+            "credentials": credentials,
+            "expires_at": now + SESSION_TTL_SECONDS,
+        }
+        return credentials
+def _merge(current: str | None, incoming: str | None) -> str | None:
+    if incoming is None:
+        return current
+    incoming = incoming.strip()
+    return incoming or None
+def clear_credentials(session_id: str | None) -> None:
+    if not session_id:
+        return
+    with _lock:
+        _sessions.pop(session_id, None)
+def active_session_count() -> int:
+    with _lock:
+        _prune(time.time())
+        return len(_sessions)
+`````
+
+## File: src/clients/__init__.py
+`````python
+from src.clients import cache
+from src.clients.cache import async_cached, cached
+from src.clients.checkpointer import (
+    get_checkpointer,
+    get_connection,
+    get_session_checkpointer,
+)
+from src.clients.llm import get_llm
+__all__ = [
+    "async_cached",
+    "cache",
+    "cached",
+    "get_checkpointer",
+    "get_connection",
+    "get_llm",
+    "get_session_checkpointer",
+]
+`````
+
+## File: src/graph/__init__.py
+`````python
+"""Graph module package exposing TravelState, dynamic graph builder, and runner."""
+from src.graph.state import TravelState, initial_state
+def build_dynamic_graph(*args, **kwargs):
+    """Dynamic graph builder factory."""
+    from src.graph.graph import build_dynamic_graph as _bdg
+    return _bdg(*args, **kwargs)
+def build_graph(*args, **kwargs):
+    """Default graph builder factory."""
+    from src.graph.graph import build_graph as _bg
+    return _bg(*args, **kwargs)
+def get_travel_graph(*args, **kwargs):
+    """Compiled session graph resolver."""
+    from src.graph.graph import get_travel_graph as _gtg
+    return _gtg(*args, **kwargs)
+def run_travel_agent(*args, **kwargs):
+    """Graph runner execution helper."""
+    from src.graph.runner import run_travel_agent as _rta
+    return _rta(*args, **kwargs)
+__all__ = [
+    "TravelState",
+    "build_dynamic_graph",
+    "build_graph",
+    "get_travel_graph",
+    "initial_state",
+    "run_travel_agent",
+]
+`````
+
+## File: src/graph/graph.py
+`````python
+"""Wires the agents together into the LangGraph workflow with dynamic routing support."""
+from collections.abc import Callable
+from functools import lru_cache
+from typing import Any
+from langgraph.graph import END, START, StateGraph
+from src.agents.base import AgentProtocol
+from src.agents.final_agent import final_agent
+from src.agents.flight_agent import flight_agent
+from src.agents.hotel_agent import hotel_agent
+from src.agents.itinerary_agent import itinerary_agent
+from src.agents.weather_agent import weather_agent
+from src.clients.checkpointer import get_checkpointer
+from src.config.session import require, resolve_database_url
+from src.graph.state import TravelState
+DEFAULT_PIPELINE = [
+    "flight_agent",
+    "hotel_agent",
+    "weather_agent",
+    "itinerary_agent",
+    "final_agent",
+]
+AGENT_NODE_REGISTRY: dict[
+    str, Callable[[TravelState], dict[str, Any]] | AgentProtocol
+] = {
+    "flight_agent": flight_agent,
+    "hotel_agent": hotel_agent,
+    "weather_agent": weather_agent,
+    "itinerary_agent": itinerary_agent,
+    "final_agent": final_agent,
+}
+def build_dynamic_graph(
+    pipeline_config: list[str | dict[str, Any]] | None = None,
+    custom_nodes: dict[str, Callable[..., Any] | AgentProtocol] | None = None,
+) -> StateGraph:
+    """
+    Constructs LangGraph pipelines dynamically from ordered configuration lists
+    rather than hardcoded sequential edges.
+    Args:
+        pipeline_config: Ordered list of node names or configuration dictionaries.
+        custom_nodes: Optional dictionary of additional node names and node callables/agents.
+    Returns:
+        Uncompiled StateGraph instance built according to the dynamic configuration.
+    """
+    nodes_map = dict(AGENT_NODE_REGISTRY)
+    if custom_nodes:
+        nodes_map.update(custom_nodes)
+    if not pipeline_config:
+        pipeline_sequence = DEFAULT_PIPELINE
+    else:
+        pipeline_sequence = []
+        for item in pipeline_config:
+            if isinstance(item, str):
+                pipeline_sequence.append(item)
+            elif isinstance(item, dict) and "name" in item:
+                pipeline_sequence.append(item["name"])
+    if not pipeline_sequence:
+        raise ValueError("Pipeline sequence configuration cannot be empty.")
+    graph = StateGraph(TravelState)
+    # Register nodes into graph
+    for node_name in pipeline_sequence:
+        if node_name not in nodes_map:
+            available = ", ".join(sorted(nodes_map.keys()))
+            raise KeyError(
+                f"Node '{node_name}' not found in registry. Available nodes: {available}"
+            )
+        graph.add_node(node_name, nodes_map[node_name])
+    # Dynamic sequential routing
+    graph.add_edge(START, pipeline_sequence[0])
+    for i in range(len(pipeline_sequence) - 1):
+        graph.add_edge(pipeline_sequence[i], pipeline_sequence[i + 1])
+    graph.add_edge(pipeline_sequence[-1], END)
+    return graph
+def build_graph() -> StateGraph:
+    """Build the default uncompiled graph. Useful for tests and visualization."""
+    return build_dynamic_graph(DEFAULT_PIPELINE)
+@lru_cache(maxsize=4)
+def _compiled_graph(database_url: str):
+    return build_graph().compile(checkpointer=get_checkpointer(database_url))
+def get_travel_graph():
+    """
+    Compile the graph against whichever database the current session
+    resolves to. One compiled graph is cached per distinct URL.
+    """
+    require("DATABASE_URL")
+    return _compiled_graph(resolve_database_url())
+`````
+
+## File: src/graph/runner.py
+`````python
+"""Entry point the API layer calls to run one travel planning request."""
+import uuid
+from src.config.session import require
+from src.graph.graph import get_travel_graph
+from src.graph.state import initial_state
+def run_travel_agent(user_input: str, thread_id: str | None = None) -> dict:
+    # Check everything up front so the caller learns about every missing key
+    # at once, rather than one per failed attempt.
+    require("GROQ_API_KEY", "DATABASE_URL")
+    if not thread_id:
+        thread_id = f"user_{uuid.uuid4().hex}"
+    config = {"configurable": {"thread_id": thread_id}}
+    result = get_travel_graph().invoke(
+        initial_state(user_input),
+        config=config,
+    )
+    final_answer = result["messages"][-1].content
+    return {
+        "thread_id": thread_id,
+        "answer": final_answer,
+        "flight_results": result.get("flight_results", ""),
+        "hotel_results": result.get("hotel_results", ""),
+        "weather_results": result.get("weather_results", ""),
+        "itinerary": result.get("itinerary", ""),
+        "llm_calls": result.get("llm_calls", 0),
+    }
+if __name__ == "__main__":
+    # Run with:  python -m src.graph.runner
+    user_query = (
+        "I want to plan a trip to Paris in July. "
+        "Can you help me find flights, hotels, and an itinerary?"
+    )
+    output = run_travel_agent(user_query, thread_id="test_thread_001")
+    print(output["answer"])
+`````
+
+## File: src/graph/state.py
+`````python
+"""Shared state passed between every node of the travel graph."""
+import operator
+from typing import Annotated, TypedDict
+from langchain_core.messages import AnyMessage
+class TravelState(TypedDict):
+    messages: Annotated[list[AnyMessage], operator.add]
+    user_query: str
+    flight_results: str
+    hotel_results: str
+    itinerary: str
+    llm_calls: int
+    weather_results: str
+def initial_state(user_query: str) -> TravelState:
+    """Build the empty state the graph starts from."""
+    from langchain_core.messages import HumanMessage
+    return {
+        "messages": [HumanMessage(content=user_query)],
+        "user_query": user_query,
+        "flight_results": "",
+        "hotel_results": "",
+        "weather_results": "",
+        "itinerary": "",
+        "llm_calls": 0,
+    }
+`````
+
+## File: src/mcp_servers/__init__.py
+`````python
+"""
+MCP integration layer.
+    config.py       server registry, split into REMOTE_SERVERS / LOCAL_SERVERS
+    remote.py       HTTP servers  - Tavily
+    local.py        stdio servers - AviationStack, Weather
+    weather_server.py  the local weather server we ship
+    diagnostics.py  connectivity checks
+"""
+from src.mcp_servers.config import (
+    LOCAL_SERVERS,
+    MCP_SERVERS,
+    REMOTE_SERVERS,
+    get_client,
+    load_tools,
+)
+from src.mcp_servers.diagnostics import check_servers, get_all_tools
+from src.mcp_servers.local import (
+    aviation_mcp_call,
+    forecast_mcp_search,
+    weather_mcp_search,
+)
+from src.mcp_servers.remote import tavily_mcp_search
+__all__ = [
+    "LOCAL_SERVERS",
+    "MCP_SERVERS",
+    "REMOTE_SERVERS",
+    "aviation_mcp_call",
+    "check_servers",
+    "forecast_mcp_search",
+    "get_all_tools",
+    "get_client",
+    "load_tools",
+    "tavily_mcp_search",
+    "weather_mcp_search",
+]
+`````
+
+## File: src/mcp_servers/diagnostics.py
+`````python
+"""Connectivity checks for every configured MCP server."""
+from src.mcp_servers.config import (
+    LOCAL_SERVERS,
+    MCP_SERVERS,
+    REMOTE_SERVERS,
+    load_tools,
+)
+async def check_servers(server_names=None) -> dict:
+    """
+    Try each server independently and report what it exposes.
+    Returns {server_name: {"kind": ..., "ok": bool, "tools": [...],
+                           "error": str | None}}
+    """
+    names = server_names or list(MCP_SERVERS)
+    report = {}
+    for name in names:
+        kind = "remote" if name in REMOTE_SERVERS else "local"
+        try:
+            tools = await load_tools(name)
+            report[name] = {
+                "kind": kind,
+                "ok": True,
+                "tools": sorted(tools),
+                "error": None,
+            }
+        except Exception as error:
+            report[name] = {
+                "kind": kind,
+                "ok": False,
+                "tools": [],
+                "error": str(error),
+            }
+    return report
+async def get_all_tools() -> list:
+    """Flat list of every tool object across all reachable servers."""
+    all_tools = []
+    for name in MCP_SERVERS:
+        try:
+            tools = await load_tools(name)
+            all_tools.extend(tools.values())
+        except Exception as error:
+            print(f"\nCould not connect to {name} MCP:\n{error}\n")
+    return all_tools
+if __name__ == "__main__":
+    # Run with:  python -m src.mcp_servers.diagnostics
+    import asyncio
+    for server, status in asyncio.run(check_servers()).items():
+        label = "OK " if status["ok"] else "FAIL"
+        print(f"[{label}] {status['kind']:<6} {server}")
+        if status["ok"]:
+            for tool_name in status["tools"]:
+                print(f"          - {tool_name}")
+        else:
+            print(f"          {status['error']}")
+    print(f"\nremote: {list(REMOTE_SERVERS)}")
+    print(f"local:  {list(LOCAL_SERVERS)}")
+`````
+
+## File: src/utils/__init__.py
+`````python
+from src.utils.async_utils import bump_llm_calls, run_async, truncate
+__all__ = [
+    "bump_llm_calls",
+    "run_async",
+    "truncate",
+]
+`````
+
+## File: src/__init__.py
+`````python
+"""TravelBrain Multi-Agent Travel Planner package."""
+`````
+
+## File: .dockerignore
+`````
+# Virtualenv - rebuilt inside the image, and 130MB we never want in build context
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Secrets - injected at runtime via env_file / -e, never baked into a layer
+.env
+.env.*
+!.env.example
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude / agent scratch
+.claude/
+
+# Docker's own files
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Docs
+LICENSE
+README.md
+`````
+
+## File: .python-version
+`````
+3.11
+`````
+
+## File: docker-compose.yml
+`````yaml
+name: travelbrain
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: travelbrain-ai:latest
+    restart: unless-stopped
+    ports:
+      # Host port is configurable so it does not collide with other projects
+      # already bound to 8000. The container always listens on 8000 inside
+      # the network, which is what the healthcheck targets.
+      #   APP_PORT=8001 docker compose up -d
+      - "${APP_PORT:-8000}:8000"
+    # API keys and DATABASE_URL come from .env. Nothing secret is baked
+    # into the image - see .dockerignore.
+    env_file:
+      - .env
+    environment:
+      # Overrides the .env value: inside the compose network Redis is
+      # reachable by service name, not on localhost.
+      REDIS_URL: redis://redis:6379/0
+      CACHE_ENABLED: "true"
+      HOST: 0.0.0.0
+      PORT: "8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Download cache for uv. The aviationstack MCP server itself is already
+      # baked into the image at UV_TOOL_DIR (/home/app/.local/share/uv/tools),
+      # which this mount does not shadow - so `uvx aviationstack-mcp` works
+      # even on a cold volume. This just avoids re-downloading on the fallback
+      # path where the build-time install did not succeed.
+      - uv-cache:/home/app/.cache/uv
+    healthcheck:
+      test:
+        ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      # Exposed so you can run the app outside Docker against this Redis.
+      # Drop this line in production.
+      - "${REDIS_PORT:-6379}:6379"
+    # Redis is a pure cache here - LangGraph checkpoints live in PostgreSQL -
+    # so evicting under memory pressure is safe. appendonly keeps a warm cache
+    # across restarts.
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+  # Optional local PostgreSQL for the LangGraph checkpointer, for working
+  # offline instead of against Render. Not started by default.
+  #
+  #   docker compose --profile local-db up -d
+  #
+  # Then point DATABASE_URL at it:
+  #   DATABASE_URL=postgresql://travelbrain:travelbrain@postgres:5432/travelbrain?sslmode=disable
+  postgres:
+    profiles: ["local-db"]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: travelbrain
+      POSTGRES_PASSWORD: travelbrain
+      POSTGRES_DB: travelbrain
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travelbrain -d travelbrain"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+volumes:
+  redis-data:
+  postgres-data:
+  uv-cache:
+`````
+
+## File: Dockerfile
+`````dockerfile
+# syntax=docker/dockerfile:1.7
+
+###############################################################################
+# Builder - resolve and install dependencies into a self-contained /app/.venv
+###############################################################################
+FROM python:3.11-slim-bookworm AS builder
+
+# uv is copied from its official image rather than pip-installed, so the
+# builder never needs a network round trip for uv itself.
+COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# Dependency layer. Only pyproject.toml + uv.lock are copied here, so this
+# layer is reused on every build where the dependency set has not changed.
+COPY pyproject.toml uv.lock ./
+
+# --no-install-project: this project has no [build-system], the source is
+# copied in directly rather than installed as a package.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+
+###############################################################################
+# Runtime
+###############################################################################
+FROM python:3.11-slim-bookworm AS runtime
+
+COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /uvx /bin/
+
+# curl is used by the container healthcheck against /health.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Run as a non-root user. The local MCP servers are spawned as child
+# processes, so they inherit this user too.
+RUN groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid app --create-home app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:/home/app/.local/bin:$PATH" \
+    VIRTUAL_ENV=/app/.venv \
+    UV_CACHE_DIR=/home/app/.cache/uv \
+    UV_TOOL_DIR=/home/app/.local/share/uv/tools \
+    HOST=0.0.0.0 \
+    PORT=8000
+
+WORKDIR /app
+
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+
+# The aviationstack MCP server is launched at runtime with `uvx
+# aviationstack-mcp` (see src/mcp_servers/config.py). Installing it at build
+# time means the first flight request does not have to download it, and the
+# container works even when outbound PyPI access is blocked.
+#
+# The mcp<2 pin matches src/mcp_servers/config.py - aviationstack-mcp uses the
+# v1 FastMCP API that mcp 2.x renamed to MCPServer. It also requires Python
+# >= 3.13, so uv provisions that interpreter for the tool environment only;
+# the app itself still runs on 3.11.
+USER app
+RUN uv tool install --with "mcp<2" aviationstack-mcp \
+    || echo "WARNING: could not pre-install aviationstack-mcp; uvx will fetch it on first use"
+
+COPY --chown=app:app app.py ./
+COPY --chown=app:app src/ ./src/
+COPY --chown=app:app frontend/ ./frontend/
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:${PORT}/health || exit 1
+
+# Always bind 0.0.0.0. Inside a container that is the only correct answer, and
+# hard-coding it means a stray HOST=127.0.0.1 in the environment - copied from
+# a local .env into a hosting dashboard, say - cannot make the service
+# unreachable. PORT stays configurable because hosts assign it (Render sends
+# 10000 by default).
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+`````
+
+## File: pyproject.toml
+`````toml
+[project]
+name = "multi-agent-travel-agent-planner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "airportsdata>=20260803",
+    "fastapi>=0.141.1",
+    "jinja2>=3.1.6",
+    "langchain>=1.3.17",
+    "langchain-groq>=1.1.3",
+    "langchain-mcp-adapters>=0.3.2",
+    "langgraph>=1.2.11",
+    "langgraph-checkpoint-postgres>=3.1.2",
+    "mcp>=1.29.1",
+    "nest-asyncio>=1.6.0",
+    "psycopg-pool>=3.3.1",
+    "psycopg[binary]>=3.3.4",
+    "pycountry>=26.2.16",
+    "python-dotenv>=1.2.3",
+    "redis>=5.2.1",
+    "requests>=2.34.2",
+    "tavily>=1.1.0",
+    "uvicorn>=0.52.4",
+]
+`````
+
+## File: repomix.config.json
+`````json
+{
+  "output": {
+    "filePath": "repomix-output.txt",
+    "style": "plain",
+    "headerText": "Codebase snapshot generated for architectural audit.",
+    "topFilesFirst": true,
+    "showLineNumbers": false,
+    "removeComments": false,
+    "removeEmptyLines": true
+  },
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "**/migrations/*",
+      "!**/migrations/__init__.py",
+      "**/*lock*",
+      "poetry.lock",
+      "Pipfile.lock",
+      "pdm.lock",
+      "requirements*.txt",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "**/*.pyo",
+      "**/*.pyd",
+      "**/.pytest_cache/**",
+      "**/.mypy_cache/**",
+      "**/.ruff_cache/**",
+      "**/.coverage",
+      "**/htmlcov/**",
+      "**/*.log",
+      "**/*.sqlite3",
+      "**/*.db",
+      "**/media/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.gitignore",
+      "**/LICENSE*",
+      "**/CHANGELOG*",
+      "**/GEMINI*",
+      "**/.env*",
+      "**/secrets.*",
+      "**/*.pem",
+      "**/*.key",
+      "**/id_rsa*",
+      "**/id_ed25519*",
+      "**/credentials.json",
+      "**/service-account*.json",
+      "**/*.tfstate*",
+      "**/*.tfvars",
+      "**/*.sql",
+      "**/*.dump"
+    ]
+  }
+}
+`````
+
+## File: src/agents/destination.py
+`````python
+"""Pulls the destination out of a free-form travel query using prompt registry and telemetry."""
+from src.agents.prompts_registry import default_prompt_registry
+from src.clients.cache import cached
+from src.clients.llm_provider import get_llm_provider
+from src.config.settings import settings
+from src.utils.telemetry import track_performance
+@cached(prefix="destination", ttl=settings.redis.ttl_destination)
+@track_performance("extract_destination")
+def extract_destination(query: str) -> str:
+    """
+    Cached: the same query always maps to the same destination.
+    """
+    prompt = default_prompt_registry.format_prompt(
+        "destination_extraction", query=query
+    )
+    llm_provider = get_llm_provider("groq")
+    response = llm_provider.invoke(prompt)
+    return response.content.strip()
+`````
+
+## File: src/agents/flight_agent.py
+`````python
+"""Turns the user query into concrete flight guidance using AviationStack MCP via ToolRegistry."""
+from typing import Any
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from src.agents.base import BaseAgent
+from src.agents.prompts_registry import default_prompt_registry
+from src.clients.llm_provider import get_llm_provider
+from src.config.settings import settings
+from src.graph.state import TravelState
+from src.mcp_servers.registry import default_tool_registry
+from src.utils.async_utils import bump_llm_calls, truncate
+from src.utils.telemetry import track_performance
+class FlightAgent(BaseAgent):
+    """Enterprise Flight Planner agent implementing AgentProtocol."""
+    def __init__(self) -> None:
+        super().__init__(name="flight_agent")
+        self.llm_provider = get_llm_provider("groq")
+        self.prompt_registry = default_prompt_registry
+        self.tool_registry = default_tool_registry
+    @track_performance("flight_agent")
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        query = state["user_query"]
+        try:
+            airports = self.tool_registry.execute_tool(
+                "aviation_mcp_call", tool_name="list_airports"
+            )
+            airlines = self.tool_registry.execute_tool(
+                "aviation_mcp_call", tool_name="list_airlines"
+            )
+            prompt_content = self.prompt_registry.format_prompt(
+                "flight_user",
+                query=query,
+                airport_data=truncate(
+                    airports, settings.truncation.airport_data_char_limit
+                ),
+                airline_data=truncate(
+                    airlines, settings.truncation.airline_data_char_limit
+                ),
+            )
+            system_prompt = self.prompt_registry.get_prompt("flight_system")
+            response = self.llm_provider.invoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=prompt_content),
+                ]
+            )
+            flight_data = response.content
+        except Exception as e:
+            flight_data = f"Flight information unavailable: {e!s}"
+        return {
+            "flight_results": flight_data,
+            "messages": [AIMessage(content="Flight recommendations generated")],
+            "llm_calls": bump_llm_calls(state),
+        }
+# Singleton agent instance and node callable
+_flight_agent_instance = FlightAgent()
+def flight_agent(state: TravelState) -> dict[str, Any]:
+    """LangGraph node callable for flight agent."""
+    return _flight_agent_instance(state)
+`````
+
+## File: src/agents/weather_agent.py
+`````python
+"""Fetches current weather and forecast for extracted destination via ToolRegistry."""
+from typing import Any
+from langchain_core.messages import AIMessage
+from src.agents.base import BaseAgent
+from src.agents.destination import extract_destination
+from src.agents.prompts_registry import default_prompt_registry
+from src.graph.state import TravelState
+from src.mcp_servers.registry import default_tool_registry
+from src.utils.telemetry import track_performance
+class WeatherAgent(BaseAgent):
+    """Enterprise Weather Planner agent implementing AgentProtocol."""
+    def __init__(self) -> None:
+        super().__init__(name="weather_agent")
+        self.prompt_registry = default_prompt_registry
+        self.tool_registry = default_tool_registry
+    @track_performance("weather_agent")
+    def execute(self, state: TravelState) -> dict[str, Any]:
+        city = extract_destination(state["user_query"])
+        weather_data = self.tool_registry.execute_tool("weather_mcp_search", city=city)
+        forecast_data = self.tool_registry.execute_tool(
+            "forecast_mcp_search", city=city
+        )
+        formatted_weather = self.prompt_registry.format_prompt(
+            "weather_results_template",
+            weather_data=weather_data,
+            forecast_data=forecast_data,
+        )
+        return {
+            "weather_results": formatted_weather,
+            "messages": [AIMessage(content="Weather information fetched")],
+        }
+# Singleton agent instance and node callable
+_weather_agent_instance = WeatherAgent()
+def weather_agent(state: TravelState) -> dict[str, Any]:
+    """LangGraph node callable for weather agent."""
+    return _weather_agent_instance(state)
+`````
+
+## File: src/api/validation.py
+`````python
+# src/api/validation.py
+import psycopg
+import requests
+GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
+def check_groq_api_key(api_key: str) -> tuple[bool, str]:
+    try:
+        response = requests.get(
+            GROQ_MODELS_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+    except requests.RequestException as error:
+        return False, f"Could not reach Groq: {error}"
+    if response.status_code == 401:
+        return False, "Groq rejected this key (401 Unauthorized)."
+    if not response.ok:
+        return False, f"Groq returned HTTP {response.status_code}."
+    return True, "Key accepted by Groq."
+def check_database_url(database_url: str) -> tuple[bool, str]:
+    if "sslmode=" not in database_url:
+        separator = "&" if "?" in database_url else "?"
+        database_url = f"{database_url}{separator}sslmode=require"
+    try:
+        connection = psycopg.connect(
+            database_url,
+            connect_timeout=10,
+        )
+    except Exception as error:
+        return False, f"Could not connect: {error}"
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception as error:
+        return False, f"Connected, but the test query failed: {error}"
+    finally:
+        connection.close()
+    return True, "Connected successfully."
+`````
+
+## File: src/clients/cache.py
+`````python
+# src/clients/cache.py
+import functools
+import hashlib
+import json
+import logging
+import time
+from collections.abc import Callable
+from typing import Any
+import redis
+from src.config.settings import settings
+logger = logging.getLogger(__name__)
+_client: redis.Redis | None = None
+_last_failure: float | None = None
+def get_client() -> redis.Redis | None:
+    global _client, _last_failure
+    if not settings.redis.enabled or not settings.redis.url:
+        return None
+    if _client is not None:
+        return _client
+    now = time.monotonic()
+    if (
+        _last_failure is not None
+        and now - _last_failure < settings.redis.reconnect_seconds
+    ):
+        return None
+    try:
+        client = redis.Redis.from_url(
+            settings.redis.url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        client.ping()
+        _client = client
+        _last_failure = None
+        logger.info("Redis cache connected successfully.")
+    except Exception as error:
+        _client = None
+        _last_failure = now
+        logger.warning(
+            "Redis cache unavailable (%s). Continuing without cache; will retry in %ss.",
+            error,
+            settings.redis.reconnect_seconds,
+        )
+    return _client
+def drop_client() -> None:
+    global _client, _last_failure
+    _client = None
+    _last_failure = time.monotonic()
+def reset_client() -> None:
+    global _client, _last_failure
+    _client = None
+    _last_failure = None
+def status() -> dict:
+    if not settings.redis.enabled or not settings.redis.url:
+        return {
+            "enabled": False,
+            "connected": False,
+            "reason": "Redis disabled or URL not set",
+        }
+    connected = get_client() is not None
+    return {
+        "enabled": True,
+        "connected": connected,
+    }
+def build_key(prefix: str, args: tuple, kwargs: dict) -> str:
+    fingerprint = json.dumps(
+        [args, sorted(kwargs.items())], default=str, sort_keys=True
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return f"{settings.redis.key_prefix}:{prefix}:{digest}"
+def _read(key: str) -> tuple[bool, Any]:
+    client = get_client()
+    if client is None:
+        return False, None
+    try:
+        payload = client.get(key)
+    except Exception:
+        drop_client()
+        return False, None
+    if payload is None:
+        return False, None
+    try:
+        return True, json.loads(payload)
+    except (TypeError, ValueError):
+        return False, None
+def _write(key: str, value: Any, ttl: int) -> Any:
+    try:
+        payload = json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return value
+    client = get_client()
+    if client is not None:
+        try:
+            client.setex(key, ttl, payload)
+        except Exception:
+            drop_client()
+    return json.loads(payload)
+def cached(prefix: str, ttl: int) -> Callable:
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            key = build_key(prefix, args, kwargs)
+            hit, value = _read(key)
+            if hit:
+                return value
+            return _write(key, func(*args, **kwargs), ttl)
+        return wrapper
+    return decorator
+def async_cached(prefix: str, ttl: int) -> Callable:
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            key = build_key(prefix, args, kwargs)
+            hit, value = _read(key)
+            if hit:
+                return value
+            return _write(key, await func(*args, **kwargs), ttl)
+        return wrapper
+    return decorator
+`````
+
+## File: src/clients/checkpointer.py
+`````python
+# src/clients/checkpointer.py
+from functools import lru_cache
+import psycopg
+from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg.rows import dict_row
+from src.config.session import require, resolve_database_url
+@lru_cache(maxsize=4)
+def get_connection(database_url: str) -> psycopg.Connection:
+    return psycopg.connect(
+        database_url,
+        autocommit=True,
+        row_factory=dict_row,
+    )
+@lru_cache(maxsize=4)
+def get_checkpointer(database_url: str) -> PostgresSaver:
+    checkpointer = PostgresSaver(get_connection(database_url))
+    checkpointer.setup()
+    return checkpointer
+def get_session_checkpointer() -> PostgresSaver:
+    require("DATABASE_URL")
+    return get_checkpointer(resolve_database_url())
+`````
+
+## File: src/clients/llm.py
+`````python
+"""Resolves Groq LLM client instance per session or environment key."""
+from src.clients.llm_provider import get_llm_provider
+def get_llm():
+    """Resolves Groq LLM client instance per session or environment key."""
+    provider = get_llm_provider("groq")
+    return provider.get_client()
+`````
+
+## File: src/config/__init__.py
+`````python
+# src/config/__init__.py
+from src.config.settings import (
+    Settings,
+    get_settings,
+    settings,
+)
+__all__ = [
+    "Settings",
+    "get_settings",
+    "settings",
+]
+`````
+
+## File: src/config/session.py
+`````python
+# src/config/session.py
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from src.config.settings import settings
+@dataclass(frozen=True)
+class Credentials:
+    groq_api_key: str | None = None
+    database_url: str | None = None
+EMPTY = Credentials()
+_current: ContextVar[Credentials] = ContextVar("travelbrain_credentials", default=EMPTY)
+class MissingCredentialsError(RuntimeError):
+    """Raised when a required key is configured in neither .env nor the session."""
+    def __init__(self, missing: list[str]):
+        self.missing = missing
+        super().__init__(
+            "Missing credentials: "
+            + ", ".join(missing)
+            + ". Add them in Settings, or set them in the server's .env file."
+        )
+def get_credentials() -> Credentials:
+    return _current.get()
+@contextmanager
+def use_credentials(credentials: Credentials | None):
+    token = _current.set(credentials or EMPTY)
+    try:
+        yield
+    finally:
+        _current.reset(token)
+# =========================
+# Resolution
+# =========================
+def resolve_groq_api_key() -> str | None:
+    session_key = get_credentials().groq_api_key
+    if session_key:
+        return session_key
+    return settings.llm.groq_api_key.get_secret_value()
+def resolve_database_url() -> str | None:
+    session_url = get_credentials().database_url
+    url = session_url or settings.db.url
+    if url and "sslmode=" not in url:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}sslmode=require"
+    return url
+def require(*names: str) -> None:
+    resolvers = {
+        "GROQ_API_KEY": resolve_groq_api_key,
+        "DATABASE_URL": resolve_database_url,
+    }
+    missing = [name for name in names if not resolvers[name]()]
+    if missing:
+        raise MissingCredentialsError(missing)
+# =========================
+# Status, for Settings UI
+# =========================
+CREDENTIAL_LABELS = {
+    "GROQ_API_KEY": {
+        "label": "Groq API key",
+        "hint": "Powers every agent. Create one at console.groq.com/keys.",
+        "placeholder": "gsk_...",
+    },
+    "DATABASE_URL": {
+        "label": "PostgreSQL URL",
+        "hint": "Stores LangGraph conversation checkpoints.",
+        "placeholder": "postgresql://user:password@host:5432/dbname",
+    },
+}
+def credential_status() -> dict:
+    session = get_credentials()
+    sources = {
+        "GROQ_API_KEY": (
+            "session"
+            if session.groq_api_key
+            else "env"
+            if settings.llm.groq_api_key
+            else None
+        ),
+        "DATABASE_URL": (
+            "session" if session.database_url else "env" if settings.db.url else None
+        ),
+    }
+    credentials = {
+        name: {
+            **CREDENTIAL_LABELS[name],
+            "configured": source is not None,
+            "source": source,
+        }
+        for name, source in sources.items()
+    }
+    missing = [name for name, source in sources.items() if source is None]
+    return {
+        "ready": not missing,
+        "missing": missing,
+        "credentials": credentials,
+    }
+`````
+
+## File: src/config/settings.py
+`````python
+# src/config/settings.py
+import os
+from functools import lru_cache
+from typing import Literal
+import certifi
+from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+# Corporate / secure network CA bundle fallback
+os.environ["SSL_CERT_FILE"] = certifi.where()
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+class AppConfig(BaseModel):
+    name: str = "TravelBrain AI"
+    description: str = "LangGraph Multi-Agent Travel Planner with FastAPI Frontend"
+    version: str = "1.0.0"
+    env: Literal["development", "staging", "production"] = "development"
+    debug: bool = False
+    api_v1_prefix: str = "/api"
+class SecurityConfig(BaseModel):
+    session_cookie_name: str = "travelbrain_session"
+    session_ttl_seconds: int = 43200  # 12 hours
+    cors_origins: list[str] = Field(default_factory=list)
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    cookie_secure: bool = False
+class DatabaseConfig(BaseModel):
+    url: str = Field(..., description="PostgreSQL database connection string")
+    pool_size: int = 20
+    max_overflow: int = 10
+    @field_validator("url")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """Enforces sslmode=require for managed cloud PostgreSQL providers."""
+        if v and "sslmode=" not in v:
+            separator = "&" if "?" in v else "?"
+            v = f"{v}{separator}sslmode=require"
+        return v
+class RedisConfig(BaseModel):
+    url: str | None = Field(default=None, description="Redis cluster connection URL")
+    enabled: bool = True
+    reconnect_seconds: int = int(os.getenv("CACHE_RECONNECT_SECONDS", "60"))
+    key_prefix: str = "travelbrain"
+    ttl_airports: int = 7 * 24 * 3600
+    ttl_airlines: int = 7 * 24 * 3600
+    ttl_hotels: int = 6 * 3600
+    ttl_weather: int = 600
+    ttl_forecast: int = 3600
+    ttl_destination: int = 24 * 3600
+class LLMConfig(BaseModel):
+    groq_api_key: SecretStr = Field(..., description="Groq API Key for agent execution")
+    model: str = Field(
+        default="openai/gpt-oss-20b", description="Groq Model Identifier"
+    )
+    @field_validator("groq_api_key")
+    @classmethod
+    def validate_groq_api_key(cls, v: SecretStr) -> SecretStr:
+        raw_key = v.get_secret_value().strip()
+        if not raw_key or len(raw_key) < 5:
+            raise ValueError("GROQ_API_KEY appears invalid or too short.")
+        return v
+class ExternalAPIsConfig(BaseModel):
+    tavily_api_key: SecretStr = Field(
+        ..., description="Tavily API Key for hotel searches"
+    )
+    aviationstack_api_key: SecretStr = Field(
+        ..., description="AviationStack API Key for flight data"
+    )
+    openweather_api_key: SecretStr = Field(
+        ..., description="OpenWeather API Key for live weather/forecasts"
+    )
+class TruncationConfig(BaseModel):
+    airport_data_char_limit: int = 3000
+    airline_data_char_limit: int = 3000
+class Settings(BaseSettings):
+    app: AppConfig = Field(default_factory=AppConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    db: DatabaseConfig
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    llm: LLMConfig
+    apis: ExternalAPIsConfig
+    truncation: TruncationConfig = Field(default_factory=TruncationConfig)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        # Maps double underscore env vars (e.g., LLM__GROQ_API_KEY or DB__URL)
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        extra="ignore",
+    )
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+settings = get_settings()
+`````
+
+## File: src/mcp_servers/local.py
+`````python
+# src/mcp_servers/local.py
+"""
+Local MCP servers, spawned as stdio child processes.
+"""
+from src.clients.cache import async_cached
+from src.config.settings import settings
+from src.mcp_servers.config import (
+    WEATHER_SERVER_PATH,
+    load_tools,
+    require_tools,
+)
+AVIATION_SERVER_NAME = "aviationstack"
+WEATHER_SERVER_NAME = "weather"
+CURRENT_WEATHER_TOOL = "get_current_weather"
+FORECAST_TOOL = "get_forecast"
+# Reference data that effectively never changes, using TTLs from settings.redis
+LONG_LIVED_AVIATION_TOOLS = {
+    "list_airports": settings.redis.ttl_airports,
+    "list_airlines": settings.redis.ttl_airlines,
+}
+# =========================
+# AviationStack
+# =========================
+_aviation_tools: dict = {}
+async def _get_aviation_tools() -> dict:
+    global _aviation_tools
+    if _aviation_tools:
+        return _aviation_tools
+    tools = await load_tools(AVIATION_SERVER_NAME)
+    if not tools:
+        raise RuntimeError("AviationStack MCP connected but returned no tools.")
+    _aviation_tools = tools
+    return _aviation_tools
+async def _aviation_call(tool_name: str, tool_args: dict | None = None):
+    tools = await _get_aviation_tools()
+    tool = tools.get(tool_name)
+    if tool is None:
+        available = ", ".join(sorted(tools)) or "none"
+        raise ValueError(
+            f"AviationStack tool '{tool_name}' was not found. "
+            f"Available tools: {available}"
+        )
+    return await tool.ainvoke(tool_args or {})
+@async_cached(prefix="aviation:reference", ttl=settings.redis.ttl_airports)
+async def _aviation_call_cached(tool_name: str, tool_args: dict | None = None):
+    return await _aviation_call(tool_name, tool_args)
+async def aviation_mcp_call(tool_name: str, tool_args: dict | None = None):
+    """Call an AviationStack tool."""
+    if tool_name in LONG_LIVED_AVIATION_TOOLS:
+        return await _aviation_call_cached(tool_name, tool_args)
+    return await _aviation_call(tool_name, tool_args)
+# =========================
+# Weather
+# =========================
+_weather_tools: dict = {}
+async def _get_weather_tools() -> dict:
+    global _weather_tools
+    if _weather_tools:
+        return _weather_tools
+    if not WEATHER_SERVER_PATH.exists():
+        raise FileNotFoundError(
+            f"Weather MCP server file was not found: {WEATHER_SERVER_PATH}"
+        )
+    tools = await load_tools(WEATHER_SERVER_NAME)
+    require_tools(
+        WEATHER_SERVER_NAME,
+        tools,
+        CURRENT_WEATHER_TOOL,
+        FORECAST_TOOL,
+    )
+    _weather_tools = tools
+    return _weather_tools
+@async_cached(prefix="weather:current", ttl=settings.redis.ttl_weather)
+async def weather_mcp_search(city: str):
+    """Current conditions with TTL from settings.redis."""
+    tools = await _get_weather_tools()
+    return await tools[CURRENT_WEATHER_TOOL].ainvoke({"city": city})
+@async_cached(prefix="weather:forecast", ttl=settings.redis.ttl_forecast)
+async def forecast_mcp_search(city: str):
+    """Multi-day forecast with TTL from settings.redis."""
+    tools = await _get_weather_tools()
+    return await tools[FORECAST_TOOL].ainvoke({"city": city})
+`````
+
+## File: src/mcp_servers/remote.py
+`````python
+# src/mcp_servers/remote.py
+"""
+Remote MCP servers, reached over HTTP.
+Currently: Tavily (hotel / general web search).
+"""
+from src.clients.cache import async_cached
+from src.config.settings import settings
+from src.mcp_servers.config import load_tools, require_tools
+SERVER_NAME = "tavily"
+SEARCH_TOOL_NAME = "tavily_search"
+_search_tool = None
+async def _get_search_tool():
+    """Connect to Tavily once and keep the search tool handle."""
+    global _search_tool
+    if _search_tool is not None:
+        return _search_tool
+    tools = await load_tools(SERVER_NAME)
+    require_tools(SERVER_NAME, tools, SEARCH_TOOL_NAME)
+    _search_tool = tools[SEARCH_TOOL_NAME]
+    return _search_tool
+@async_cached(prefix="tavily:search", ttl=settings.redis.ttl_hotels)
+async def tavily_mcp_search(query: str):
+    """Search the web. Cached with TTL from settings.redis."""
+    tool = await _get_search_tool()
+    return await tool.ainvoke({"query": query})
+`````
+
+## File: src/mcp_servers/weather_server.py
+`````python
+import os
+import requests
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+load_dotenv()
+mcp = FastMCP("Weather MCP Server")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+@mcp.tool()
+def get_current_weather(city: str):
+    response = requests.get(
+        "https://api.openweathermap.org/data/2.5/weather",
+        params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric"},
+    )
+    data = response.json()
+    if response.status_code != 200:
+        return data
+    return {
+        "city": data["name"],
+        "temperature_c": data["main"]["temp"],
+        "feels_like_c": data["main"]["feels_like"],
+        "humidity": data["main"]["humidity"],
+        "condition": data["weather"][0]["description"],
+        "wind_speed": data["wind"]["speed"],
+    }
+@mcp.tool()
+def get_forecast(city: str):
+    url = "https://api.openweathermap.org/data/2.5/forecast"
+    params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric"}
+    response = requests.get(url, params=params)
+    data = response.json()
+    forecast = []
+    # Return first 5 forecast entries
+    for item in data["list"][:5]:
+        forecast.append(
+            {
+                "datetime": item["dt_txt"],
+                "temperature": item["main"]["temp"],
+                "weather": item["weather"][0]["description"],
+            }
+        )
+    return {"city": city, "forecast": forecast}
+if __name__ == "__main__":
+    mcp.run()
+`````
+
+## File: src/utils/async_utils.py
+`````python
+"""
+Helpers for calling async MCP tools from the synchronous graph nodes.
+app.py applies nest_asyncio, which is what makes asyncio.run() safe to
+call from inside FastAPI's already-running event loop.
+"""
+import asyncio
+from collections.abc import Awaitable
+from typing import Any, TypeVar
+T = TypeVar("T")
+def run_async(coroutine: Awaitable[T]) -> T:
+    """Run a coroutine to completion from synchronous code."""
+    return asyncio.run(coroutine)
+def bump_llm_calls(state: dict, count: int = 1) -> int:
+    """Return the incremented LLM call counter for a node's state update."""
+    return state.get("llm_calls", 0) + count
+def truncate(value: Any, limit: int) -> str:
+    """Stringify a tool payload and clip it so prompts stay within budget."""
+    return str(value)[:limit]
+`````
+
+## File: app.py
+`````python
+# app.py
+import os
+import traceback
+from pathlib import Path
+import nest_asyncio
+import uvicorn
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from src.api.sessions import (
+    clear_credentials,
+    get_credentials_for,
+    new_session_id,
+    store_credentials,
+)
+from src.api.validation import check_database_url, check_groq_api_key
+from src.clients import cache
+from src.config.session import (
+    MissingCredentialsError,
+    credential_status,
+    use_credentials,
+)
+from src.config.settings import settings
+from src.graph.runner import run_travel_agent
+nest_asyncio.apply()
+BASE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIR = BASE_DIR / "frontend"
+app = FastAPI(
+    title=settings.app.name,
+    description=settings.app.description,
+    version=settings.app.version,
+)
+# Configure CORS using settings.security
+if settings.security.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.security.cors_origins,
+        allow_credentials=settings.security.allow_credentials,
+        allow_methods=settings.security.allow_methods,
+        allow_headers=settings.security.allow_headers,
+    )
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
+class TravelRequest(BaseModel):
+    message: str
+    thread_id: str | None = None
+class ConfigRequest(BaseModel):
+    """
+    None leaves a field untouched, "" clears it. Keys are held in server
+    memory for this session only and are never echoed back.
+    """
+    groq_api_key: str | None = None
+    database_url: str | None = None
+def _session_id(request: Request) -> str | None:
+    return request.cookies.get(settings.security.session_cookie_name)
+def _set_session_cookie(response: Response, session_id: str) -> None:
+    response.set_cookie(
+        settings.security.session_cookie_name,
+        session_id,
+        max_age=settings.security.session_ttl_seconds,
+        httponly=True,
+        samesite=settings.security.cookie_samesite,
+        secure=settings.security.cookie_secure,
+    )
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse(request=request, name="index.html", context={})
+# =========================
+# Credentials
+# =========================
+@app.get("/api/config")
+async def read_config(request: Request):
+    """What is configured, and where it came from. Never returns a secret."""
+    credentials = get_credentials_for(_session_id(request))
+    with use_credentials(credentials):
+        return JSONResponse(content=credential_status())
+@app.post("/api/config")
+async def write_config(request: Request, body: ConfigRequest):
+    """
+    Store credentials for this browser session. Each supplied value is
+    checked against the real service before being accepted.
+    """
+    session_id = _session_id(request) or new_session_id()
+    errors = {}
+    groq_key = (body.groq_api_key or "").strip()
+    if groq_key:
+        ok, detail = check_groq_api_key(groq_key)
+        if not ok:
+            errors["groq_api_key"] = detail
+    database_url = (body.database_url or "").strip()
+    if database_url:
+        ok, detail = check_database_url(database_url)
+        if not ok:
+            errors["database_url"] = detail
+    if errors:
+        response = JSONResponse(
+            status_code=400,
+            content={"success": False, "errors": errors},
+        )
+        _set_session_cookie(response, session_id)
+        return response
+    credentials = store_credentials(
+        session_id,
+        groq_api_key=body.groq_api_key,
+        database_url=body.database_url,
+    )
+    with use_credentials(credentials):
+        payload = {"success": True, **credential_status()}
+    response = JSONResponse(content=payload)
+    _set_session_cookie(response, session_id)
+    return response
+@app.delete("/api/config")
+async def reset_config(request: Request):
+    """Drop session keys and fall back to whatever the server's .env has."""
+    clear_credentials(_session_id(request))
+    with use_credentials(None):
+        return JSONResponse(content={"success": True, **credential_status()})
+# =========================
+# Planning
+# =========================
+@app.post("/api/travel")
+async def travel_planner(request: Request, request_data: TravelRequest):
+    credentials = get_credentials_for(_session_id(request))
+    try:
+        user_message = request_data.message.strip()
+        if not user_message:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "Message cannot be empty."},
+            )
+        with use_credentials(credentials):
+            result = run_travel_agent(
+                user_input=user_message, thread_id=request_data.thread_id
+            )
+        return JSONResponse(
+            content={
+                "success": True,
+                "thread_id": result["thread_id"],
+                "answer": result["answer"],
+                "flight_results": result["flight_results"],
+                "hotel_results": result["hotel_results"],
+                "weather_results": result.get("weather_results", ""),
+                "itinerary": result["itinerary"],
+                "llm_calls": result["llm_calls"],
+            }
+        )
+    except MissingCredentialsError as e:
+        return JSONResponse(
+            status_code=428,
+            content={
+                "success": False,
+                "error": str(e),
+                "missing": e.missing,
+            },
+        )
+    except Exception as e:
+        print("ERROR:", e)
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500, content={"success": False, "error": str(e)}
+        )
+@app.head("/", include_in_schema=False)
+async def home_head():
+    """Hosting platforms probe with HEAD to detect an open port."""
+    return Response(status_code=200)
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def health_check(request: Request):
+    credentials = get_credentials_for(_session_id(request))
+    with use_credentials(credentials):
+        status = credential_status()
+    return {
+        "status": "ok",
+        "message": f"{settings.app.name} API is running",
+        "ready": status["ready"],
+        "missing": status["missing"],
+        "cache": cache.status(),
+    }
+@app.get("/favicon.ico")
+async def favicon():
+    return JSONResponse(content={})
+if __name__ == "__main__":
+    uvicorn.run(
+        "app:app",
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=os.getenv("RELOAD", "true").lower() not in ("false", "0", "no"),
+    )
+`````
+
+## File: README.md
+`````markdown
+<h1 align="center">TravelBrain</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/status-in%20progress-f59e0b.svg" alt="Status">
+  <a href="https://github.com/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner/issues"><img src="https://img.shields.io/github/issues/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner.svg" alt="GitHub Issues"></a>
+  <a href="https://github.com/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner/pulls"><img src="https://img.shields.io/github/issues-pr/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner.svg" alt="GitHub Pull Requests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="License"></a>
+</p>
+
+---
+
+<p align="center"> A multi-agent AI travel planner. Describe the trip you want in
+    plain English and get back flights, hotels, weather and a day-by-day
+    itinerary — researched for you in about a minute.
+    <br>
+</p>
+
+## 📝 Table of Contents
+
+- [About](#about)
+- [Getting Started](#getting_started)
+- [Usage](#usage)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [Authors](#authors)
+- [Acknowledgements](#acknowledgement)
+
+## 🧐 About <a name = "about"></a>
+
+Planning a trip usually means juggling half a dozen browser tabs — one for flights, another for hotels, a third for the weather, and a notes app where you try to fit it all into a sensible order. TravelBrain collapses that into a single conversation. You describe the trip you want in your own words, the way you'd describe it to a friend — *"Plan a 10 day Europe trip from India in April, mid-range budget"* — and a team of AI specialists goes and researches it. One looks into flights, another finds places to stay, another checks what the weather will be doing while you're there. Their findings are then pulled together into a single plan you can actually act on, complete with a day-by-day schedule and a cost estimate. The result is a trip plan in about a minute, rather than an afternoon of research. Each part of the trip gets its own attention:
+
+| | |
+|---|---|
+| ✈️ **Flights** | Likely airports, airlines on the route, typical duration and fare range |
+| 🏨 **Hotels** | Accommodation options matched to your destination and budget |
+| 🌤️ **Weather** | Current conditions and the forecast, with travel advice |
+| 🗺️ **Itinerary** | A realistic day-by-day plan you can actually follow |
+| 💰 **Budget** | An estimated breakdown of what the trip will cost |
+
+Plans are saved as you go, so you can reopen a trip later and ask follow-up
+questions without starting over.
+
+## 🏁 Getting Started <a name = "getting_started"></a>
+
+These instructions will get you a copy of the project up and running on your
+local machine.
+
+### Prerequisites
+
+You'll need the following before you start:
+
+- **Python 3.11**
+- **[uv](https://docs.astral.sh/uv/)** — used to install dependencies
+- **A PostgreSQL database** — a free [Render](https://render.com/) instance works fine
+- **API keys** from the services below. All of them have free tiers:
+  - [Groq](https://console.groq.com/)
+  - [Tavily](https://tavily.com/)
+  - [AviationStack](https://aviationstack.com/)
+  - [OpenWeather](https://openweathermap.org/api)
+
+### Installing
+
+Clone the repository and move into it:
+
+```bash
+git clone https://github.com/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner.git
+cd TravelBrain-Multi-Agent-AI-Travel-Planner
+```
+
+Install the dependencies:
+
+```bash
+uv sync
+```
+
+Create a file named `.env` in the project root and add your keys:
+
+```dotenv
+# Required
+GROQ__API_KEY=your_groq_key
+DATABASE__URL=postgresql://user:password@host:5432/dbname
+
+# Service keys
+TAVILY__API_KEY=your_tavily_key
+AVIATIONSTACK__API_KEY=your_aviationstack_key
+OPENWEATHER__API_KEY=your_openweather_key
+
+# Optional
+GROQ__MODEL=openai/gpt-oss-20b
+```
+
+Here's what each one is for:
+
+| Variable | Required | What it's for |
+|---|:---:|---|
+| `GROQ_API_KEY` | ✅ | Powers the AI planning |
+| `DATABASE_URL` | ✅ | Saves your trips so you can return to them |
+| `TAVILY_API_KEY` | ✅ | Hotel search |
+| `AVIATIONSTACK_API_KEY` | ✅ | Airport and airline information |
+| `OPENWEATHER_API_KEY` | ✅ | Weather and forecasts |
+| `GROQ_MODEL` | ❌ | Switch the AI model without editing any code |
+
+Your `.env` file is ignored by Git. Never commit real keys.
+
+Now start the app:
+
+```bash
+uv run python app.py
+```
+
+Open **<http://127.0.0.1:8000>** in your browser. If you see the planner with a
+green *API connected* dot at the bottom of the sidebar, you're ready to go.
+
+## 🎈 Usage <a name="usage"></a>
+
+### Planning a trip
+
+Type your request into the box at the bottom of the screen and press **Enter**.
+Anything conversational works:
+
+> Plan a 10 day Europe trip from India in April, mid-range budget
+
+> I want a relaxed 5 day trip to Rome and Florence in September for two people
+
+Not sure where to start? Click one of the suggestion cards on the home screen.
+
+A plan takes **30–90 seconds** to build, and you'll see each stage as it
+progresses.
+
+### Using the trip builder
+
+If you'd rather fill in fields than write a sentence, click the **sliders icon**
+to the left of the message box. Enter your origin, destination, dates, duration,
+number of travellers and budget, pick the things you're interested in, then hit
+**Write my prompt**. Your request is composed for you, ready to send or edit.
+
+### Reading your plan
+
+Your results are split into tabs so you can jump straight to what you need:
+
+**Plan** · **Itinerary** · **Flights** · **Hotels** · **Weather**
+
+### Saving, exporting and revisiting
+
+- Every trip is saved to the sidebar automatically — click any one to reopen it
+- Ask follow-up questions on an open trip and it remembers the context
+- Use the icons at the top of a result to **copy**, **download as Markdown** or **print**
+- Click **New trip** to start fresh
+- Switch between **light and dark mode** with the sun/moon icon at the bottom of the sidebar
+
+## 🤔 Troubleshooting <a name = "troubleshooting"></a>
+
+<details>
+<summary><b>The page loads but planning fails</b></summary>
+
+Check the status indicator at the bottom of the sidebar. If it says *API
+unreachable*, the app has stopped — restart it with `uv run python app.py`.
+Otherwise, check the terminal you started the app in for the error.
+</details>
+
+<details>
+<summary><b>An error says the model does not exist</b></summary>
+
+AI providers retire models over time. List the ones your key can use:
+
+```bash
+curl -s https://api.groq.com/openai/v1/models \
+  -H "Authorization: Bearer $GROQ_API_KEY"
+```
+
+Pick one from the list and set it as `GROQ_MODEL` in your `.env` file.
+</details>
+
+<details>
+<summary><b>An error says DATABASE_URL is missing</b></summary>
+
+The app needs a PostgreSQL database to save your trips. Add a connection string
+to your `.env` file — see [Installing](#getting_started).
+</details>
+
+<details>
+<summary><b>Plans take a long time</b></summary>
+
+This is expected. Several specialists research your trip in turn, and each step
+involves live data and AI calls. 30–90 seconds is normal.
+</details>
+
+## 🤝 Contributing <a name = "contributing"></a>
+
+Contributions are welcome. This project is actively being developed, so there's
+plenty to pick up.
+
+### Getting set up
+
+1. **Fork** the repository and clone your fork
+2. Follow [Getting Started](#getting_started) to install everything
+3. Create a branch for your work:
+
+```bash
+git checkout -b feature/your-feature-name
+```
+
+### Making your changes
+
+- Keep each pull request focused on one thing
+- Match the style of the code around you
+- Check the app still runs end to end before you open a pull request
+- Never commit your `.env` file or any API keys
+
+### Submitting your work
+
+Commit with a message that says what changed and why:
+
+```bash
+git commit -m "Add support for multi-city trips"
+```
+
+Push to your fork:
+
+```bash
+git push origin feature/your-feature-name
+```
+
+Then open a **pull request** against `main` describing what you changed, why,
+and how you tested it.
+
+### Reporting bugs and suggesting ideas
+
+Open an [issue](https://github.com/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner/issues).
+For bugs, include what you did, what you expected, what happened instead, and
+any error output from the terminal.
+
+## 🎉 Acknowledgements <a name = "acknowledgement"></a>
+
+- [Groq](https://groq.com/) for fast AI inference
+- [Tavily](https://tavily.com/), [AviationStack](https://aviationstack.com/) and
+  [OpenWeather](https://openweathermap.org/) for the live travel data
+
+---
+
+Licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE).
+`````
+
+## File: src/mcp_servers/config.py
+`````python
+# src/mcp_servers/config.py
+"""
+MCP server registry, split by where the server actually runs.
+REMOTE servers are reached over HTTP and are operated by someone else.
+LOCAL servers are spawned as child processes over stdio on this machine.
+"""
+import os
+import sys
+from functools import lru_cache
+from pathlib import Path
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from src.config.settings import settings
+# This package holds the weather server we ship ourselves.
+MCP_DIR = Path(__file__).resolve().parent
+WEATHER_SERVER_PATH = MCP_DIR / "weather_server.py"
+def _child_env(**overrides: str) -> dict:
+    """
+    Full copy of the current environment plus explicit overrides.
+    """
+    env = os.environ.copy()
+    env.update({key: value or "" for key, value in overrides.items()})
+    return env
+# =========================
+# Remote MCP servers (HTTP)
+# =========================
+REMOTE_SERVERS = {
+    "tavily": {
+        "transport": "streamable_http",
+        "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={settings.apis.tavily_api_key.get_secret_value()}",
+    },
+}
+# =========================
+# Local MCP servers (stdio)
+# =========================
+LOCAL_SERVERS = {
+    "aviationstack": {
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": ["-m", "aviationstack_mcp"],
+        "env": _child_env(
+            AVIATION_STACK_API_KEY=settings.apis.aviationstack_api_key.get_secret_value(),
+        ),
+    },
+    "weather": {
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": [str(WEATHER_SERVER_PATH)],
+        "env": _child_env(
+            OPENWEATHER_API_KEY=settings.apis.openweather_api_key.get_secret_value(),
+        ),
+    },
+}
+MCP_SERVERS = {**REMOTE_SERVERS, **LOCAL_SERVERS}
+@lru_cache(maxsize=1)
+def get_client() -> MultiServerMCPClient:
+    """Shared client covering every configured server."""
+    return MultiServerMCPClient(MCP_SERVERS)
+async def load_tools(server_name: str) -> dict:
+    """Load one server's tools as {name: tool}."""
+    tools = await get_client().get_tools(server_name=server_name)
+    return {tool.name: tool for tool in tools}
+def require_tools(server_name: str, tools: dict, *names: str) -> None:
+    """Raise a readable error when a server is missing expected tools."""
+    missing = [name for name in names if name not in tools]
+    if not missing:
+        return
+    available = ", ".join(sorted(tools)) or "none"
+    raise RuntimeError(
+        f"Missing {server_name} MCP tools: {', '.join(missing)}. "
+        f"Available tools: {available}"
+    )
+`````
+
+## File: .github/workflows/release.yml
+`````yaml
+name: Release Workflow
+on:
+  push:
+    tags:
+      - "v*.*.*"
+permissions:
+  contents: write
+jobs:
+  build-and-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Package Release Asset
+        run: |
+          tar -czvf travelbrain-${{ github.ref_name }}.tar.gz \
+            app.py \
+            src/ \
+            frontend/ \
+            Dockerfile \
+            docker-compose.yml \
+            pyproject.toml \
+            README.md \
+            CHANGELOG.md \
+            .env.example \
+            .python-version \
+            requirements.txt
+      - name: Create Release Notes & Tag Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Release ${{ github.ref_name }}"
+          body_path: CHANGELOG.md
+          files: |
+            travelbrain-${{ github.ref_name }}.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+````
+`````

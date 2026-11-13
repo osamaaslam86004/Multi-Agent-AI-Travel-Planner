@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-13
+
+### Added
+- **Centralized Prompt Registry (`src/agents/prompts_registry.py`)**: Introduced `PromptRegistry` to manage, version, format, and override all system prompts, user query templates, and output guidelines while purging inline prompt strings from agent node definitions (retaining re-export compatibility in `src/agents/prompts.py`).
+- **Dynamic Graph Routing Engine (`src/graph/graph.py`)**: Added `build_dynamic_graph()` to construct LangGraph execution workflows dynamically from ordered node configuration lists or custom node dictionaries instead of rigid sequential edges.
+- **Standardized Provider & Telemetry Interfaces (`src/clients/llm_provider.py`, `src/utils/telemetry.py`)**:
+  - Created `BaseLLMProvider` and concrete `GroqLLMProvider` to isolate vendor-agnostic model invocation, caching, and credential resolution.
+  - Implemented unified `track_performance` decorator supporting sync/async functions to automatically track execution time, log lifecycle events, handle exceptions, and record metrics into an in-memory `TelemetryCollector`.
+
+### Changed
+- **Decoupled Agent & Tool Protocols (`src/agents/base.py`, `src/mcp_servers/registry.py`)**:
+  - Standardized execution signatures across all workflow agents (`FlightAgent`, `HotelAgent`, `WeatherAgent`, `ItineraryAgent`, `FinalAgent`) using a PEP 544 runtime-checkable `AgentProtocol` and abstract `BaseAgent` class.
+  - Built a centralized `ToolRegistry` and adapter pattern to decouple MCP tool execution mechanics (AviationStack, OpenWeather, Tavily) from individual agent implementations.
+
+### Deliverables
+- Bundled all modified agent nodes, MCP server registries, client abstraction modules, telemetry utilities, graph builders, and configuration templates into `refactored_travelplanner_architecture.zip`.
+
+
 ## [1.1.0] - 2026-11-12
 
 ### Changed
@@ -37,5 +55,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
+[1.2.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/releases/tag/v1.0.0
