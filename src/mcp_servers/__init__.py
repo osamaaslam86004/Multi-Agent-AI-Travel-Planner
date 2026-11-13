@@ -1,6 +1,5 @@
 """
 MCP integration layer.
-
     config.py       server registry, split into REMOTE_SERVERS / LOCAL_SERVERS
     remote.py       HTTP servers  - Tavily
     local.py        stdio servers - AviationStack, Weather

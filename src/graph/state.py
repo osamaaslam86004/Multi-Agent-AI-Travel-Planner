@@ -18,7 +18,6 @@ class TravelState(TypedDict):
 
 def initial_state(user_query: str) -> TravelState:
     """Build the empty state the graph starts from."""
-
     from langchain_core.messages import HumanMessage
 
     return {

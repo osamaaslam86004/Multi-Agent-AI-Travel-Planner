@@ -97,7 +97,6 @@ class Settings(BaseSettings):
     llm: LLMConfig
     apis: ExternalAPIsConfig
     truncation: TruncationConfig = Field(default_factory=TruncationConfig)
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

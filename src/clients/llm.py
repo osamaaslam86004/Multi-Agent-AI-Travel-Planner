@@ -1,18 +1,9 @@
-# src/clients/llm.py
-from functools import lru_cache
+"""Resolves Groq LLM client instance per session or environment key."""
 
-from langchain_groq import ChatGroq
-
-from src.config.session import require, resolve_groq_api_key
-from src.config.settings import settings
+from src.clients.llm_provider import get_llm_provider
 
 
-@lru_cache(maxsize=8)
-def _build_llm(model: str, api_key: str) -> ChatGroq:
-    return ChatGroq(model=model, api_key=api_key)
-
-
-def get_llm() -> ChatGroq:
+def get_llm():
     """Resolves Groq LLM client instance per session or environment key."""
-    require("GROQ_API_KEY")
-    return _build_llm(settings.llm.model, resolve_groq_api_key())
+    provider = get_llm_provider("groq")
+    return provider.get_client()
