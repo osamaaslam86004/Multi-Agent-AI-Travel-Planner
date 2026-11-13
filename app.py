@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from src.api.sessions import (
     clear_credentials,
@@ -154,8 +155,10 @@ async def travel_planner(request: Request, request_data: TravelRequest):
                 content={"success": False, "error": "Message cannot be empty."},
             )
         with use_credentials(credentials):
-            result = run_travel_agent(
-                user_input=user_message, thread_id=request_data.thread_id
+            result = await run_in_threadpool(
+                run_travel_agent,
+                user_input=user_message,
+                thread_id=request_data.thread_id,
             )
         return JSONResponse(
             content={
