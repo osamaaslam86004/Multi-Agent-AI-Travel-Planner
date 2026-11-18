@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-service
+  namespace: travelbrain
+  labels:
+    app: flight-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flight-service
+  template:
+    metadata:
+      labels:
+        app: flight-service
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/travelbrain/worker-service:latest
+          command: ["python", "-m", "services.flight_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: travelbrain-config
+            - secretRef:
+                name: travelbrain-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hotel-service
+  namespace: travelbrain
+  labels:
+    app: hotel-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hotel-service
+  template:
+    metadata:
+      labels:
+        app: hotel-service
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/travelbrain/worker-service:latest
+          command: ["python", "-m", "services.hotel_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: travelbrain-config
+            - secretRef:
+                name: travelbrain-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-service
+  namespace: travelbrain
+  labels:
+    app: weather-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: weather-service
+  template:
+    metadata:
+      labels:
+        app: weather-service
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/travelbrain/worker-service:latest
+          command: ["python", "-m", "services.weather_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: travelbrain-config
+            - secretRef:
+                name: travelbrain-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: synthesis-service
+  namespace: travelbrain
+  labels:
+    app: synthesis-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: synthesis-service
+  template:
+    metadata:
+      labels:
+        app: synthesis-service
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/travelbrain/worker-service:latest
+          command: ["python", "-m", "services.synthesis_service.worker"]
+          envFrom:
+            - configMapRef:
+                name: travelbrain-config
+            - secretRef:
+                name: travelbrain-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi

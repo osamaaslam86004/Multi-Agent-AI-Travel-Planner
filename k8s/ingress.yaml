@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: travelbrain-ingress
+  namespace: travelbrain
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "bff-gateway"
+    nginx.ingress.kubernetes.io/limit-rps: "60"
+spec:
+  tls:
+    - hosts:
+        - api.travelbrain.ai
+      secretName: travelbrain-tls-cert
+  rules:
+    - host: api.travelbrain.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff-gateway
+                port:
+                  number: 80

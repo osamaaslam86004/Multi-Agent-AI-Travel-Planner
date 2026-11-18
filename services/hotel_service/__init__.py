@@ -1,0 +1,1 @@
+"""Hotel Agent Microservice package."""

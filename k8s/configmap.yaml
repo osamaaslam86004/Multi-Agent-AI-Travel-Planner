@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: travelbrain-config
+  namespace: travelbrain
+data:
+  REDIS_URL: "redis://redis-service.travelbrain.svc.cluster.local:6379/0"
+  AUTH_SERVICE_URL: "http://auth-service.travelbrain.svc.cluster.local:8001"
+  AUTH_SERVICE_JWKS_URL: "http://auth-service.travelbrain.svc.cluster.local:8001/.well-known/jwks.json"
+  JWT_ISSUER: "https://auth.travelbrain.ai"
+  JWT_AUDIENCE: "https://api.travelbrain.ai"
+  ENVIRONMENT: "production"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: travelbrain-secrets
+  namespace: travelbrain
+type: Opaque
+stringData:
+  GOOGLE_CLIENT_ID: "your-production-google-client-id"
+  GOOGLE_CLIENT_SECRET: "your-production-google-client-secret"
+  GROQ_API_KEY: "your-production-groq-key"
+  TAVILY_API_KEY: "your-production-tavily-key"
+  AVIATIONSTACK_API_KEY: "your-production-aviationstack-key"
+  OPENWEATHER_API_KEY: "your-production-openweather-key"

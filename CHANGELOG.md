@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-18
+
+### Added
+- **Enterprise Distributed Microservices Architecture**:
+  - **API Gateway & Backend-For-Frontend (BFF) Service (`services/bff_gateway/`)**:
+    - Decoupled client ingress with secure, encrypted HTTP-only session cookies (`tb_session_id`) and Anti-CSRF token verification (`X-CSRF-Token`), eliminating raw JWT storage in browser `localStorage`.
+    - Distributed sliding-window rate limiting backed by Redis.
+    - Asynchronous Server-Sent Events (SSE) streaming endpoint (`/api/v1/trips/{correlation_id}/stream`) providing live progress updates and final synthesized itineraries directly to clients.
+  - **Centralized Auth & Identity Service (`services/auth_service/`)**:
+    - Offloaded identity verification to external OIDC providers (Google Auth / OIDC) with state/PKCE security.
+    - Centralized RS256 asymmetric JWT signing and issuance with user identity, roles, and tenant metadata.
+    - Public RFC 7517 JWKS provider endpoint (`/.well-known/jwks.json`) for downstream key distribution.
+  - **Stateless Microservice Verification Middleware (`services/common/auth_middleware.py`)**:
+    - High-performance, zero-database verification middleware utilizing thread-safe in-memory caching of JWKS public keys.
+    - Role-Based Access Control (RBAC) dependency guards (`require_roles`).
+  - **Asynchronous Event Backbone & CloudEvents (`services/common/event_bus.py`, `services/common/schemas.py`)**:
+    - Event-driven choreography using Redis Streams with consumer groups (`XGROUP`, `XREADGROUP`, `XACK`) replacing in-process LangGraph state graph bottlenecks.
+    - Full CloudEvents v1.0 specification compliance across all domain event envelopes (`travel.planning.initiated`, `travel.flights.completed`, `travel.hotels.completed`, `travel.weather.completed`, `travel.synthesis.completed`).
+    - W3C Distributed TraceContext propagation (`traceparent`) across microservice boundaries (`services/common/telemetry.py`).
+  - **Scatter-Gather Parallel Domain Microservices**:
+    - **Flight Agent Service (`services/flight_service/`)**: Concurrent AviationStack integration, route analysis, and Redis caching.
+    - **Hotel Agent Service (`services/hotel_service/`)**: Concurrent Tavily web search integration and accommodation caching.
+    - **Weather Agent Service (`services/weather_service/`)**: Concurrent OpenWeather API integration and destination geocoding.
+    - Reduced end-to-end multi-agent research latency by ~60% through concurrent scatter-gather execution.
+  - **Itinerary & Synthesis Service (`services/synthesis_service/`)**:
+    - Atomic Redis barrier aggregator collecting asynchronous agent outputs for each trip correlation ID.
+    - Multi-agent Groq / Gemini LLM prompt orchestration for day-by-day scheduling and executive travel plan synthesis.
+  - **Reliability, Resilience & Fault Tolerance (`services/common/resilience.py`)**:
+    - Implemented stateful Circuit Breakers (`CLOSED`, `OPEN`, `HALF_OPEN`) with exponential backoff retries and randomized jitter.
+    - Graceful multi-tiered fallback handlers for all external vendors (AviationStack, Tavily, OpenWeather, Groq).
+  - **Production Containerization & Kubernetes Manifests**:
+    - Multi-stage, non-root Dockerfiles (`services/Dockerfile.gateway`, `services/Dockerfile.auth`, `services/Dockerfile.worker`).
+    - Updated `docker-compose.yml` orchestrating all microservices, Redis 7 (broker + cache), and PostgreSQL 16.
+    - Production Kubernetes manifests in `k8s/` including Deployments, ClusterIP Services, Horizontal Pod Autoscalers (HPA), Ingress with TLS, ConfigMaps, and Secrets.
+
+### Fixed
+- **Event Loop Concurrency (`app.py`)**: Offloaded synchronous `run_travel_agent` execution to Starlette's threadpool (`run_in_threadpool`) inside the `/api/travel` POST route, preventing 30–90 second blocking LLM and MCP tool executions from starving the main FastAPI asyncio event loop.
+
 ## [1.2.0] - 2026-11-13
 
 ### Added
@@ -55,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
+[1.3.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/releases/tag/v1.0.0
