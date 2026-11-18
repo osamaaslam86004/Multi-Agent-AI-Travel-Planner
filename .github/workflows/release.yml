@@ -21,16 +21,15 @@ jobs:
       - name: Package Release Asset
         run: |
           tar -czvf travelbrain-${{ github.ref_name }}.tar.gz \
-            app.py \
-            src/ \
-            frontend/ \
-            Dockerfile \
+            frontend \
+            services/ \
+            k8s/ \
             docker-compose.yml \
             pyproject.toml \
+            .python-version \
             README.md \
             CHANGELOG.md \
             .env.example \
-            .python-version \
             requirements.txt
       - name: Create Release Notes & Tag Release
         uses: softprops/action-gh-release@v2
