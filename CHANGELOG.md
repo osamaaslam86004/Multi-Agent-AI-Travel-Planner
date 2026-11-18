@@ -5,7 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - 2026-11-18
+
+## [1.4.0] - 2026-11-18
+
+### Added
+- **DuckDuckGo MCP Server Integration & 3-Tier Hotel Search Resilience (`services/hotel_service/provider.py`)**:
+  - Integrated the **DuckDuckGo Model Context Protocol (MCP) server** via `MultiServerMCPClient` (`langchain-mcp-adapters`) over `stdio` transport (`uvx duckduckgo-mcp`) as an automated secondary fallback tier for accommodation discovery.
+  - Implemented a 3-tier resilient failover pipeline (`_execute_tiered_search`) routing requests sequentially through **Tier 1 (Tavily Search API)** -> **Tier 2 (DuckDuckGo MCP Server)** -> **Tier 3 (Static Heuristic Recommendations)** while preserving 12-hour Redis caching (`hotel:cache:<hash>`).
+  - Added independent stateful `CircuitBreaker` isolation (`TavilyHotelBreaker` and `DuckDuckGoMCPBreaker`) to prevent cascading latency and ensure uninterrupted Scatter-Gather barrier completion in `synthesis_service`.
+
+### Changed
+- **Worker Container Runtime & Pre-Installed MCP Tooling (`services/Dockerfile.worker`)**:
+  - Updated the multi-stage worker Docker build to copy `uv` and `uvx` binaries into the runtime image alongside `git` and `curl`.
+  - Pre-installed `duckduckgo-mcp` as an isolated `uv` tool under the non-root `app` user (`UV_TOOL_DIR=/home/app/.local/share/uv/tools`) to eliminate cold-start PyPI download latency and support restricted network environments.
+- **Kubernetes Hotel Worker Resource & Environment Allocation (`k8s/domain-workers.yaml`)**:
+  - Scaled `hotel-service` pod resource requests (`200m` CPU / `256Mi` memory) and limits (`800m` CPU / `512Mi` memory) to accommodate child `uvx duckduckgo-mcp` subprocess execution.
+  - Configured explicit `UV_CACHE_DIR` and `UV_TOOL_DIR` environment variables in the `hotel-service` Deployment manifest for non-root container execution.
+
+
+## [1.3.0] - 2026-11-17
 
 ### Added
 - **Enterprise Distributed Microservices Architecture**:
