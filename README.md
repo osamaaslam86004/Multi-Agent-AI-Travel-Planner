@@ -54,16 +54,16 @@ TravelBrain AI has evolved from a single-process modular monolith into a product
 
 ```mermaid
 flowchart TD
-    Client["Browser / Mobile Client"] -->|HTTPS + Encrypted HttpOnly Cookie| BFF["API Gateway / BFF Service\n(:8000)"]
+    Client["Browser / Mobile Client"] -->|"HTTPS + Encrypted HttpOnly Cookie"| BFF["API Gateway / BFF Service\n(:8000)"]
     
     subgraph IAM["Enterprise IAM Boundary"]
         AuthSvc["Auth & Identity Service\n(:8001)"]
         GoogleOIDC["Google Identity / OIDC Provider"]
     end
     
-    BFF <-->|OAuth2 Token Exchange| AuthSvc
-    AuthSvc <-->|Federated Login| GoogleOIDC
-    BFF -.->|Stateless Signature Verification via Cached JWKS| AuthSvc
+    BFF <-->|"OAuth2 Token Exchange"| AuthSvc
+    AuthSvc <-->|"Federated Login"| GoogleOIDC
+    BFF -.->|"Stateless Signature Verification via Cached JWKS"| AuthSvc
 
     subgraph Broker["Event Backbone (Redis Streams & PubSub)"]
         StreamInit["stream:travel:planning:initiated"]
@@ -81,7 +81,7 @@ flowchart TD
     end
 
     %% Flow
-    BFF -->|Publishes CloudEvent| StreamInit
+    BFF -->|"Publishes CloudEvent"| StreamInit
     StreamInit --> FlightWorker
     StreamInit --> HotelWorker
     StreamInit --> WeatherWorker
@@ -95,9 +95,9 @@ flowchart TD
     StreamWeather --> SynthesisWorker
 
     SynthesisWorker --> StreamFinal
-    SynthesisWorker -->|Real-Time Progress / Final Payload| RedisPubSub[("Redis PubSub Channel\ntrip:stream:{id}")]
-    RedisPubSub -->|Server-Sent Events (SSE)| BFF
-    BFF -->|Live Markdown & JSON Stream| Client
+    SynthesisWorker -->|"Real-Time Progress / Final Payload"| RedisPubSub["Redis PubSub Channel\ntrip:stream:[id]"]
+    RedisPubSub -->|"Server-Sent Events (SSE)"| BFF
+    BFF -->|"Live Markdown & JSON Stream"| Client
 ```
 
 ### Core Architectural Pillars
@@ -200,23 +200,6 @@ Inspect the cluster rollout:
 kubectl get pods -n travelbrain -w
 kubectl get hpa -n travelbrain
 ```
-
----
-
-### Option 3: Local Monolith Development
-
-For lightweight single-process development without containers:
-
-1. **Install dependencies with uv**:
-   ```bash
-   uv sync
-   ```
-
-2. **Run the FastAPI monolith server**:
-   ```bash
-   uv run python app.py
-   ```
-   The monolith server will listen on `http://127.0.0.1:8000`.
 
 ---
 
