@@ -78,3 +78,20 @@ class StreamProgressUpdate(BaseModel):
     message: str
     percentage: int
     payload: dict[str, Any] | None = None
+
+
+class LLMResult(BaseModel):
+    """Standardized result returned by all LLM providers."""
+
+    content: str
+    provider_name: str
+    model_name: str
+    token_usage: dict[str, int] = Field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    latency_ms: float = 0.0
+    structured_data: dict[str, Any] | None = None

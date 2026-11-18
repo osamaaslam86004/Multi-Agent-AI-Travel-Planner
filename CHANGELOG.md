@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Itinerary & Synthesis Service (`services/synthesis_service/`)**:
     - Atomic Redis barrier aggregator collecting asynchronous agent outputs for each trip correlation ID.
     - Multi-agent Groq / Gemini LLM prompt orchestration for day-by-day scheduling and executive travel plan synthesis.
+  - **Resilient Multi-Provider LLM Architecture with 3-Tier Fallback Chain (`services/common/llm_provider.py`, `services/common/resilient_chain.py`)**:
+    - **Standardized Base Contract (`BaseLLMProvider`)**: Abstract interface enforcing asynchronous `generate()` and `generate_structured()` methods returning standardized `LLMResult` with token counts, latency measurement, and structured JSON output.
+    - **Concrete Provider Adapters**:
+      - `GroqLLMProvider`: Tier 1 primary cloud provider running `llama-3.3-70b-versatile` with response metadata token accounting.
+      - `GeminiLLMProvider`: Tier 2 primary cloud fallback utilizing Google Gemini REST API (`gemini-2.5-flash` / `gemini-1.5-pro`) with native `responseSchema` / `responseMimeType="application/json"` enforcement and `usageMetadata` tracking.
+      - `LocalHuggingFaceProvider`: Tier 3 air-gapped consumer-hardware fallback strictly constrained to <12GB VRAM (`Qwen/Qwen2.5-7B-Instruct` or `HuggingFaceTB/SmolLM2-1.7B-Instruct`), supporting local OpenAI-compatible endpoints (Ollama / llama.cpp), 4-bit/8-bit quantized Hugging Face pipelines, and deterministic offline generation.
+    - **Resilient Fallback Chain Orchestrator (`ResilientLLMChain`)**: Strict priority failover (Groq -> Google Gemini -> Local Hugging Face <12GB VRAM) guarded by dedicated circuit breakers (`CircuitBreaker`) and automatic retry handling.
+    - **OpenTelemetry Observability & Metrics**: Top-level `llm.request` spans and child `llm.provider.<name>` spans capturing `llm.provider`, `llm.model`, `llm.tier_priority`, `llm.latency_ms`, and `llm.tokens.prompt`/`llm.tokens.completion`/`llm.tokens.total`.
+    - **Synthesis Service Integration (`services/synthesis_service/synthesizer.py`)**: Refactored `SynthesisEngine` to eliminate direct single-vendor coupling, delegating itinerary creation and markdown formatting to `ResilientLLMChain`.
+    - **Project Dependencies (`pyproject.toml`)**: Declared core dependencies and added modular optional dependency groups (`local-llm`, `google`, `all`).
   - **Reliability, Resilience & Fault Tolerance (`services/common/resilience.py`)**:
     - Implemented stateful Circuit Breakers (`CLOSED`, `OPEN`, `HALF_OPEN`) with exponential backoff retries and randomized jitter.
     - Graceful multi-tiered fallback handlers for all external vendors (AviationStack, Tavily, OpenWeather, Groq).

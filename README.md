@@ -42,7 +42,7 @@ Planning a trip usually means juggling half a dozen browser tabs — one for fli
 | ✈️ **Flight Agent** | Route analysis, departure/arrival airports, airlines, fare estimates | AviationStack MCP / API |
 | 🏨 **Hotel Agent** | Accommodation options matched to destination, budget, and neighborhood | Tavily MCP / Search API |
 | 🌤️ **Weather Agent** | Geocoding, real-time conditions, and 5-day predictive forecasts | OpenWeatherMap API |
-| 🗺️ **Synthesis Agent** | Day-by-day scheduling, budget breakdown, and executive travel plan | Groq Cloud / Gemini LLM |
+| 🗺️ **Synthesis Agent** | Day-by-day scheduling, budget breakdown, and executive travel plan | Groq (Llama 3.3) -> Gemini 2.5/1.5 -> Local Hugging Face (<12GB VRAM) |
 
 ---
 
@@ -121,6 +121,14 @@ flowchart TD
 4. **Distributed Observability**:
    - W3C Distributed TraceContext headers (`traceparent`) propagate across HTTP, gRPC, and Redis Stream event envelopes.
 
+5. **Resilient Multi-Provider LLM Fallback Chain (Groq -> Gemini -> Local <12GB VRAM)**:
+   - **Pluggable Provider Abstraction (`BaseLLMProvider`)**: Standardized asynchronous contract tracking latency, token usage (`prompt_tokens`, `completion_tokens`, `total_tokens`), and schema-validated structured output.
+   - **3-Tier Failover Priority**:
+     1. **Tier 1 (Groq)**: Cloud inference utilizing `llama-3.3-70b-versatile`.
+     2. **Tier 2 (Google Gemini)**: Primary cloud fallback utilizing Gemini REST v1beta (`gemini-2.5-flash` / `gemini-1.5-pro`) with native JSON schema enforcement.
+     3. **Tier 3 (Local Hugging Face Model)**: Consumer-grade, air-gapped fallback running strictly under 12GB VRAM (`Qwen/Qwen2.5-7B-Instruct` or `HuggingFaceTB/SmolLM2-1.7B-Instruct`) supporting local endpoints (Ollama / llama.cpp), 4-bit/8-bit quantized pipelines, or deterministic offline synthesis.
+   - **OpenTelemetry & Circuit Breakers**: Instrumented with custom spans (`llm.request`, `llm.provider.<name>`) and protected by circuit breakers against rate limits and upstream outages.
+
 ---
 
 ## 🏁 Getting Started <a name = "getting_started"></a>
@@ -154,10 +162,18 @@ The easiest way to run the complete distributed microservices ecosystem (BFF Gat
    ```
    Add your keys in `.env`:
    ```dotenv
+   # LLM Providers (3-Tier Fallback Chain)
    GROQ_API_KEY=gsk_...
+   GEMINI_API_KEY=AIzaSy...              # Optional: Tier 2 Cloud Fallback
+   LOCAL_LLM_URL=http://localhost:11434/v1 # Optional: Tier 3 Local Endpoint (Ollama / llama.cpp)
+   LOCAL_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct # Optional: <12GB VRAM Model
+
+   # External Data Integrations
    TAVILY_API_KEY=tvly-...
    AVIATIONSTACK_API_KEY=...
    OPENWEATHER_API_KEY=...
+
+   # Enterprise Identity (Google OIDC)
    GOOGLE_CLIENT_ID=...
    GOOGLE_CLIENT_SECRET=...
    ```

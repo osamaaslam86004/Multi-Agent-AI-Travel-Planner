@@ -2,9 +2,15 @@
 OpenTelemetry and W3C Trace Context Utilities for Distributed Tracing.
 """
 
+import logging
 import random
 import re
 from typing import Any
+
+from opentelemetry import trace
+from opentelemetry.trace import Tracer
+
+logger = logging.getLogger("travelbrain.telemetry")
 
 # W3C traceparent regex: 00-{32 hex trace_id}-{16 hex parent_id}-{2 hex flags}
 TRACEPARENT_REGEX = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$")
@@ -34,3 +40,8 @@ def inject_traceparent(
     tp = traceparent or generate_traceparent()
     carrier["traceparent"] = tp
     return carrier
+
+
+def get_tracer(service_name: str = "travelbrain") -> Tracer:
+    """Returns an OpenTelemetry tracer for the specified service name."""
+    return trace.get_tracer(service_name)
