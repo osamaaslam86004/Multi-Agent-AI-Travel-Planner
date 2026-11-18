@@ -1,33 +1,33 @@
 """
-Itinerary and Synthesis LLM Engine with Groq Integration and Fallbacks.
+Itinerary and Synthesis LLM Engine with Resilient Multi-Provider Fallback Chain
+(Groq -> Google Gemini -> Local Hugging Face <12GB VRAM).
 """
 
 import logging
-import os
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
+
+from services.common.llm_provider import LLMResult
+from services.common.resilient_chain import ResilientLLMChain
 
 logger = logging.getLogger("travelbrain.synthesis_engine")
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
 
 class SynthesisEngine:
-    """Orchestrates LLM prompts for multi-agent synthesis and final itinerary formatting."""
+    """
+    Orchestrates LLM prompts for multi-agent synthesis and final itinerary formatting
+    via a 3-tier resilient fallback chain (Groq -> Gemini -> Local HuggingFace).
+    """
 
-    def __init__(self, model_name: str = "llama-3.3-70b-versatile"):
-        self.model_name = model_name
-        self._llm: ChatGroq | None = None
-
-    def get_llm(self) -> ChatGroq | None:
-        if not self._llm and GROQ_API_KEY:
-            self._llm = ChatGroq(
-                groq_api_key=GROQ_API_KEY,
-                model_name=self.model_name,
-                temperature=0.3,
-            )
-        return self._llm
+    def __init__(
+        self,
+        chain: ResilientLLMChain | None = None,
+        model_name: str | None = None,
+    ):
+        self.chain = chain or ResilientLLMChain()
+        self.model_name = model_name or "resilient-multi-provider-chain"
+        self.last_result: LLMResult | None = None
 
     async def generate_itinerary(
         self,
@@ -35,14 +35,12 @@ class SynthesisEngine:
         flight_results: str,
         hotel_results: str,
         weather_results: str,
+        temperature: float = 0.3,
     ) -> str:
-        """Synthesizes agent outputs into a cohesive day-by-day travel itinerary."""
-        llm = self.get_llm()
-        if not llm:
-            return self._heuristic_itinerary(
-                user_query, flight_results, hotel_results, weather_results
-            )
-
+        """
+        Synthesizes agent outputs into a structured day-by-day travel itinerary
+        using the resilient multi-provider fallback chain.
+        """
         system_prompt = (
             "You are an expert travel planner. Synthesize flight options, hotels, "
             "and weather data into a realistic, structured, day-by-day itinerary."
@@ -54,16 +52,24 @@ class SynthesisEngine:
             f"Weather Outlook:\n{weather_results}\n\n"
             f"Provide a structured itinerary highlighting activities, meals, and logistics."
         )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
         try:
-            response = await llm.ainvoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_prompt),
-                ]
+            result = await self.chain.generate(messages, temperature=temperature)
+            self.last_result = result
+            logger.info(
+                f"Itinerary generated via provider: {result.provider_name} "
+                f"({result.model_name}) in {result.latency_ms:.1f}ms"
             )
-            return response.content
+            return result.content
         except Exception as exc:
-            logger.error(f"Groq itinerary generation error: {exc}. Using fallback.")
+            logger.error(
+                f"Resilient LLM chain failed to generate itinerary: {exc}. Using deterministic safety fallback."
+            )
             return self._heuristic_itinerary(
                 user_query, flight_results, hotel_results, weather_results
             )
@@ -75,14 +81,12 @@ class SynthesisEngine:
         hotel_results: str,
         weather_results: str,
         itinerary: str,
+        temperature: float = 0.2,
     ) -> str:
-        """Formats the final customer-ready Markdown presentation."""
-        llm = self.get_llm()
-        if not llm:
-            return self._heuristic_final_response(
-                user_query, flight_results, hotel_results, weather_results, itinerary
-            )
-
+        """
+        Formats the final customer-ready Markdown presentation
+        using the resilient multi-provider fallback chain.
+        """
         system_prompt = (
             "You are TravelBrain AI, a premier executive travel assistant. Format the final "
             "travel plan with executive summaries, clear markdown tables, budget breakdowns, "
@@ -96,19 +100,48 @@ class SynthesisEngine:
             f"Itinerary Draft:\n{itinerary}\n\n"
             f"Deliver the final executive trip dossier."
         )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
         try:
-            response = await llm.ainvoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_prompt),
-                ]
+            result = await self.chain.generate(messages, temperature=temperature)
+            self.last_result = result
+            logger.info(
+                f"Final response formatted via provider: {result.provider_name} "
+                f"({result.model_name}) in {result.latency_ms:.1f}ms"
             )
-            return response.content
+            return result.content
         except Exception as exc:
-            logger.error(f"Groq final synthesis error: {exc}. Using fallback.")
+            logger.error(
+                f"Resilient LLM chain failed to format final response: {exc}. Using deterministic safety fallback."
+            )
             return self._heuristic_final_response(
                 user_query, flight_results, hotel_results, weather_results, itinerary
             )
+
+    async def generate_structured_plan(
+        self,
+        user_query: str,
+        response_schema: dict[str, Any],
+        temperature: float = 0.1,
+    ) -> dict[str, Any]:
+        """
+        Generates structured JSON plan conforming to schema using provider-level JSON enforcement.
+        """
+        messages = [
+            SystemMessage(content="You are an enterprise travel planner."),
+            HumanMessage(content=f"Create a structured plan for: {user_query}"),
+        ]
+        result = await self.chain.generate_structured(
+            messages=messages,
+            response_format=response_schema,
+            temperature=temperature,
+        )
+        self.last_result = result
+        return result.structured_data or {}
 
     def _heuristic_itinerary(
         self, query: str, flights: str, hotels: str, weather: str
