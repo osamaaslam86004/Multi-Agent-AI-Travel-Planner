@@ -13,7 +13,8 @@ from typing import Any
 
 import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from schemas import LLMResult
+
+from services.common.schemas import LLMResult
 
 logger = logging.getLogger("travelbrain.llm_provider")
 
@@ -106,13 +107,10 @@ class GroqLLMProvider(BaseLLMProvider):
     ) -> LLMResult:
         if not self.is_available():
             raise RuntimeError("Groq API key not configured or invalid.")
-
         client = self._get_client(temperature=temperature, **kwargs)
         start_time = time.perf_counter()
-
         response = await client.ainvoke(messages)
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-
         # Extract token usage metadata from response
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if hasattr(response, "response_metadata") and response.response_metadata:
@@ -128,7 +126,6 @@ class GroqLLMProvider(BaseLLMProvider):
                 "output_tokens", 0
             )
             token_usage["total_tokens"] = response.usage_metadata.get("total_tokens", 0)
-
         return LLMResult(
             content=str(response.content),
             provider_name=self.provider_name,
@@ -146,13 +143,11 @@ class GroqLLMProvider(BaseLLMProvider):
     ) -> LLMResult:
         if not self.is_available():
             raise RuntimeError("Groq API key not configured or invalid.")
-
         schema_str = json.dumps(response_format, indent=2)
         system_instruction = (
             f"You MUST respond ONLY with a valid JSON object matching this schema:\n{schema_str}\n"
             "Do NOT include markdown formatting or explanations."
         )
-
         augmented_messages = [SystemMessage(content=system_instruction)] + list(
             messages
         )
@@ -161,21 +156,17 @@ class GroqLLMProvider(BaseLLMProvider):
             model_kwargs={"response_format": {"type": "json_object"}},
             **kwargs,
         )
-
         start_time = time.perf_counter()
         response = await client.ainvoke(augmented_messages)
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-
         content = str(response.content)
         parsed_data = self._extract_json_from_text(content)
-
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if hasattr(response, "response_metadata") and response.response_metadata:
             raw_usage = response.response_metadata.get("token_usage", {})
             token_usage["prompt_tokens"] = raw_usage.get("prompt_tokens", 0)
             token_usage["completion_tokens"] = raw_usage.get("completion_tokens", 0)
             token_usage["total_tokens"] = raw_usage.get("total_tokens", 0)
-
         return LLMResult(
             content=content,
             provider_name=self.provider_name,
@@ -212,7 +203,6 @@ class GeminiLLMProvider(BaseLLMProvider):
         """Convert LangChain messages into Gemini v1beta payload format."""
         system_instruction = None
         contents = []
-
         for msg in messages:
             if isinstance(msg, SystemMessage):
                 system_instruction = msg.content
@@ -222,7 +212,6 @@ class GeminiLLMProvider(BaseLLMProvider):
                 contents.append({"role": "model", "parts": [{"text": msg.content}]})
             else:
                 contents.append({"role": "user", "parts": [{"text": str(msg.content)}]})
-
         return system_instruction, contents
 
     async def generate(
@@ -233,46 +222,37 @@ class GeminiLLMProvider(BaseLLMProvider):
     ) -> LLMResult:
         if not self.is_available():
             raise RuntimeError("Gemini API key not configured or invalid.")
-
         system_instruction, contents = self._convert_messages(messages)
         endpoint = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
             f"?key={self.api_key}"
         )
-
         body: dict[str, Any] = {
             "contents": contents,
             "generationConfig": {"temperature": temperature},
         }
         if system_instruction:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-
         start_time = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(endpoint, json=body)
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-
             if resp.status_code != 200:
                 raise RuntimeError(
                     f"Gemini API returned error {resp.status_code}: {resp.text}"
                 )
-
             data = resp.json()
-
         candidates = data.get("candidates", [])
         if not candidates:
             raise RuntimeError(f"Gemini API returned no candidates: {data}")
-
         parts = candidates[0].get("content", {}).get("parts", [])
         content = "".join(part.get("text", "") for part in parts)
-
         usage = data.get("usageMetadata", {})
         token_usage = {
             "prompt_tokens": usage.get("promptTokenCount", 0),
             "completion_tokens": usage.get("candidatesTokenCount", 0),
             "total_tokens": usage.get("totalTokenCount", 0),
         }
-
         return LLMResult(
             content=content,
             provider_name=self.provider_name,
@@ -290,13 +270,11 @@ class GeminiLLMProvider(BaseLLMProvider):
     ) -> LLMResult:
         if not self.is_available():
             raise RuntimeError("Gemini API key not configured or invalid.")
-
         system_instruction, contents = self._convert_messages(messages)
         endpoint = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
             f"?key={self.api_key}"
         )
-
         body: dict[str, Any] = {
             "contents": contents,
             "generationConfig": {
@@ -306,31 +284,25 @@ class GeminiLLMProvider(BaseLLMProvider):
         }
         if system_instruction:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-
         start_time = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(endpoint, json=body)
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-
             if resp.status_code != 200:
                 raise RuntimeError(f"Gemini API structured request failed: {resp.text}")
-
             data = resp.json()
-
         candidates = data.get("candidates", [])
         content = "".join(
             part.get("text", "")
             for part in candidates[0].get("content", {}).get("parts", [])
         )
         parsed_data = self._extract_json_from_text(content)
-
         usage = data.get("usageMetadata", {})
         token_usage = {
             "prompt_tokens": usage.get("promptTokenCount", 0),
             "completion_tokens": usage.get("candidatesTokenCount", 0),
             "total_tokens": usage.get("totalTokenCount", 0),
         }
-
         return LLMResult(
             content=content,
             provider_name=self.provider_name,
@@ -369,8 +341,12 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         self._checked_pipeline = False
 
     def is_available(self) -> bool:
-        # Local provider is always available as the final resilient baseline
-        return True
+        if self.endpoint_url and self.endpoint_url != "http://localhost:11434/v1":
+            return True
+        if self._pipeline is not None:
+            return True
+        pipe = self._load_transformers_pipeline()
+        return pipe is not None
 
     def _format_messages_for_prompt(self, messages: list[BaseMessage]) -> str:
         """Format messages using standard chat templating."""
@@ -426,7 +402,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         """Lazy load compact transformers pipeline (<12GB VRAM) if packages are installed."""
         if self._checked_pipeline:
             return self._pipeline
-
         self._checked_pipeline = True
         try:
             import torch
@@ -475,7 +450,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
     ) -> LLMResult:
         start_time = time.perf_counter()
         prompt = self._format_messages_for_prompt(messages)
-
         # 1. Try local OpenAI-compatible endpoint (Ollama / llama.cpp)
         endpoint_res = await self._try_local_endpoint(prompt, temperature)
         if endpoint_res:
@@ -488,7 +462,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 token_usage=token_usage,
                 latency_ms=round(latency_ms, 2),
             )
-
         # 2. Try in-process HuggingFace transformers pipeline
         pipe = self._load_transformers_pipeline()
         if pipe:
@@ -511,7 +484,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 token_usage=token_usage,
                 latency_ms=round(latency_ms, 2),
             )
-
         # 3. Deterministic air-gapped generation
         content = self._offline_fallback_generation(messages)
         latency_ms = (time.perf_counter() - start_time) * 1000.0

@@ -22,7 +22,6 @@ STREAM_FLIGHTS = "stream:travel:flights:completed"
 STREAM_HOTELS = "stream:travel:hotels:completed"
 STREAM_WEATHER = "stream:travel:weather:completed"
 STREAM_OUT = "stream:travel:synthesis:completed"
-
 CONSUMER_GROUP = "cg-synthesis-service"
 CONSUMER_NAME = f"synthesis-worker-{os.getpid()}"
 
@@ -35,8 +34,6 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
     """Checks if scatter-gather barrier is fulfilled, then synthesizes final itinerary."""
     r = event_bus.client
     barrier_key = f"barrier:{correlation_id}"
-
-    # Atomic check if synthesis was already initiated for this trip
     is_synthesizing = await r.hget(barrier_key, "synthesis_started")
     if is_synthesizing == "true":
         return
@@ -47,12 +44,10 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
     has_weather = "weather_results" in data
 
     if has_flights and has_hotels and has_weather:
-        # Mark synthesis started atomically
         await r.hset(barrier_key, "synthesis_started", "true")
         logger.info(
             f"Barrier complete for trip {correlation_id}. Triggering synthesis LLM..."
         )
-
         await event_bus.publish_progress(
             f"trip:stream:{correlation_id}",
             {
@@ -61,19 +56,21 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
                 "percentage": 75,
             },
         )
-
         query = data.get("user_query", "Travel Plan")
         user_id = data.get("user_id", "guest")
         flights = data.get("flight_results", "")
         hotels = data.get("hotel_results", "")
         weather = data.get("weather_results", "")
 
+        flight_degraded = data.get("flight_degraded", "false").lower() == "true"
+        hotel_degraded = data.get("hotel_degraded", "false").lower() == "true"
+        weather_degraded = data.get("weather_degraded", "false").lower() == "true"
+
         itinerary = await engine.generate_itinerary(query, flights, hotels, weather)
         final_response = await engine.format_final_response(
             query, flights, hotels, weather, itinerary
         )
 
-        # Publish final event to stream
         out_event = CloudEvent[SynthesisCompletedPayload](
             source="/services/synthesis-service",
             type="com.travelbrain.synthesis.completed",
@@ -87,11 +84,13 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
                 weather_results=weather,
                 itinerary=itinerary,
                 final_response=final_response,
+                flight_degraded=flight_degraded,
+                hotel_degraded=hotel_degraded,
+                weather_degraded=weather_degraded,
             ),
         )
         await event_bus.publish(STREAM_OUT, out_event)
 
-        # Send final payload to client SSE stream
         await event_bus.publish_progress(
             f"trip:stream:{correlation_id}",
             {
@@ -100,6 +99,7 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
                 "percentage": 100,
                 "final_response": final_response,
                 "itinerary": itinerary,
+                "degraded": flight_degraded or hotel_degraded or weather_degraded,
             },
         )
         logger.info(
@@ -111,7 +111,12 @@ async def handle_flight_completed(event: CloudEvent) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
     r = event_bus.client
-    await r.hset(f"barrier:{cid}", "flight_results", data.get("results", ""))
+    mapping = {
+        "flight_results": data.get("results", ""),
+        "flight_degraded": str(data.get("degraded", False)),
+        "flight_source": data.get("source", "unknown"),
+    }
+    await r.hset(f"barrier:{cid}", mapping=mapping)
     await r.expire(f"barrier:{cid}", 3600)
     await check_and_synthesize(cid, event.traceparent)
 
@@ -120,7 +125,12 @@ async def handle_hotel_completed(event: CloudEvent) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
     r = event_bus.client
-    await r.hset(f"barrier:{cid}", "hotel_results", data.get("results", ""))
+    mapping = {
+        "hotel_results": data.get("results", ""),
+        "hotel_degraded": str(data.get("degraded", False)),
+        "hotel_source": data.get("source", "unknown"),
+    }
+    await r.hset(f"barrier:{cid}", mapping=mapping)
     await r.expire(f"barrier:{cid}", 3600)
     await check_and_synthesize(cid, event.traceparent)
 
@@ -129,7 +139,12 @@ async def handle_weather_completed(event: CloudEvent) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
     r = event_bus.client
-    await r.hset(f"barrier:{cid}", "weather_results", data.get("results", ""))
+    mapping = {
+        "weather_results": data.get("results", ""),
+        "weather_degraded": str(data.get("degraded", False)),
+        "weather_source": data.get("source", "unknown"),
+    }
+    await r.hset(f"barrier:{cid}", mapping=mapping)
     await r.expire(f"barrier:{cid}", 3600)
     await check_and_synthesize(cid, event.traceparent)
 
@@ -143,6 +158,8 @@ async def handle_planning_initiated(event: CloudEvent) -> None:
         mapping={
             "user_query": data.get("user_query", ""),
             "user_id": data.get("user_id", "guest"),
+            "destination": data.get("destination", "") or "",
+            "departure_city": data.get("departure_city", "") or "",
         },
     )
     await r.expire(f"barrier:{cid}", 3600)
@@ -156,8 +173,6 @@ async def main():
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
             pass
-
-    # Concurrently consume from all relevant streams
     await asyncio.gather(
         event_bus.consume(
             "stream:travel:planning:initiated",

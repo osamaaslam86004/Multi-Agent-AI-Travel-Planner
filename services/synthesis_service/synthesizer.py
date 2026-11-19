@@ -43,7 +43,10 @@ class SynthesisEngine:
         """
         system_prompt = (
             "You are an expert travel planner. Synthesize flight options, hotels, "
-            "and weather data into a realistic, structured, day-by-day itinerary."
+            "and weather data into a realistic, structured, day-by-day itinerary. "
+            "CRITICAL INSTRUCTION: If any upstream domain (flights, hotels, or weather) is marked "
+            "as degraded, missing, or unavailable, explicitly state 'data unavailable' or 'information unavailable' "
+            "for that specific domain rather than inventing, hallucinating, or fabricating numbers, prices, weather conditions, or facts."
         )
         user_prompt = (
             f"User Query: {user_query}\n\n"
@@ -52,12 +55,10 @@ class SynthesisEngine:
             f"Weather Outlook:\n{weather_results}\n\n"
             f"Provide a structured itinerary highlighting activities, meals, and logistics."
         )
-
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
-
         try:
             result = await self.chain.generate(messages, temperature=temperature)
             self.last_result = result
@@ -90,7 +91,10 @@ class SynthesisEngine:
         system_prompt = (
             "You are TravelBrain AI, a premier executive travel assistant. Format the final "
             "travel plan with executive summaries, clear markdown tables, budget breakdowns, "
-            "and actionable tips."
+            "and actionable tips. "
+            "CRITICAL INSTRUCTION: If any upstream domain (flights, hotels, or weather) is marked "
+            "as degraded, missing, or unavailable, explicitly state 'data unavailable' or 'information unavailable' "
+            "for that specific domain rather than inventing, hallucinating, or fabricating numbers, prices, weather conditions, or facts."
         )
         user_prompt = (
             f"Trip Request: {user_query}\n\n"
@@ -100,12 +104,10 @@ class SynthesisEngine:
             f"Itinerary Draft:\n{itinerary}\n\n"
             f"Deliver the final executive trip dossier."
         )
-
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
-
         try:
             result = await self.chain.generate(messages, temperature=temperature)
             self.last_result = result
@@ -154,7 +156,7 @@ class SynthesisEngine:
             f"- Morning tour of premier historical and cultural sites.\n"
             f"- Afternoon culinary immersion.\n\n"
             f"**Day 3: Nature, Scenery & Scenic Exploration**\n"
-            f"- Full-day excursion optimized for current weather conditions.\n\n"
+            f"- Full-day excursion optimized for local conditions.\n\n"
             f"**Day 4: Leisure, Souvenirs & Departure**\n"
             f"- Relaxed morning cafe visit and transit to airport."
         )
@@ -172,5 +174,5 @@ class SynthesisEngine:
             f"---\n\n"
             f"## 📅 Curated Itinerary\n{itinerary}\n\n"
             f"---\n\n"
-            f"💡 **TravelBrain Advisory**: All estimates are updated in real-time. Safe travels!"
+            f"💡 **TravelBrain Advisory**: Live status indicated above. Safe travels!"
         )

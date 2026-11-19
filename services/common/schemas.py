@@ -24,6 +24,14 @@ class CloudEvent(BaseModel, Generic[T]):
     data: T
 
 
+class ProviderResult(BaseModel):
+    """Explicit result returned by domain providers indicating source and degradation status."""
+
+    text: str
+    source: str = "unknown"
+    degraded: bool = False
+
+
 # Domain Payloads
 class PlanningInitiatedPayload(BaseModel):
     correlation_id: str
@@ -32,6 +40,9 @@ class PlanningInitiatedPayload(BaseModel):
     user_query: str
     destination: str | None = None
     departure_city: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    dates: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -39,6 +50,8 @@ class FlightResultPayload(BaseModel):
     correlation_id: str
     success: bool
     results: str
+    source: str = "unknown"
+    degraded: bool = False
     cached: bool = False
     error: str | None = None
 
@@ -47,6 +60,8 @@ class HotelResultPayload(BaseModel):
     correlation_id: str
     success: bool
     results: str
+    source: str = "unknown"
+    degraded: bool = False
     cached: bool = False
     error: str | None = None
 
@@ -55,6 +70,8 @@ class WeatherResultPayload(BaseModel):
     correlation_id: str
     success: bool
     results: str
+    source: str = "unknown"
+    degraded: bool = False
     cached: bool = False
     error: str | None = None
 
@@ -68,6 +85,9 @@ class SynthesisCompletedPayload(BaseModel):
     weather_results: str
     itinerary: str
     final_response: str
+    flight_degraded: bool = False
+    hotel_degraded: bool = False
+    weather_degraded: bool = False
     llm_calls: int = 1
     completed_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 

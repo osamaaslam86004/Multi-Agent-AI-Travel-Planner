@@ -39,11 +39,11 @@ COPY --chown=app:app services/ ./services/
 
 USER app
 
-RUN uv tool install --python python3.11 "git+https://github.com/Pradumnasaraf/aviationstack-mcp.git" \
-    || echo "WARNING: could not pre-install aviationstack-mcp; uvx will fetch it on first use"
+RUN uv tool install --python python3.11 "aviationstack-mcp" \
+    || echo "WARNING: could not pre-install aviationstack-mcp"
 RUN uv tool install --python python3.11 "openweather-mcp==0.1.0" \
-    || echo "WARNING: could not pre-install openweather-mcp==0.1.0; uvx will fetch it on first use"
-RUN uv tool install --python python3.11 duckduckgo-mcp \
-    || echo "WARNING: could not pre-install duckduckgo-mcp; uvx will fetch it on first use"
+    || echo "WARNING: could not pre-install openweather-mcp==0.1.0"
+RUN uv tool install --python python3.11 "duckduckgo-mcp" \
+    || echo "WARNING: could not pre-install duckduckgo-mcp"
 
 CMD ["python", "-m", "services.flight_service.worker"]

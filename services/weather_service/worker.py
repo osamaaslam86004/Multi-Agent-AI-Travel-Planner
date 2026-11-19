@@ -37,9 +37,17 @@ async def handle_planning_initiated(
         data.get("correlation_id") if isinstance(data, dict) else data.correlation_id
     )
     query = data.get("user_query") if isinstance(data, dict) else data.user_query
+    destination = (
+        data.get("destination")
+        if isinstance(data, dict)
+        else getattr(data, "destination", None)
+    )
+    dates = (
+        data.get("dates") if isinstance(data, dict) else getattr(data, "dates", None)
+    )
 
     logger.info(
-        f"Processing weather forecast for trip {correlation_id} (query: '{query}')"
+        f"Processing weather forecast for trip {correlation_id} (query: '{query}', dest: '{destination}')"
     )
 
     # Publish progress update to user stream
@@ -53,10 +61,11 @@ async def handle_planning_initiated(
     )
 
     try:
-        search_res = await provider.get_weather(query)
-        weather_text = search_res["results"]
-        cached = search_res["cached"]
-
+        provider_res = await provider.get_weather(
+            query=query,
+            destination=destination,
+            dates=dates,
+        )
         out_event = CloudEvent[WeatherResultPayload](
             source="/services/weather-agent",
             type="com.travelbrain.weather.completed",
@@ -64,19 +73,20 @@ async def handle_planning_initiated(
             data=WeatherResultPayload(
                 correlation_id=correlation_id,
                 success=True,
-                results=weather_text,
-                cached=cached,
+                results=provider_res.text,
+                source=provider_res.source,
+                degraded=provider_res.degraded,
+                cached=False,
             ),
         )
         await event_bus.publish(STREAM_OUT, out_event)
-
         await event_bus.publish_progress(
             f"trip:stream:{correlation_id}",
             {
                 "stage": "weather_completed",
                 "message": "Weather forecast compiled successfully.",
                 "percentage": 60,
-                "cached": cached,
+                "degraded": provider_res.degraded,
             },
         )
         logger.info(f"Published weather results for trip {correlation_id}")
@@ -90,6 +100,8 @@ async def handle_planning_initiated(
                 correlation_id=correlation_id,
                 success=False,
                 results="Weather information currently unavailable.",
+                source="error",
+                degraded=True,
                 error=str(exc),
             ),
         )
@@ -104,14 +116,16 @@ async def main():
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
             pass
-
-    await event_bus.consume(
-        stream_name=STREAM_IN,
-        group_name=CONSUMER_GROUP,
-        consumer_name=CONSUMER_NAME,
-        handler=handle_planning_initiated,
-        stop_event=stop_event,
-    )
+    try:
+        await event_bus.consume(
+            stream_name=STREAM_IN,
+            group_name=CONSUMER_GROUP,
+            consumer_name=CONSUMER_NAME,
+            handler=handle_planning_initiated,
+            stop_event=stop_event,
+        )
+    finally:
+        await provider.close()
 
 
 if __name__ == "__main__":

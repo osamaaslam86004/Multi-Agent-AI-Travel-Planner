@@ -56,6 +56,9 @@ class TripPlanRequest(BaseModel):
     message: str
     destination: str | None = None
     departure_city: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    dates: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -89,7 +92,6 @@ async def readiness():
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}")
 
 
-# Frontend UI Route
 @app.get("/", response_class=HTMLResponse)
 async def serve_index(request: Request):
     if templates and (FRONTEND_DIR / "templates" / "index.html").exists():
@@ -97,15 +99,8 @@ async def serve_index(request: Request):
     return HTMLResponse("<h1>TravelBrain AI Microservices Gateway Active</h1>")
 
 
-# ---------------------------------------------------------------------------
-# Authentication & Session Handshake
-# ---------------------------------------------------------------------------
 @app.post("/api/v1/auth/login")
 async def login(req: LoginRequest, response: Response):
-    """
-    Exchanges user credentials with Auth Service, creates secure session,
-    and returns HTTP-only cookie with Anti-CSRF token in header.
-    """
     async with httpx.AsyncClient() as client:
         auth_resp = await client.post(
             f"{AUTH_SERVICE_URL}/api/v1/auth/login",
@@ -123,12 +118,10 @@ async def login(req: LoginRequest, response: Response):
     user_id = token_data["user_id"]
     email = token_data["email"]
 
-    # Store JWT in server-side Redis session
     session_id, csrf_token = await session_manager.create_session(
         jwt_token=jwt_token, user_id=user_id, email=email
     )
 
-    # Set secure HTTP-only cookie
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_id,
@@ -137,7 +130,6 @@ async def login(req: LoginRequest, response: Response):
         samesite="lax",
         max_age=86400,
     )
-    # Expose Anti-CSRF token header
     response.headers["X-CSRF-Token"] = csrf_token
     return {
         "status": "authenticated",
@@ -158,10 +150,8 @@ async def logout(request: Request, response: Response):
 
 @app.get("/api/v1/auth/me")
 async def get_me(request: Request):
-    """Returns profile and active CSRF token for the current session."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
-        # Fallback to anonymous guest session for immediate demonstration
         guest_email = "guest@travelbrain.ai"
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -196,7 +186,6 @@ async def get_me(request: Request):
     session_data = await session_manager.get_session(session_id)
     if not session_data:
         raise HTTPException(status_code=401, detail="Session expired")
-
     return {
         "user_id": session_data.get("user_id"),
         "email": session_data.get("email"),
@@ -204,16 +193,8 @@ async def get_me(request: Request):
     }
 
 
-# ---------------------------------------------------------------------------
-# Trip Planning Orchestration & SSE Real-time Streaming
-# ---------------------------------------------------------------------------
 @app.post("/api/v1/trips/plan")
 async def plan_trip(req: TripPlanRequest, request: Request):
-    """
-    Submits a new travel query.
-    Enforces rate-limits, attaches W3C traceparent, and publishes
-    a CloudEvent to initiate the asynchronous Scatter-Gather workflow.
-    """
     client_ip = request.client.host if request.client else "unknown"
     if not await session_manager.check_rate_limit(
         client_ip, max_requests=30, window_seconds=60
@@ -223,7 +204,6 @@ async def plan_trip(req: TripPlanRequest, request: Request):
             detail="Rate limit exceeded. Please wait a moment before trying again.",
         )
 
-    # Resolve session
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     user_id = "guest_user"
     if session_id:
@@ -234,7 +214,6 @@ async def plan_trip(req: TripPlanRequest, request: Request):
     correlation_id = f"trip_{uuid.uuid4().hex[:12]}"
     traceparent = extract_traceparent(dict(request.headers))
 
-    # Construct CloudEvent
     event = CloudEvent[PlanningInitiatedPayload](
         source="/services/bff-gateway",
         type="com.travelbrain.planning.initiated",
@@ -245,12 +224,13 @@ async def plan_trip(req: TripPlanRequest, request: Request):
             user_query=req.message,
             destination=req.destination,
             departure_city=req.departure_city,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            dates=req.dates,
         ),
     )
 
-    # Publish to Redis Stream for concurrent agent workers
     await event_bus.publish("stream:travel:planning:initiated", event)
-
     return {
         "correlation_id": correlation_id,
         "status": "initiated",
@@ -261,10 +241,6 @@ async def plan_trip(req: TripPlanRequest, request: Request):
 
 @app.get("/api/v1/trips/{correlation_id}/stream")
 async def stream_trip_progress(correlation_id: str):
-    """
-    Server-Sent Events (SSE) endpoint providing real-time progress updates
-    and final synthesized itinerary to the client.
-    """
     channel_name = f"trip:stream:{correlation_id}"
 
     async def sse_generator() -> AsyncGenerator[str, None]:
@@ -272,25 +248,20 @@ async def stream_trip_progress(correlation_id: str):
         pubsub = r.pubsub()
         await pubsub.subscribe(channel_name)
         yield f"data: {json.dumps({'stage': 'initiated', 'message': 'Trip planning request accepted by gateway.'})}\n\n"
-
         timeout_seconds = 120
         start_time = asyncio.get_event_loop().time()
-
         try:
             while True:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 if elapsed > timeout_seconds:
                     yield f"data: {json.dumps({'stage': 'timeout', 'error': 'Trip synthesis timed out.'})}\n\n"
                     break
-
                 message = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=1.0
                 )
                 if message and message.get("type") == "message":
                     payload = message.get("data")
                     yield f"data: {payload}\n\n"
-
-                    # Check if final payload is delivered
                     try:
                         parsed = json.loads(payload)
                         if parsed.get("stage") in ["completed", "error"]:

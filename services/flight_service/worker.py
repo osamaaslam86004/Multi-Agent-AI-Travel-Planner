@@ -37,9 +37,22 @@ async def handle_planning_initiated(
         data.get("correlation_id") if isinstance(data, dict) else data.correlation_id
     )
     query = data.get("user_query") if isinstance(data, dict) else data.user_query
+    destination = (
+        data.get("destination")
+        if isinstance(data, dict)
+        else getattr(data, "destination", None)
+    )
+    departure_city = (
+        data.get("departure_city")
+        if isinstance(data, dict)
+        else getattr(data, "departure_city", None)
+    )
+    dates = (
+        data.get("dates") if isinstance(data, dict) else getattr(data, "dates", None)
+    )
 
     logger.info(
-        f"Processing flight search for trip {correlation_id} (query: '{query}')"
+        f"Processing flight search for trip {correlation_id} (query: '{query}', dep: '{departure_city}', dest: '{destination}')"
     )
 
     # Publish progress update to user stream
@@ -47,17 +60,18 @@ async def handle_planning_initiated(
         f"trip:stream:{correlation_id}",
         {
             "stage": "flights_in_progress",
-            "message": "Flight Agent is analyzing routes, airlines, and price estimates...",
+            "message": "Flight Agent is analyzing routes, airlines, and schedule options...",
             "percentage": 25,
         },
     )
 
     try:
-        search_res = await provider.search_flights(query)
-        flight_text = search_res["results"]
-        cached = search_res["cached"]
-
-        # Publish completion event to stream
+        provider_res = await provider.search_flights(
+            query=query,
+            departure_city=departure_city,
+            destination=destination,
+            dates=dates,
+        )
         out_event = CloudEvent[FlightResultPayload](
             source="/services/flight-agent",
             type="com.travelbrain.flights.completed",
@@ -65,12 +79,13 @@ async def handle_planning_initiated(
             data=FlightResultPayload(
                 correlation_id=correlation_id,
                 success=True,
-                results=flight_text,
-                cached=cached,
+                results=provider_res.text,
+                source=provider_res.source,
+                degraded=provider_res.degraded,
+                cached=False,
             ),
         )
         await event_bus.publish(STREAM_OUT, out_event)
-
         # Notify SSE stream
         await event_bus.publish_progress(
             f"trip:stream:{correlation_id}",
@@ -78,7 +93,7 @@ async def handle_planning_initiated(
                 "stage": "flights_completed",
                 "message": "Flight recommendations compiled successfully.",
                 "percentage": 40,
-                "cached": cached,
+                "degraded": provider_res.degraded,
             },
         )
         logger.info(f"Published flight results for trip {correlation_id}")
@@ -92,6 +107,8 @@ async def handle_planning_initiated(
                 correlation_id=correlation_id,
                 success=False,
                 results="Flight information currently unavailable.",
+                source="error",
+                degraded=True,
                 error=str(exc),
             ),
         )
@@ -105,15 +122,17 @@ async def main():
         try:
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
-            pass  # Windows compatibility
-
-    await event_bus.consume(
-        stream_name=STREAM_IN,
-        group_name=CONSUMER_GROUP,
-        consumer_name=CONSUMER_NAME,
-        handler=handle_planning_initiated,
-        stop_event=stop_event,
-    )
+            pass
+    try:
+        await event_bus.consume(
+            stream_name=STREAM_IN,
+            group_name=CONSUMER_GROUP,
+            consumer_name=CONSUMER_NAME,
+            handler=handle_planning_initiated,
+            stop_event=stop_event,
+        )
+    finally:
+        await provider.close()
 
 
 if __name__ == "__main__":
