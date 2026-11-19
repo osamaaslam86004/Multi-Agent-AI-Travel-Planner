@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [1.4.0] - 2026-11-18
+## [1.4.0] - 2026-11-19
+
+## [1.4.0] - 2026-11-19
 
 ### Added
 - **OpenWeather MCP Server Integration (`services/weather_service/provider.py`)**:
@@ -19,15 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Integrated the **DuckDuckGo Model Context Protocol (MCP) server** via `MultiServerMCPClient` (`langchain-mcp-adapters`) over `stdio` transport (`uvx duckduckgo-mcp`) as an automated secondary fallback tier for accommodation discovery.
   - Implemented a 3-tier resilient failover pipeline (`_execute_tiered_search`) routing requests sequentially through **Tier 1 (Tavily Search API)** -> **Tier 2 (DuckDuckGo MCP Server)** -> **Tier 3 (Static Heuristic Recommendations)** while preserving 12-hour Redis caching (`hotel:cache:<hash>`).
   - Added independent stateful `CircuitBreaker` isolation (`TavilyHotelBreaker` and `DuckDuckGoMCPBreaker`) to prevent cascading latency and ensure uninterrupted Scatter-Gather barrier completion in `synthesis_service`.
+- **Explicit `ProviderResult` & Honest Degradation Tracking (`services/common/schemas.py`, `services/flight_service/`, `services/hotel_service/`, `services/weather_service/`, `services/synthesis_service/synthesizer.py`)**:
+  - Added `ProviderResult(text, source, degraded)` and propagated `source` and `degraded` flags through provider outputs, worker payloads, and synthesis prompts so degraded/fallback responses are surfaced honestly and instructed to state `"data unavailable"` rather than fabricating figures.
+- **Event Bus Resilience, DLQ & Atomic Synthesis Barrier (`services/common/event_bus.py`, `services/synthesis_service/worker.py`, `services/*/worker.py`)**:
+  - Added Pending Entries List (PEL) recovery (`XPENDING` / `XAUTOCLAIM`), delivery attempt tracking, Dead Letter Queue (DLQ) routing for poison messages, `MAXLEN` stream trimming, and unique pod/host-based consumer group names.
+  - Made `check_and_synthesize` atomic to prevent TOCTOU duplicate synthesis across replicas and required `user_query` before synthesizing.
+- **CI Entrypoint Smoke Test & Hardened CI/Release Pipelines (`tests/test_entrypoints.py`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`)**:
+  - Added an entrypoint smoke test importing service and worker modules, and expanded CI with `ruff`, `mypy`, `pytest`, Docker image builds, and Trivy vulnerability scanning.
 
 ### Changed
-- **Dependencies, Container Builds & Deployment Manifests (`pyproject.toml`, `services/Dockerfile.worker`, `docker-compose.yml`, `k8s/configmap.yaml`, `k8s/domain-workers.yaml`)**:
+- **Dependencies, Container Builds & Deployment Manifests (`pyproject.toml`, `services/Dockerfile.worker`, `services/Dockerfile.gateway`, `docker-compose.yml`, `k8s/configmap.yaml`, `k8s/domain-workers.yaml`)**:
   - Added `openweather-mcp==0.1.0` and AviationStack MCP server dependency/tooling support in `pyproject.toml`.
   - Updated the multi-stage worker Docker build (`services/Dockerfile.worker`) to copy `uv` and `uvx` binaries into the runtime image alongside `git` and `curl` and pre-install/configure `openweather-mcp` and `aviationstack-mcp` alongside `duckduckgo-mcp` under the non-root `app` user (`UV_TOOL_DIR=/home/app/.local/share/uv/tools`).
   - Propagated MCP server configuration and API key environment variables (`OPENWEATHER_API_KEY`, `AVIATIONSTACK_API_KEY`, `UV_CACHE_DIR`, `UV_TOOL_DIR`) across `docker-compose.yml`, `k8s/configmap.yaml`, and `k8s/domain-workers.yaml`.
   - Scaled `hotel-service` pod resource requests (`200m` CPU / `256Mi` memory) and limits (`800m` CPU / `512Mi` memory) and aligned worker pod resource/environment settings in `k8s/domain-workers.yaml` for MCP subprocess execution while maintaining W3C `traceparent` propagation and CloudEvents compatibility.
+  - Migrated `MultiServerMCPClient` usage to async `get_tools()` with `asyncio.timeout(...)`, long-lived worker sessions with shutdown cleanup, direct binary invocation, and explicit tool allowlists.
+  - Passed structured trip fields (`destination`, `departure_city`, dates) into workers/providers, removed the regex `extract_city` heuristic, and moved synchronous Tavily calls off the event loop via `asyncio.to_thread(...)`.
+  - Rebuilt the frontend client (`frontend/static/js/app.js`, `frontend/templates/index.html`, `frontend/static/css/styles.css`) onto the BFF contract (`/api/v1/auth/me` for CSRF, `POST /api/v1/trips/plan` with `X-CSRF-Token`, and `EventSource` on `/api/v1/trips/{id}/stream`), removing the `/api/config` session-key UI and simulated progress timer.
+  - Hardened auth and runtime configs: removed `"admin"` email privilege escalation in `direct_login`, gated `/api/v1/auth/login` and Google mock fallback on `ENVIRONMENT != "production"`, passed Gemini API keys via `x-goog-api-key` instead of query params, added `--forwarded-allow-ips` to gateway Uvicorn, unpublished internal Redis/Postgres/Auth ports in `docker-compose.yml`, removed placeholder `Secret` entries from `k8s/configmap.yaml`, and fixed release archive packaging in `.github/workflows/release.yml`.
 
-## [1.3.0] - 2026-11-17
+### Fixed
+- **Cache Discipline & Output Formatting (`services/flight_service/provider.py`, `services/hotel_service/provider.py`, `services/weather_service/provider.py`)**:
+  - Prevented degraded fallback results from being cached with long TTLs (skipping or limiting negative cache TTL to `<= 60s`).
+  - Fixed hotel fallback text formatting and joined list/snippet outputs with proper newlines (`"\n".join(...)`) instead of `"".join(...)`.
+
+  
+## [1.3.0] - 2026-11-18
 
 ### Added
 - **Enterprise Distributed Microservices Architecture**:
