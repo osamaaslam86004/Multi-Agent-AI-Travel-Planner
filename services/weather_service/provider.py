@@ -74,7 +74,7 @@ class WeatherProvider:
 
         results = await resilient_execute(
             breaker=weather_breaker,
-            primary_func=self._fetch_weather_tiered,
+            primary_func=self._fetch_weather,
             fallback_func=self._fallback_weather,
             city=city,
         )
@@ -82,7 +82,7 @@ class WeatherProvider:
         await redis.setex(cache_key, 21600, json.dumps(results))
         return {"results": results, "cached": False}
 
-    async def _fetch_weather_tiered(self, city: str) -> str:
+    async def _fetch_weather(self, city: str) -> str:
         """Try the MCP before outer fallback."""
         errors: list[str] = []
 

@@ -16,7 +16,9 @@ from services.common.resilience import CircuitBreaker, resilient_execute
 
 logger = logging.getLogger("travelbrain.flight_service")
 
-AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY", "")
+AVIATIONSTACK_API_KEY = (
+    os.getenv("AVIATION_STACK_API_KEY") or os.getenv("AVIATIONSTACK_API_KEY") or ""
+)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/1")
 AVIATIONSTACK_MCP_COMMAND = os.getenv("AVIATIONSTACK_MCP_COMMAND", "uvx")
 AVIATIONSTACK_MCP_PACKAGE = os.getenv("AVIATIONSTACK_MCP_PACKAGE", "aviationstack-mcp")
@@ -57,7 +59,7 @@ class FlightProvider:
 
         results = await resilient_execute(
             breaker=flight_breaker,
-            primary_func=self._fetch_flights_tiered,
+            primary_func=self._fetch_flights,
             fallback_func=self._fallback_flights,
             query=query,
         )
