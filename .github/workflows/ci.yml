@@ -7,8 +7,8 @@ on:
     branches: ["main", "master"]
 
 jobs:
-  smoke-test:
-    name: CI Entrypoint Smoke Test
+  lint-and-test:
+    name: Linting, Type Check & Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -22,9 +22,64 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest email-validator
-          pip install -e . || pip install -r <(python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']))")
+          pip install ruff mypy pytest email-validator
+          pip install -e . || true
 
-      - name: Run Entrypoint Smoke Test
+      - name: Run Ruff Linter
         run: |
-          PYTHONPATH=. pytest tests/test_entrypoints.py -v
+          ruff check .
+
+      - name: Run Mypy Type Check
+        run: |
+          mypy services/ --ignore-missing-imports || true
+
+      - name: Run Entrypoint Smoke Test & Pytest
+        run: |
+          PYTHONPATH=. pytest tests/ -v
+
+  docker-build-and-scan:
+    name: Build & Scan Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build BFF Gateway Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/Dockerfile.gateway
+          push: false
+          tags: tb-bff-gateway:latest
+          load: true
+
+      - name: Build Auth Service Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/Dockerfile.auth
+          push: false
+          tags: tb-auth-service:latest
+          load: true
+
+      - name: Build Worker Service Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/Dockerfile.worker
+          push: false
+          tags: tb-worker-service:latest
+          load: true
+
+      - name: Run Trivy Vulnerability Scan (Gateway)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "tb-bff-gateway:latest"
+          format: "table"
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"

@@ -23,7 +23,6 @@ app = FastAPI(
     version="2.0.0",
     description="Enterprise OIDC Authentication, RS256 JWT Issuance & JWKS Provider",
 )
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,12 +30,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_OIDC_DISCOVERY_URL = (
     "https://accounts.google.com/.well-known/openid-configuration"
 )
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 
 
 @app.get("/.well-known/jwks.json", response_model=JWKSResponse)
@@ -72,9 +71,11 @@ def direct_login(req: UserLoginRequest):
     """
     user_id = f"usr_{abs(hash(req.email)) % 10000000}"
     roles = ["traveler"]
-    if "admin" in req.email:
-        roles.append("admin")
-
+    if ENVIRONMENT == "production":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Direct login disabled in production",
+        )
     token, expires_in = issue_jwt(
         user_id=user_id,
         email=req.email,
@@ -116,6 +117,10 @@ async def google_callback(req: GoogleTokenExchangeRequest):
     and issue an internal TravelBrain RS256 JWT.
     """
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        if ENVIRONMENT == "production":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Google OAuth missing"
+            )
         # Development / Sandbox mock fallback when credentials not provided
         mock_user_id = "usr_google_sandbox_99"
         mock_email = "traveler.google@sandbox.travelbrain.ai"
@@ -131,7 +136,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
             email=mock_email,
             roles=["traveler", "google_verified"],
         )
-
     # Real Google Token Exchange
     token_url = "https://oauth2.googleapis.com/token"
     data = {
@@ -143,7 +147,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
     }
     if req.code_verifier:
         data["code_verifier"] = req.code_verifier
-
     async with httpx.AsyncClient() as client:
         resp = await client.post(token_url, data=data)
         if resp.status_code != 200:
@@ -153,7 +156,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
             )
         tokens = resp.json()
         id_token_raw = tokens.get("id_token")
-
         userinfo_resp = await client.get(
             "https://www.googleapis.com/oauth2/v3/userinfo",
             headers={"Authorization": f"Bearer {tokens.get('access_token')}"},
@@ -164,7 +166,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
                 detail="Failed fetching Google user profile",
             )
         profile = userinfo_resp.json()
-
     user_id = f"usr_google_{profile.get('sub')}"
     email = profile.get("email", "unknown@gmail.com")
     token, expires_in = issue_jwt(

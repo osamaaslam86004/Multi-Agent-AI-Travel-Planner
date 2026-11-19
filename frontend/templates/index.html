@@ -6,7 +6,7 @@
     <title>TravelBrain AI — Multi-Agent Travel Planner</title>
     <meta
       name="description"
-      content="A LangGraph multi-agent system that plans flights, hotels, weather and day-by-day itineraries."
+      content="Distributed multi-agent system planning flights, hotels, weather, and itineraries."
     />
     <link rel="stylesheet" href="/static/css/styles.css" />
   </head>
@@ -47,10 +47,9 @@
               id="apiStatus"
               data-state="checking"
               type="button"
-              title="Open settings"
             >
               <span class="status-dot"></span>
-              <span class="status-text">Checking…</span>
+              <span class="status-text">Connecting…</span>
             </button>
             <button class="btn btn-soft btn-sm" id="newTripBtn" type="button">
               <svg
@@ -63,27 +62,6 @@
                 <path d="M12 5v14M5 12h14" />
               </svg>
               <span class="btn-label">New trip</span>
-            </button>
-            <button
-              class="icon-btn"
-              id="settingsBtn"
-              type="button"
-              aria-label="Settings"
-              title="Settings"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <circle cx="12" cy="12" r="3" />
-                <path
-                  d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"
-                />
-              </svg>
             </button>
             <button
               class="icon-btn"
@@ -120,40 +98,6 @@
           </div>
         </header>
         <div class="conversation" id="conversation">
-          <!-- ---------- no live API: shown instead of the hero ---------- -->
-          <section class="gate" id="setupGate" hidden>
-            <span class="gate-icon" aria-hidden="true">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path
-                  d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"
-                />
-              </svg>
-            </span>
-            <h2>No Live API</h2>
-            <p class="gate-sub" id="gateSub">
-              The server has no API keys configured, so the agents cannot run.
-              Add them below to start planning.
-            </p>
-            <div class="gate-creds" id="gateCreds"></div>
-            <div class="gate-actions">
-              <button class="btn btn-primary" id="gateSave" type="button">
-                <span class="btn-label">Connect</span>
-                <span class="spinner" aria-hidden="true"></span>
-              </button>
-            </div>
-            <p class="gate-foot">
-              Keys entered here last for this browser session only. To configure
-              them once for everyone, add them to the server&rsquo;s
-              <code>.env</code> and restart.
-            </p>
-          </section>
           <!-- ---------- empty / hero state ---------- -->
           <section class="hero" id="hero">
             <h2>
@@ -169,6 +113,8 @@
                 class="suggestion"
                 type="button"
                 data-prompt="Plan a 7 day Japan trip from Dhaka in April with a mid-range budget, focused on food and temples."
+                data-dest="Japan"
+                data-dep="Dhaka"
               >
                 <span class="suggestion-emoji">🇯🇵</span>
                 <span class="suggestion-body">
@@ -180,6 +126,8 @@
                 class="suggestion"
                 type="button"
                 data-prompt="I want a 5 day Paris trip in July from Delhi. Find flights, hotels near the centre and an itinerary under $2000."
+                data-dest="Paris"
+                data-dep="Delhi"
               >
                 <span class="suggestion-emoji">🗼</span>
                 <span class="suggestion-body">
@@ -191,6 +139,8 @@
                 class="suggestion"
                 type="button"
                 data-prompt="Plan a 4 day beach getaway to Bali from Singapore next month for two people, relaxed pace."
+                data-dest="Bali"
+                data-dep="Singapore"
               >
                 <span class="suggestion-emoji">🏝️</span>
                 <span class="suggestion-body">
@@ -202,6 +152,8 @@
                 class="suggestion"
                 type="button"
                 data-prompt="Plan a 10 day Europe rail trip from London covering Amsterdam, Berlin and Prague on a backpacker budget."
+                data-dest="Europe"
+                data-dep="London"
               >
                 <span class="suggestion-emoji">🚆</span>
                 <span class="suggestion-body">
@@ -361,57 +313,6 @@
           </form>
         </div>
       </main>
-    </div>
-    <!-- ============ SETTINGS ============ -->
-    <div class="modal-scrim" id="settingsScrim" hidden></div>
-    <div
-      class="modal"
-      id="settingsModal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="settingsTitle"
-      hidden
-    >
-      <div class="modal-head">
-        <div class="modal-heading">
-          <h2 id="settingsTitle">Settings</h2>
-          <p>
-            Keys you enter here stay in server memory for this browser session
-            only — they are never written to disk.
-          </p>
-        </div>
-        <button
-          class="icon-btn"
-          id="settingsClose"
-          type="button"
-          aria-label="Close settings"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-          >
-            <path d="M18 6 6 18M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body" id="credList"></div>
-      <div class="modal-foot">
-        <button
-          class="btn btn-ghost btn-sm"
-          id="settingsReset"
-          type="button"
-          title="Discard session keys and fall back to the server .env"
-        >
-          Use server .env
-        </button>
-        <button class="btn btn-primary btn-sm" id="settingsSave" type="button">
-          <span class="btn-label">Save for this session</span>
-          <span class="spinner" aria-hidden="true"></span>
-        </button>
-      </div>
     </div>
     <!-- toast -->
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

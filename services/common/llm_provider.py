@@ -223,10 +223,7 @@ class GeminiLLMProvider(BaseLLMProvider):
         if not self.is_available():
             raise RuntimeError("Gemini API key not configured or invalid.")
         system_instruction, contents = self._convert_messages(messages)
-        endpoint = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
-            f"?key={self.api_key}"
-        )
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
         body: dict[str, Any] = {
             "contents": contents,
             "generationConfig": {"temperature": temperature},
@@ -235,11 +232,13 @@ class GeminiLLMProvider(BaseLLMProvider):
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         start_time = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(endpoint, json=body)
+            resp = await client.post(
+                endpoint, json=body, headers={"x-goog-api-key": self.api_key}
+            )
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             if resp.status_code != 200:
                 raise RuntimeError(
-                    f"Gemini API returned error {resp.status_code}: {resp.text}"
+                    f"Gemini API returned error {resp.status_code}: {resp.status_code}"
                 )
             data = resp.json()
         candidates = data.get("candidates", [])
@@ -271,10 +270,7 @@ class GeminiLLMProvider(BaseLLMProvider):
         if not self.is_available():
             raise RuntimeError("Gemini API key not configured or invalid.")
         system_instruction, contents = self._convert_messages(messages)
-        endpoint = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
-            f"?key={self.api_key}"
-        )
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
         body: dict[str, Any] = {
             "contents": contents,
             "generationConfig": {
@@ -286,10 +282,14 @@ class GeminiLLMProvider(BaseLLMProvider):
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         start_time = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(endpoint, json=body)
+            resp = await client.post(
+                endpoint, json=body, headers={"x-goog-api-key": self.api_key}
+            )
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API structured request failed: {resp.text}")
+                raise RuntimeError(
+                    f"Gemini API structured request failed: {resp.status_code}"
+                )
             data = resp.json()
         candidates = data.get("candidates", [])
         content = "".join(

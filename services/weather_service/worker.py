@@ -17,12 +17,12 @@ from services.weather_service.provider import WeatherProvider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("travelbrain.weather_worker")
-
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 STREAM_IN = "stream:travel:planning:initiated"
 STREAM_OUT = "stream:travel:weather:completed"
 CONSUMER_GROUP = "cg-weather-service"
-CONSUMER_NAME = f"weather-worker-{os.getpid()}"
+HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
+CONSUMER_NAME = f"weather-worker-{HOSTNAME}-{os.getpid()}"
 
 event_bus = EventBus(redis_url=REDIS_URL)
 provider = WeatherProvider(redis_url=REDIS_URL)
@@ -45,11 +45,9 @@ async def handle_planning_initiated(
     dates = (
         data.get("dates") if isinstance(data, dict) else getattr(data, "dates", None)
     )
-
     logger.info(
         f"Processing weather forecast for trip {correlation_id} (query: '{query}', dest: '{destination}')"
     )
-
     # Publish progress update to user stream
     await event_bus.publish_progress(
         f"trip:stream:{correlation_id}",
@@ -59,7 +57,6 @@ async def handle_planning_initiated(
             "percentage": 35,
         },
     )
-
     try:
         provider_res = await provider.get_weather(
             query=query,
