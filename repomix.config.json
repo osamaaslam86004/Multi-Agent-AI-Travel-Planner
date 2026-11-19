@@ -13,7 +13,7 @@
     "useDefaultPatterns": true,
     "customPatterns": [
       "**/migrations/*",
-      "!**/migrations/__init__.py",
+      "**/migrations/__init__.py",
       "**/*lock*",
       "poetry.lock",
       "Pipfile.lock",

@@ -9,19 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.4.0] - 2026-11-18
 
 ### Added
+- **OpenWeather MCP Server Integration (`services/weather_service/provider.py`)**:
+  - Integrated the `openweather-mcp` (`==0.1.0`) server using `MultiServerMCPClient` (`langchain-mcp-adapters`) and normalized weather output payloads consistent with `services/hotel_service/provider.py`.
+  - Preserved Redis caching (`weather:cache:...`), `CircuitBreaker` protection, and `_fallback_weather` fallback handling when MCP invocation fails or `OPENWEATHER_API_KEY` is missing.
+- **AviationStack MCP Server Integration (`services/flight_service/provider.py`)**:
+  - Integrated the AviationStack MCP server (`https://github.com/Pradumnasaraf/aviationstack-mcp.git`) with dynamic tool/schema resolution and normalized flight output payloads.
+  - Preserved Redis caching (`flight:cache:...`), `CircuitBreaker` protection, and `_fallback_flights` fallback handling on MCP server failure, timeout, or missing `AVIATIONSTACK_API_KEY`.
 - **DuckDuckGo MCP Server Integration & 3-Tier Hotel Search Resilience (`services/hotel_service/provider.py`)**:
   - Integrated the **DuckDuckGo Model Context Protocol (MCP) server** via `MultiServerMCPClient` (`langchain-mcp-adapters`) over `stdio` transport (`uvx duckduckgo-mcp`) as an automated secondary fallback tier for accommodation discovery.
   - Implemented a 3-tier resilient failover pipeline (`_execute_tiered_search`) routing requests sequentially through **Tier 1 (Tavily Search API)** -> **Tier 2 (DuckDuckGo MCP Server)** -> **Tier 3 (Static Heuristic Recommendations)** while preserving 12-hour Redis caching (`hotel:cache:<hash>`).
   - Added independent stateful `CircuitBreaker` isolation (`TavilyHotelBreaker` and `DuckDuckGoMCPBreaker`) to prevent cascading latency and ensure uninterrupted Scatter-Gather barrier completion in `synthesis_service`.
 
 ### Changed
-- **Worker Container Runtime & Pre-Installed MCP Tooling (`services/Dockerfile.worker`)**:
-  - Updated the multi-stage worker Docker build to copy `uv` and `uvx` binaries into the runtime image alongside `git` and `curl`.
-  - Pre-installed `duckduckgo-mcp` as an isolated `uv` tool under the non-root `app` user (`UV_TOOL_DIR=/home/app/.local/share/uv/tools`) to eliminate cold-start PyPI download latency and support restricted network environments.
-- **Kubernetes Hotel Worker Resource & Environment Allocation (`k8s/domain-workers.yaml`)**:
-  - Scaled `hotel-service` pod resource requests (`200m` CPU / `256Mi` memory) and limits (`800m` CPU / `512Mi` memory) to accommodate child `uvx duckduckgo-mcp` subprocess execution.
-  - Configured explicit `UV_CACHE_DIR` and `UV_TOOL_DIR` environment variables in the `hotel-service` Deployment manifest for non-root container execution.
-
+- **Dependencies, Container Builds & Deployment Manifests (`pyproject.toml`, `services/Dockerfile.worker`, `docker-compose.yml`, `k8s/configmap.yaml`, `k8s/domain-workers.yaml`)**:
+  - Added `openweather-mcp==0.1.0` and AviationStack MCP server dependency/tooling support in `pyproject.toml`.
+  - Updated the multi-stage worker Docker build (`services/Dockerfile.worker`) to copy `uv` and `uvx` binaries into the runtime image alongside `git` and `curl` and pre-install/configure `openweather-mcp` and `aviationstack-mcp` alongside `duckduckgo-mcp` under the non-root `app` user (`UV_TOOL_DIR=/home/app/.local/share/uv/tools`).
+  - Propagated MCP server configuration and API key environment variables (`OPENWEATHER_API_KEY`, `AVIATIONSTACK_API_KEY`, `UV_CACHE_DIR`, `UV_TOOL_DIR`) across `docker-compose.yml`, `k8s/configmap.yaml`, and `k8s/domain-workers.yaml`.
+  - Scaled `hotel-service` pod resource requests (`200m` CPU / `256Mi` memory) and limits (`800m` CPU / `512Mi` memory) and aligned worker pod resource/environment settings in `k8s/domain-workers.yaml` for MCP subprocess execution while maintaining W3C `traceparent` propagation and CloudEvents compatibility.
 
 ## [1.3.0] - 2026-11-17
 
@@ -92,9 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.1.0] - 2026-11-12
 
 ### Changed
-- **Production-Grade Configuration Architecture**: Migrated system configuration to modular, nested Pydantic v2 sub-configs (`AppConfig`, `SecurityConfig`, `DatabaseConfig`, `RedisConfig`, `LLMConfig`, `ExternalAPIsConfig`, and `TruncationConfig`) using `BaseSettings` and `SettingsConfigDict`[cite: 2].
+- **Production-Grade Configuration Architecture**: Migrated system configuration to modular, nested Pydantic v2 sub-configs (`AppConfig`, `SecurityConfig`, `DatabaseConfig`, `RedisConfig`, `LLMConfig`, `ExternalAPIsConfig`, and `TruncationConfig`) using `BaseSettings` and `SettingsConfigDict`.
 - **Robust Environment Mapping**: Integrated `AliasChoices` and nested double-underscore delimiters (`__`) to support backward compatibility with flat environment variables alongside typed nested structures.
-- **Secure Secret Handling**: Refactored LLM and external API clients to consume `SecretStr`-protected keys safely from the central configuration model[cite: 2].
+- **Secure Secret Handling**: Refactored LLM and external API clients to consume `SecretStr`-protected keys safely from the central configuration model.
 - **Application & Module Refactoring**: Fully updated `src/api`, `src/clients`, `src/agents`, `src/mcp_servers`, and `app.py` to utilize structured configuration parameters, secure session cookies, and strict CORS policies.
 - **Codebase Snapshot Tools**: Added custom exclusion patterns to `repomix.config.json` for enhanced code packing and filtering.
 

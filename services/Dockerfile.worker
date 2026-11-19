@@ -1,24 +1,37 @@
+
 # syntax=docker/dockerfile:1.7
 FROM python:3.11-slim-bookworm AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /uvx /bin/
 
-ENV UV_COMPILE_BYTECODE=1     UV_LINK_MODE=copy     UV_PYTHON_DOWNLOADS=never
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv     uv sync --frozen --no-install-project --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
 
 FROM python:3.11-slim-bookworm AS runtime
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.17 /uv /uvx /bin/
 
-RUN apt-get update     && apt-get install -y --no-install-recommends curl git     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl git \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system --gid 1001 app     && useradd --system --uid 1001 --gid app --create-home app
+RUN groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid app --create-home app
 
-ENV PYTHONUNBUFFERED=1     PYTHONDONTWRITEBYTECODE=1     PATH="/app/.venv/bin:/home/app/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"     VIRTUAL_ENV=/app/.venv     UV_CACHE_DIR=/tmp/.cache/uv     UV_TOOL_DIR=/home/app/.local/share/uv/tools
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:/home/app/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games" \
+    VIRTUAL_ENV=/app/.venv \
+    UV_CACHE_DIR=/tmp/.cache/uv \
+    UV_TOOL_DIR=/home/app/.local/share/uv/tools \
+    UV_PYTHON_DOWNLOADS=automatic
 
 WORKDIR /app
 
@@ -27,6 +40,7 @@ COPY --chown=app:app services/ ./services/
 
 USER app
 
-RUN uv tool install duckduckgo-mcp     || echo "WARNING: could not pre-install duckduckgo-mcp; uvx will fetch it on first use"
+RUN uv tool install duckduckgo-mcp \
+    || echo "WARNING: could not pre-install duckduckgo-mcp; uvx will fetch it on first use"
 
 CMD ["python", "-m", "services.flight_service.worker"]

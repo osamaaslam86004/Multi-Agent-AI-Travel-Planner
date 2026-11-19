@@ -1,15 +1,16 @@
 """
-Flight Provider with AviationStack MCP / REST Integration, Redis Caching, and Resilience.
+Flight Provider with AviationStack REST / MCP, Redis Caching, and Resilience.
 """
 
 import hashlib
 import json
 import logging
 import os
+import re
 from typing import Any
 
-import httpx
 import redis.asyncio as aioredis
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from services.common.resilience import CircuitBreaker, resilient_execute
 
@@ -17,12 +18,17 @@ logger = logging.getLogger("travelbrain.flight_service")
 
 AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/1")
+AVIATIONSTACK_MCP_COMMAND = os.getenv("AVIATIONSTACK_MCP_COMMAND", "uvx")
+AVIATIONSTACK_MCP_PACKAGE = os.getenv("AVIATIONSTACK_MCP_PACKAGE", "aviationstack-mcp")
 
 flight_breaker = CircuitBreaker("AviationStackBreaker", fail_max=4, reset_timeout=30.0)
+flight_mcp_breaker = CircuitBreaker(
+    "AviationStackMCPBreaker", fail_max=3, reset_timeout=20.0
+)
 
 
 class FlightProvider:
-    """Manages flight lookups, Redis caching, circuit breaker, and heuristic fallbacks."""
+    """Manages flight lookup, caching, MCP, and heuristic fallback."""
 
     def __init__(self, redis_url: str = REDIS_URL):
         self.redis_url = redis_url
@@ -41,51 +47,187 @@ class FlightProvider:
 
     async def search_flights(self, query: str) -> dict[str, Any]:
         """High-level flight search with caching and circuit-broken execution."""
-        r = await self.get_redis()
+        redis = await self.get_redis()
         cache_key = self._cache_key(query)
 
-        # Check Cache
-        cached_data = await r.get(cache_key)
+        cached_data = await redis.get(cache_key)
         if cached_data:
-            logger.info(f"Flight cache hit for query: '{query}'")
+            logger.info("Flight cache hit for query: '%s'", query)
             return {"results": json.loads(cached_data), "cached": True}
 
-        # Resilient Execution
         results = await resilient_execute(
             breaker=flight_breaker,
-            primary_func=self._fetch_aviationstack,
+            primary_func=self._fetch_flights_tiered,
             fallback_func=self._fallback_flights,
             query=query,
         )
 
-        # Store in Redis Cache (24-hour TTL)
-        await r.setex(cache_key, 86400, json.dumps(results))
+        await redis.setex(cache_key, 86400, json.dumps(results))
         return {"results": results, "cached": False}
 
-    async def _fetch_aviationstack(self, query: str) -> str:
-        """Call AviationStack API when key is configured."""
-        if not AVIATIONSTACK_API_KEY:
-            # Trigger fallback immediately if no key provided
-            raise ValueError("AviationStack API key not configured")
+    async def _fetch_flights(self, query: str) -> str:
+        """Try the AviationStack MCP."""
+        errors: list[str] = []
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                "http://api.aviationstack.com/v1/flights",
-                params={"access_key": AVIATIONSTACK_API_KEY, "limit": 5},
+        try:
+            result = await flight_mcp_breaker.call(
+                self._fetch_aviationstack_mcp, query=query
             )
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"AviationStack HTTP {resp.status_code}: {resp.text}"
+            if result and result.strip():
+                return result
+            raise RuntimeError("AviationStack MCP returned empty output")
+        except Exception as exc:
+            errors.append(f"MCP: {exc}")
+            logger.warning("AviationStack MCP failed: %s", exc)
+
+        raise RuntimeError("Flight provider tiers exhausted: " + "; ".join(errors))
+
+    @staticmethod
+    def _tool_fields(tool: Any) -> dict[str, Any]:
+        schema = getattr(tool, "args_schema", None)
+        if not schema:
+            return {}
+        return (
+            getattr(schema, "model_fields", None)
+            or getattr(schema, "__fields__", None)
+            or {}
+        )
+
+    @staticmethod
+    def _build_flight_tool_args(tool: Any, query: str) -> dict[str, Any]:
+        """Build tool inputs based on its dynamically discovered schema."""
+        fields = FlightProvider._tool_fields(tool)
+        if not fields:
+            return {"query": query}
+
+        args: dict[str, Any] = {}
+        query_fields = (
+            "query",
+            "search_query",
+            "keywords",
+            "search",
+            "flight",
+            "flight_iata",
+            "flight_number",
+            "airline_name",
+            "airline",
+            "airport_iata_code",
+            "airport",
+            "iata_code",
+        )
+        for field in query_fields:
+            if field in fields:
+                args[field] = query
+                break
+
+        # Populate known required fields only when inferable from the query.
+        upper = query.upper()
+        flight_match = re.search(r"\b([A-Z]{2,3}\d{1,4})\b", upper)
+        airport_match = re.search(r"\b([A-Z]{3})\b", upper)
+
+        for field in fields:
+            field_lower = field.lower()
+            if field in args:
+                continue
+            if field_lower in ("flight_iata", "flight_number") and flight_match:
+                args[field] = flight_match.group(1)
+            elif field_lower in ("airport_iata_code", "iata_code") and airport_match:
+                args[field] = airport_match.group(1)
+            elif field_lower in ("search", "query", "keywords", "search_query"):
+                args[field] = query
+
+        return args
+
+    @staticmethod
+    def _normalize_mcp_output(output: Any) -> str:
+        """Convert MCP response shapes into readable text."""
+        if output is None:
+            return ""
+        if isinstance(output, str):
+            return output.strip()
+        if isinstance(output, (int, float, bool)):
+            return str(output)
+        if isinstance(output, dict):
+            for key in ("text", "content", "result", "data", "output"):
+                if key in output:
+                    normalized = FlightProvider._normalize_mcp_output(output[key])
+                    if normalized:
+                        return normalized
+            return json.dumps(output, ensure_ascii=False, default=str)
+        if isinstance(output, list):
+            parts = [FlightProvider._normalize_mcp_output(item) for item in output]
+            return "\n".join(part for part in parts if part)
+        if hasattr(output, "content"):
+            return FlightProvider._normalize_mcp_output(output.content)
+        if hasattr(output, "text"):
+            return FlightProvider._normalize_mcp_output(output.text)
+        return str(output)
+
+    async def _fetch_aviationstack_mcp(self, query: str) -> str:
+        """Discover AviationStack tools and invoke a flight-related tool."""
+        if not AVIATIONSTACK_API_KEY:
+            raise ValueError("AVIATION_STACK_API_KEY not configured")
+
+        server_config = {
+            "aviationstack": {
+                "command": AVIATIONSTACK_MCP_COMMAND,
+                "args": ["--from", AVIATIONSTACK_MCP_PACKAGE, "aviationstack-mcp"],
+                "transport": "stdio",
+                "env": {"AVIATION_STACK_API_KEY": AVIATIONSTACK_API_KEY},
+            }
+        }
+
+        async with MultiServerMCPClient(server_config) as client:
+            tools = client.get_tools()
+            if not tools:
+                raise RuntimeError("No tools discovered from AviationStack MCP")
+
+            preferred = [
+                tool
+                for tool in tools
+                if any(
+                    word in getattr(tool, "name", "").lower()
+                    for word in ("flight", "airline", "schedule", "airport")
                 )
-            data = resp.json()
-            return f"Live AviationStack flights found: {len(data.get('data', []))} records available."
+            ]
+            if not preferred:
+                raise RuntimeError(
+                    "No flight-related tools discovered. Available: "
+                    + ", ".join(getattr(t, "name", "?") for t in tools)
+                )
+
+            # Prefer tools with a query-like argument; otherwise select the
+            # first flight-related tool and let schema adaptation handle it.
+            tool = next(
+                (
+                    candidate
+                    for candidate in preferred
+                    if any(
+                        field in self._tool_fields(candidate)
+                        for field in (
+                            "query",
+                            "search_query",
+                            "keywords",
+                            "flight_iata",
+                            "airline_name",
+                        )
+                    )
+                ),
+                preferred[0],
+            )
+            args = self._build_flight_tool_args(tool, query)
+            output = await tool.ainvoke(args)
+            normalized = self._normalize_mcp_output(output)
+            if not normalized:
+                raise RuntimeError(f"MCP tool '{tool.name}' returned empty data")
+            return normalized
 
     async def _fallback_flights(self, query: str) -> str:
-        """Graceful fallback heuristic when upstream API is unavailable or unconfigured."""
+        """Graceful fallback when upstream APIs/MCP are unavailable."""
         return (
             f"Flight Guidance for '{query}':\n"
-            f"- Recommended Route: Direct or 1-stop connection via major international hubs.\n"
-            f"- Estimated Economy Airfare: $450 - $950 round-trip.\n"
-            f"- Recommended Booking Window: 4 to 8 weeks in advance for best fares.\n"
-            f"- Common Carriers: Major international and partner alliance airlines."
+            "- Recommended Route: Direct or 1-stop connection via major international hubs.\n"
+            "- Estimated Economy Airfare: $450 - $950 round-trip.\n"
+            "- Recommended Booking Window: 4 to 8 weeks in advance for best fares.\n"
+            "- Common Carriers: Major international and partner alliance airlines."
         )
