@@ -26,8 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Event Bus Resilience, DLQ & Atomic Synthesis Barrier (`services/common/event_bus.py`, `services/synthesis_service/worker.py`, `services/*/worker.py`)**:
   - Added Pending Entries List (PEL) recovery (`XPENDING` / `XAUTOCLAIM`), delivery attempt tracking, Dead Letter Queue (DLQ) routing for poison messages, `MAXLEN` stream trimming, and unique pod/host-based consumer group names.
   - Made `check_and_synthesize` atomic to prevent TOCTOU duplicate synthesis across replicas and required `user_query` before synthesizing.
-- **CI Entrypoint Smoke Test & Hardened CI/Release Pipelines (`tests/test_entrypoints.py`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`)**:
-  - Added an entrypoint smoke test importing service and worker modules, and expanded CI with `ruff`, `mypy`, `pytest`, Docker image builds, and Trivy vulnerability scanning.
+- **CI Entrypoint Smoke Test, Lockfile & Hardened CI/Release Pipelines (`tests/test_entrypoints.py`, `uv.lock`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`)**:
+  - Added an entrypoint smoke test importing service and worker modules, generated `uv.lock` for deterministic builds, updated `.github/workflows/ci.yml` to export and install locked runtime dependencies (`uv export --frozen --no-dev --no-hashes` + `uv pip install --system --no-deps`) before running `pytest`, and expanded CI with `ruff`, `mypy`, `pytest`, Docker image builds, and Trivy vulnerability scanning.
 
 ### Changed
 - **Dependencies, Container Builds & Deployment Manifests (`pyproject.toml`, `services/Dockerfile.worker`, `services/Dockerfile.gateway`, `docker-compose.yml`, `k8s/configmap.yaml`, `k8s/domain-workers.yaml`)**:
@@ -41,10 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hardened auth and runtime configs: removed `"admin"` email privilege escalation in `direct_login`, gated `/api/v1/auth/login` and Google mock fallback on `ENVIRONMENT != "production"`, passed Gemini API keys via `x-goog-api-key` instead of query params, added `--forwarded-allow-ips` to gateway Uvicorn, unpublished internal Redis/Postgres/Auth ports in `docker-compose.yml`, removed placeholder `Secret` entries from `k8s/configmap.yaml`, and fixed release archive packaging in `.github/workflows/release.yml`.
 
 ### Fixed
+- **Linting, Formatting & Exception Handling (`services/`)**:
+  - Resolved Ruff linting and formatting issues across `services/` (narrowing blind `Exception` catches under `BLE001`, cleaning up `try`/`except`/`pass` blocks under `S110`, simplifying nested `if` statements under `SIM102`, refactoring FastAPI `Depends` defaults under `B008`, fixing undefined name imports under `F821`, and cleaning up `logger.exception` usage under `G201`/`TRY401`/`G202`) and applied `ruff format .`.
 - **Cache Discipline & Output Formatting (`services/flight_service/provider.py`, `services/hotel_service/provider.py`, `services/weather_service/provider.py`)**:
   - Prevented degraded fallback results from being cached with long TTLs (skipping or limiting negative cache TTL to `<= 60s`).
   - Fixed hotel fallback text formatting and joined list/snippet outputs with proper newlines (`"\n".join(...)`) instead of `"".join(...)`.
-
   
 ## [1.3.0] - 2026-11-18
 
@@ -144,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
+[1.4.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.0.0...v1.1.0
