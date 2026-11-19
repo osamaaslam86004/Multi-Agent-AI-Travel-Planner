@@ -7,6 +7,8 @@ import logging
 import os
 import signal
 
+import redis.asyncio as aioredis
+
 from services.common.event_bus import EventBus
 from services.common.schemas import (
     CloudEvent,
@@ -94,8 +96,16 @@ async def handle_planning_initiated(
             },
         )
         logger.info(f"Published flight results for trip {correlation_id}")
-    except Exception as exc:
+
+    except (
+        aioredis.RedisError,
+        TimeoutError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         logger.error(f"Flight search failed for trip {correlation_id}: {exc}")
+
         out_event = CloudEvent[FlightResultPayload](
             source="/services/flight-agent",
             type="com.travelbrain.flights.completed",

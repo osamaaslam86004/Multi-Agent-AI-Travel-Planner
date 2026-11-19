@@ -3,7 +3,7 @@ Stateless JWT verification middleware using JWKS public keys.
 """
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
 import jwt
 from fastapi import Depends, HTTPException, Request, status
@@ -18,6 +18,10 @@ EXPECTED_AUDIENCE = os.getenv("JWT_AUDIENCE", "https://api.travelbrain.ai")
 
 _jwks_client: PyJWKClient | None = None
 security_scheme = HTTPBearer(auto_error=False)
+
+CredentialsDep = Annotated[
+    HTTPAuthorizationCredentials | None, Depends(security_scheme)
+]
 
 
 def get_jwks_client() -> PyJWKClient:
@@ -49,7 +53,7 @@ class AuthenticatedUser:
 
 async def get_current_user(
     request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security_scheme),
+    credentials: CredentialsDep = None,
 ) -> AuthenticatedUser:
     """
     Statelessly verifies incoming JWT signature via local JWKS cache.
@@ -104,11 +108,14 @@ async def get_current_user(
         )
 
 
+CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
+
+
 def require_roles(*required_roles: str):
     """Role-Based Access Control (RBAC) dependency factory."""
 
     async def role_checker(
-        user: AuthenticatedUser = Depends(get_current_user),
+        user: CurrentUserDep,
     ) -> AuthenticatedUser:
         for r in required_roles:
             if not user.has_role(r):

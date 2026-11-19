@@ -394,8 +394,10 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                         ),
                     }
                     return content, token_usage
-        except Exception:
-            pass
+        except (httpx.HTTPError, TimeoutError, OSError, KeyError, ValueError) as exc:
+            logger.debug(
+                "Local LLM endpoint unavailable at %s: %s", self.endpoint_url, exc
+            )
         return None
 
     def _load_transformers_pipeline(self):
@@ -417,7 +419,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 max_new_tokens=1024,
             )
             logger.info(f"Loaded local HuggingFace pipeline for '{self.model_name}'")
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
             logger.debug(
                 f"Transformers pipeline not loaded ({exc}). Using offline generation."
             )
@@ -510,9 +512,11 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> LLMResult:
         res = await self.generate(messages, temperature=temperature, **kwargs)
+
         try:
             parsed = self._extract_json_from_text(res.content)
-        except Exception:
+        except ValueError:
             parsed = response_format
+
         res.structured_data = parsed
         return res

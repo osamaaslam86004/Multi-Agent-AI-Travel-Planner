@@ -75,15 +75,15 @@ class WeatherProvider:
                         res = getattr(self._mcp_client, method)()
                         if asyncio.iscoroutine(res):
                             await res
-                    except Exception as exc:
+                    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                         logger.warning("Error closing weather MCP client: %s", exc)
                     break
             self._mcp_client = None
         if self._redis is not None:
             try:
                 await self._redis.close()
-            except Exception:
-                pass
+            except (aioredis.RedisError, OSError, RuntimeError) as exc:
+                logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
     def _cache_key(self, city: str) -> str:
@@ -135,7 +135,7 @@ class WeatherProvider:
                     text=text, source="openweather_mcp", degraded=False
                 )
             raise RuntimeError("OpenWeather MCP returned empty output")
-        except Exception as exc:
+        except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"MCP: {exc}")
             logger.warning("OpenWeather MCP failed: %s", exc)
         raise RuntimeError("Weather providers exhausted: " + " | ".join(errors))

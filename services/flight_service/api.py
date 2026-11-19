@@ -1,5 +1,7 @@
 """Flight Agent Service REST and Health Check API."""
 
+from typing import Annotated
+
 from fastapi import Depends, FastAPI
 
 from services.common.auth_middleware import AuthenticatedUser, get_current_user
@@ -7,6 +9,8 @@ from services.flight_service.provider import FlightProvider
 
 app = FastAPI(title="Flight Agent Service", version="2.0.0")
 provider = FlightProvider()
+
+CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
 
 @app.get("/health/live")
@@ -22,6 +26,6 @@ async def readiness():
 
 
 @app.get("/api/v1/flights/search")
-async def search(query: str, user: AuthenticatedUser = Depends(get_current_user)):
+async def search(query: str, user: CurrentUser):
     """Authenticated direct REST query for flight data."""
     return await provider.search_flights(query)

@@ -12,6 +12,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import httpx
+import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -88,7 +89,7 @@ async def readiness():
         r = await session_manager.get_redis()
         await r.ping()
         return {"status": "READY", "redis": "connected"}
-    except Exception as exc:
+    except (aioredis.RedisError, OSError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}")
 
 
@@ -264,10 +265,16 @@ async def stream_trip_progress(correlation_id: str):
                     yield f"data: {payload}\n\n"
                     try:
                         parsed = json.loads(payload)
-                        if parsed.get("stage") in ["completed", "error"]:
+                        if isinstance(parsed, dict) and parsed.get("stage") in [
+                            "completed",
+                            "error",
+                        ]:
                             break
-                    except Exception:
-                        pass
+                    except (ValueError, AttributeError) as parse_err:
+                        logger.debug(
+                            "Ignoring non-terminal or malformed SSE payload: %s",
+                            parse_err,
+                        )
                 await asyncio.sleep(0.05)
         finally:
             await pubsub.unsubscribe(channel_name)

@@ -67,7 +67,7 @@ class SynthesisEngine:
                 f"({result.model_name}) in {result.latency_ms:.1f}ms"
             )
             return result.content
-        except Exception as exc:
+        except (RuntimeError, ValueError, OSError, TimeoutError) as exc:
             logger.error(
                 f"Resilient LLM chain failed to generate itinerary: {exc}. Using deterministic safety fallback."
             )
@@ -116,7 +116,7 @@ class SynthesisEngine:
                 f"({result.model_name}) in {result.latency_ms:.1f}ms"
             )
             return result.content
-        except Exception as exc:
+        except (RuntimeError, ValueError, OSError, TimeoutError) as exc:
             logger.error(
                 f"Resilient LLM chain failed to format final response: {exc}. Using deterministic safety fallback."
             )

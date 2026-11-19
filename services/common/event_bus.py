@@ -132,10 +132,9 @@ class EventBus:
             cloud_event = CloudEvent[Any](**raw_event)
             await handler(cloud_event)
             await self.client.xack(stream_name, group_name, message_id)
-        except Exception as exc:
-            logger.error(
-                f"Failed processing message {message_id} on stream '{stream_name}' by '{consumer_name}': {exc}",
-                exc_info=True,
+        except Exception:
+            logger.exception(
+                f"Failed processing message {message_id} on stream '{stream_name}' by '{consumer_name}'"
             )
 
     async def consume(
@@ -182,7 +181,7 @@ class EventBus:
                                 msg_data,
                                 handler,
                             )
-                except Exception as pel_err:
+                except (aioredis.RedisError, TimeoutError, OSError) as pel_err:
                     logger.debug(f"XAUTOCLAIM info on '{stream_name}': {pel_err}")
 
                 # Step 2: Read new messages
@@ -209,6 +208,12 @@ class EventBus:
                         )
             except asyncio.CancelledError:
                 break
-            except Exception as loop_err:
+            except (
+                aioredis.RedisError,
+                TimeoutError,
+                OSError,
+                RuntimeError,
+                ValueError,
+            ) as loop_err:
                 logger.error(f"Error in consumer loop for '{stream_name}': {loop_err}")
                 await asyncio.sleep(1.0)

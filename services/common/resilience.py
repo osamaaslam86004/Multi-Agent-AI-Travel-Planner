@@ -83,7 +83,7 @@ class CircuitBreaker:
                 elif self.state == CircuitState.CLOSED:
                     self.failure_count = 0
             return result
-        except Exception as exc:
+        except Exception:
             async with self._lock:
                 self.failure_count += 1
                 if (
@@ -91,7 +91,7 @@ class CircuitBreaker:
                     or self.failure_count >= self.fail_max
                 ):
                     await self._transition(CircuitState.OPEN)
-            raise exc
+            raise
 
 
 async def retry_with_backoff(
@@ -117,7 +117,7 @@ async def retry_with_backoff(
                 logger.error(
                     f"Retry exhausted ({attempt}/{max_retries}) for {func.__name__}: {exc}"
                 )
-                raise exc
+                raise
 
             sleep_duration = min(delay, max_delay)
             if jitter:
@@ -153,4 +153,4 @@ async def resilient_execute(
         )
         if fallback_func:
             return await fallback_func(*args, **kwargs)
-        raise exc
+        raise

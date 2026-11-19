@@ -57,7 +57,7 @@ def readiness():
         if not jwks["keys"]:
             raise RuntimeError("JWKS keys empty")
         return {"status": "READY", "keys_loaded": len(jwks["keys"])}
-    except Exception as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         )
@@ -155,7 +155,7 @@ async def google_callback(req: GoogleTokenExchangeRequest):
                 detail=f"Google OAuth exchange failed: {resp.text}",
             )
         tokens = resp.json()
-        id_token_raw = tokens.get("id_token")
+        tokens.get("id_token")
         userinfo_resp = await client.get(
             "https://www.googleapis.com/oauth2/v3/userinfo",
             headers={"Authorization": f"Bearer {tokens.get('access_token')}"},

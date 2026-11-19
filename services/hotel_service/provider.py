@@ -71,15 +71,15 @@ class HotelProvider:
                         res = getattr(self._mcp_client, method)()
                         if asyncio.iscoroutine(res):
                             await res
-                    except Exception as exc:
+                    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                         logger.warning("Error closing hotel MCP client: %s", exc)
                     break
             self._mcp_client = None
         if self._redis is not None:
             try:
                 await self._redis.close()
-            except Exception:
-                pass
+            except (aioredis.RedisError, OSError, RuntimeError) as exc:
+                logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
     def _cache_key(self, query: str, destination: str | None = None) -> str:
@@ -123,7 +123,7 @@ class HotelProvider:
                 self._fetch_tavily_hotels, target_location
             )
             return ProviderResult(text=text, source="tavily", degraded=False)
-        except Exception as exc:
+        except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             logger.warning(
                 f"Tier 1 (Tavily API) failed for '{target_location}': {exc}. Failing over to Tier 2 (DuckDuckGo MCP)..."
             )
@@ -137,7 +137,7 @@ class HotelProvider:
                 self._fetch_duckduckgo_mcp, target_location
             )
             return ProviderResult(text=text, source="duckduckgo_mcp", degraded=False)
-        except Exception as exc:
+        except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             logger.warning(
                 f"Tier 2 (DuckDuckGo MCP) failed for '{target_location}': {exc}. Failing over to Tier 3 (Fallback)..."
             )

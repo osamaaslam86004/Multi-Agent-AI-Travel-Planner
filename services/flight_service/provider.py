@@ -79,15 +79,15 @@ class FlightProvider:
                         res = getattr(self._mcp_client, method)()
                         if asyncio.iscoroutine(res):
                             await res
-                    except Exception as exc:
+                    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                         logger.warning("Error closing MCP client: %s", exc)
                     break
             self._mcp_client = None
         if self._redis is not None:
             try:
                 await self._redis.close()
-            except Exception:
-                pass
+            except (aioredis.RedisError, OSError, RuntimeError) as exc:
+                logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
     def _cache_key(
@@ -155,9 +155,11 @@ class FlightProvider:
                     text=text, source="aviationstack_mcp", degraded=False
                 )
             raise RuntimeError("AviationStack MCP returned empty output")
-        except Exception as exc:
+
+        except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"MCP: {exc}")
             logger.warning("AviationStack MCP failed: %s", exc)
+
         raise RuntimeError("Flight provider tiers exhausted: " + "; ".join(errors))
 
     @staticmethod

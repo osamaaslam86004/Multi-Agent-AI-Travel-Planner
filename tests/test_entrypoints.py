@@ -3,7 +3,9 @@ CI Entrypoint Smoke Test.
 Verifies that every service entrypoint module (APIs, workers, auth, gateway) can be imported
 without syntax errors or import regressions.
 """
+
 import importlib
+
 import pytest
 
 SERVICE_ENTRYPOINTS = [

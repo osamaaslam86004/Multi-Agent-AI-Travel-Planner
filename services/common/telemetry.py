@@ -26,10 +26,14 @@ def generate_traceparent() -> str:
 
 def extract_traceparent(headers: dict[str, Any]) -> str:
     """Extract or generate a W3C traceparent."""
+
     for key, value in headers.items():
-        if key.lower() == "traceparent" and isinstance(value, str):
-            if TRACEPARENT_REGEX.match(value):
-                return value
+        if (
+            key.lower() == "traceparent"
+            and isinstance(value, str)
+            and TRACEPARENT_REGEX.match(value)
+        ):
+            return value
     return generate_traceparent()
 
 

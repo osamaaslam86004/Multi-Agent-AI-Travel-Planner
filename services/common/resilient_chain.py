@@ -8,6 +8,7 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
+import httpx
 from langchain_core.messages import BaseMessage
 from opentelemetry.trace import StatusCode
 
@@ -148,7 +149,13 @@ class ResilientLLMChain:
                         )
                         return result
 
-                    except Exception as exc:
+                    except (
+                        httpx.HTTPError,
+                        RuntimeError,
+                        ValueError,
+                        OSError,
+                        TimeoutError,
+                    ) as exc:
                         latency_ms = (time.perf_counter() - start_time) * 1000.0
                         last_error = exc
                         attempt_history.append(
@@ -200,7 +207,7 @@ class ResilientLLMChain:
                     continue
 
                 breaker = self.circuit_breakers.get(provider_name)
-                start_time = time.perf_counter()
+                time.perf_counter()
 
                 with tracer.start_as_current_span(
                     f"llm.provider.{provider_name}.structured"
@@ -241,7 +248,13 @@ class ResilientLLMChain:
                         root_span.set_status(StatusCode.OK)
                         return result
 
-                    except Exception as exc:
+                    except (
+                        httpx.HTTPError,
+                        RuntimeError,
+                        ValueError,
+                        OSError,
+                        TimeoutError,
+                    ) as exc:
                         last_error = exc
                         attempt_history.append(
                             {"provider": provider_name, "error": str(exc)}
