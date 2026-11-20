@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.6.0] - 2026-11-20
+
+### Added
+- **PostgreSQL Transactional Outbox & Persistent Trip Store (`services/common/db.py`, `services/trip_store/worker.py`, `services/bff_gateway/main.py`)**:
+  - Added async `psycopg_pool` connection management with tenant Row-Level Security (`SET LOCAL app.current_tenant_id`), atomic transactional outbox persistence (`write_outbox`), and background relay publishing (`relay_outbox`) with in-memory fallback when Postgres is unavailable.
+  - Added `trip_store` worker and database helpers (`upsert_trip_result`, `record_trip_event`, `record_llm_usage`, `get_trip_by_id`) to persist finalized trip results, domain events, and token usage metrics.
+- **CloudEvents v1.0 Envelopes, Structured Cache Keys & Single-Flight Locking (`services/common/schemas.py`, `services/*/provider.py`)**:
+  - Added strict CloudEvents v1.0 schema validation and structured tenant-scoped cache keys with Redis single-flight locking to prevent duplicate concurrent provider/MCP lookups.
+- **Synthesis Barrier State Machine, Timeout Janitor & Single-Call Synthesis (`services/synthesis_service/barrier.py`, `services/synthesis_service/worker.py`, `services/synthesis_service/synthesizer.py`)**:
+  - Implemented `BarrierStateMachine` with a background `janitor_loop` scanning for expired scatter-gather barriers every second to trigger partial synthesis on timeout, paired with single-call LLM itinerary synthesis.
+- **Dead Letter Queue (DLQ) Replay Tooling & Gateway Endpoint (`tools/dlq_replay.py`, `services/bff_gateway/main.py`)**:
+  - Added standalone CLI DLQ replay utility (`tools/dlq_replay.py`) and admin replay endpoint in `bff_gateway` to re-publish failed messages from `stream:travel:dlq` back to their original streams.
+- **Phase 3 Integration & Async Test Suite (`tests/test_phase3_features.py`, `pyproject.toml`, `uv.lock`, `requirements.txt`)**:
+  - Added async Phase 3 test suite covering CloudEvents v1.0 schemas, outbox write/relay, barrier state machine and janitor expiration, single-call synthesis, structured cache keys with single-flight locking, and `trip_store` upsert/retrieval.
+  - Added `test` optional dependency group (`pytest>=8.4.0`, `pytest-asyncio>=1.5.0`) in `pyproject.toml`, updated `uv.lock`, and exported pinned runtime dependencies to `requirements.txt`[cite: 5, 6].
+
+### Fixed
+- **Linting, Regex Escape Sequences & Exception Handling (`services/bff_gateway/main.py`, `services/common/db.py`, `services/flight_service/provider.py`, `services/synthesis_service/worker.py`, `tools/dlq_replay.py`)**:
+  - Fixed unescaped backspace literals in flight/airport regexes (`\b([A-Z]{2,3}\d{1,4})\b`, `\b([A-Z]{3})\b`), imported missing `Any` annotations, combined nested `async with` context managers (`SIM117`), and narrowed broad `except Exception:` blocks to explicit exception tuples so `ruff check .` passes cleanly.
+
+
+
 ## [1.5.0] - 2026-11-20
 
 ### Added
@@ -173,6 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
+[1.6.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.4.0...v1.6.0
 [1.5.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.2.0...v1.3.0

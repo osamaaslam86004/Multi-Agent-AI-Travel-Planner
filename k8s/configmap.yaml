@@ -4,7 +4,8 @@ metadata:
   name: travelbrain-config
   namespace: travelbrain
 data:
-  REDIS_URL: "redis://redis-service.travelbrain.svc.cluster.local:6379/0"
+  REDIS_URL: "redis://redis-broker-service.travelbrain.svc.cluster.local:6379/0"
+  REDIS_CACHE_URL: "redis://redis-cache-service.travelbrain.svc.cluster.local:6379/0"
   POSTGRES_HOST: "postgres-service.travelbrain.svc.cluster.local"
   POSTGRES_PORT: "5432"
   POSTGRES_DB: "travelbrain"

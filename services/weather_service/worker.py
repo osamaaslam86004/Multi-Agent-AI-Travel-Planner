@@ -51,7 +51,7 @@ async def handle_planning_initiated(
     )
     # Publish progress update to user stream
     await event_bus.publish_progress(
-        f"trip:stream:{correlation_id}",
+        correlation_id,
         {
             "stage": "weather_in_progress",
             "message": "Weather Agent is gathering forecast and climatological conditions...",
@@ -64,12 +64,27 @@ async def handle_planning_initiated(
             destination=destination,
             dates=dates,
         )
+        tenant_id = (
+            data.get("tenant_id", "default")
+            if isinstance(data, dict)
+            else getattr(data, "tenant_id", "default")
+        )
+        user_id = (
+            data.get("user_id", "unknown")
+            if isinstance(data, dict)
+            else getattr(data, "user_id", "unknown")
+        )
+
         out_event = CloudEvent[WeatherResultPayload](
             source="/services/weather-agent",
-            type="com.travelbrain.weather.completed",
+            type="com.travelbrain.weather.completed.v1",
+            subject=correlation_id,
             traceparent=event.traceparent,
             data=WeatherResultPayload(
                 correlation_id=correlation_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                user_query=query,
                 success=True,
                 results=provider_res.text,
                 source=provider_res.source,
@@ -79,7 +94,7 @@ async def handle_planning_initiated(
         )
         await event_bus.publish(STREAM_OUT, out_event)
         await event_bus.publish_progress(
-            f"trip:stream:{correlation_id}",
+            correlation_id,
             {
                 "stage": "weather_completed",
                 "message": "Weather forecast compiled successfully.",
@@ -98,7 +113,8 @@ async def handle_planning_initiated(
         logger.error(f"Weather query failed for trip {correlation_id}: {exc}")
         out_event = CloudEvent[WeatherResultPayload](
             source="/services/weather-agent",
-            type="com.travelbrain.weather.completed",
+            type="com.travelbrain.weather.completed.v1",
+            subject=correlation_id,
             traceparent=event.traceparent,
             data=WeatherResultPayload(
                 correlation_id=correlation_id,

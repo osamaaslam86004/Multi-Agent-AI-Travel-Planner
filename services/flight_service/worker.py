@@ -56,7 +56,7 @@ async def handle_planning_initiated(
     )
     # Publish progress update to user stream
     await event_bus.publish_progress(
-        f"trip:stream:{correlation_id}",
+        correlation_id,
         {
             "stage": "flights_in_progress",
             "message": "Flight Agent is analyzing routes, airlines, and schedule options...",
@@ -70,12 +70,27 @@ async def handle_planning_initiated(
             destination=destination,
             dates=dates,
         )
+        tenant_id = (
+            data.get("tenant_id", "default")
+            if isinstance(data, dict)
+            else getattr(data, "tenant_id", "default")
+        )
+        user_id = (
+            data.get("user_id", "unknown")
+            if isinstance(data, dict)
+            else getattr(data, "user_id", "unknown")
+        )
+
         out_event = CloudEvent[FlightResultPayload](
             source="/services/flight-agent",
-            type="com.travelbrain.flights.completed",
+            type="com.travelbrain.flights.completed.v1",
+            subject=correlation_id,
             traceparent=event.traceparent,
             data=FlightResultPayload(
                 correlation_id=correlation_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                user_query=query,
                 success=True,
                 results=provider_res.text,
                 source=provider_res.source,
@@ -86,7 +101,7 @@ async def handle_planning_initiated(
         await event_bus.publish(STREAM_OUT, out_event)
         # Notify SSE stream
         await event_bus.publish_progress(
-            f"trip:stream:{correlation_id}",
+            correlation_id,
             {
                 "stage": "flights_completed",
                 "message": "Flight recommendations compiled successfully.",
@@ -105,7 +120,8 @@ async def handle_planning_initiated(
         logger.error(f"Flight search failed for trip {correlation_id}: {exc}")
         out_event = CloudEvent[FlightResultPayload](
             source="/services/flight-agent",
-            type="com.travelbrain.flights.completed",
+            type="com.travelbrain.flights.completed.v1",
+            subject=correlation_id,
             traceparent=event.traceparent,
             data=FlightResultPayload(
                 correlation_id=correlation_id,

@@ -17,17 +17,16 @@ from services.common.resilience import CircuitBreaker, resilient_execute
 from services.common.schemas import ProviderResult
 
 logger = logging.getLogger("travelbrain.weather_service")
-
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/3")
+REDIS_CACHE_URL = os.getenv(
+    "REDIS_CACHE_URL", os.getenv("REDIS_URL", "redis://localhost:6379/3")
+)
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 OPENWEATHER_MCP_COMMAND = os.getenv("OPENWEATHER_MCP_COMMAND", "openweather-mcp")
-
 weather_breaker = CircuitBreaker("OpenWeatherBreaker", fail_max=4, reset_timeout=30.0)
 weather_mcp_breaker = CircuitBreaker(
     "OpenWeatherMCPBreaker", fail_max=3, reset_timeout=20.0
 )
-
 APPROVED_WEATHER_TOOLS = {
     "get_current_weather",
     "get_weather_forecast",
@@ -40,7 +39,8 @@ APPROVED_WEATHER_TOOLS = {
 class WeatherProvider:
     """Manages weather lookups, caching, MCP, and heuristic fallback."""
 
-    def __init__(self, redis_url: str = REDIS_URL):
+    def __init__(self, redis_url: str = REDIS_CACHE_URL):
+        self._single_flight_locks: dict[str, asyncio.Lock] = {}
         self.redis_url = redis_url
         self._redis: Any = None
         self._mcp_client: Any = None
@@ -94,10 +94,12 @@ class WeatherProvider:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
-    def _cache_key(self, city: str, tenant_id: str = "default") -> str:
-        h = hashlib.sha256(f"{tenant_id}:{city.strip().lower()}".encode()).hexdigest()[
-            :16
-        ]
+    def _cache_key(
+        self, city: str, dates: str | None = None, tenant_id: str = "default"
+    ) -> str:
+        dt = (dates or "").strip().lower()
+        raw = f"{tenant_id}:{city.strip().lower()}:{dt}"
+        h = hashlib.sha256(raw.encode()).hexdigest()[:16]
         return f"weather:cache:{tenant_id}:{h}"
 
     async def get_weather(
@@ -107,32 +109,41 @@ class WeatherProvider:
         dates: str | None = None,
         tenant_id: str = "default",
     ) -> ProviderResult:
-        """High-level weather lookup using structured destination or query."""
+        """High-level weather lookup using structured city & dates, single-flight locks, and non-caching of degraded results."""
         city = destination or query
         redis = await self.get_redis()
-        cache_key = self._cache_key(city, tenant_id)
+        cache_key = self._cache_key(city, dates, tenant_id)
+
         if redis:
             cached_data = await redis.get(cache_key)
             if cached_data:
                 logger.info(
-                    "Weather cache hit for city: '%s' (tenant: %s)", city, tenant_id
+                    "Weather cache hit for key '%s' (tenant: %s)", cache_key, tenant_id
                 )
                 return ProviderResult(**json.loads(cached_data))
 
-        results: ProviderResult = await resilient_execute(
-            breaker=weather_breaker,
-            primary_func=self._fetch_weather,
-            fallback_func=self._fallback_weather,
-            city=city,
-            dates=dates,
-        )
+        if cache_key not in self._single_flight_locks:
+            self._single_flight_locks[cache_key] = asyncio.Lock()
 
-        if redis:
-            if not results.degraded:
+        async with self._single_flight_locks[cache_key]:
+            if redis:
+                cached_data = await redis.get(cache_key)
+                if cached_data:
+                    return ProviderResult(**json.loads(cached_data))
+
+            results: ProviderResult = await resilient_execute(
+                breaker=weather_breaker,
+                primary_func=self._fetch_weather,
+                fallback_func=self._fallback_weather,
+                city=city,
+                dates=dates,
+            )
+
+            # Never cache degraded/fallback results (L8 compliance)
+            if redis and not results.degraded:
                 await redis.setex(cache_key, 21600, json.dumps(results.model_dump()))
-            else:
-                await redis.setex(cache_key, 60, json.dumps(results.model_dump()))
-        return results
+
+            return results
 
     async def _fetch_weather(
         self, city: str, dates: str | None = None
@@ -225,7 +236,6 @@ class WeatherProvider:
             tools = await client.get_tools()
             if not tools:
                 raise RuntimeError("No tools discovered from OpenWeather MCP")
-
             # Strict allowlist matching — NO arbitrary tools[0] fallback!
             matching = [
                 tool
@@ -237,7 +247,6 @@ class WeatherProvider:
                     "No approved weather tool found in allowlist. Discovered: "
                     + ", ".join(getattr(t, "name", "?") for t in tools)
                 )
-
             tool = matching[0]
             args = self._build_weather_tool_args(tool, city)
             output = await tool.ainvoke(args)

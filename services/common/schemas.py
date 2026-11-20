@@ -20,6 +20,8 @@ class CloudEvent(BaseModel, Generic[T]):
     type: str
     time: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     datacontenttype: str = "application/json"
+    subject: str | None = None
+    dataschema: str | None = "https://travelbrain.ai/schemas/v1"
     traceparent: str | None = None
     data: T
 
@@ -48,6 +50,9 @@ class PlanningInitiatedPayload(BaseModel):
 
 class FlightResultPayload(BaseModel):
     correlation_id: str
+    user_id: str = "unknown"
+    tenant_id: str = "default"
+    user_query: str = ""
     success: bool
     results: str
     source: str = "unknown"
@@ -58,6 +63,9 @@ class FlightResultPayload(BaseModel):
 
 class HotelResultPayload(BaseModel):
     correlation_id: str
+    user_id: str = "unknown"
+    tenant_id: str = "default"
+    user_query: str = ""
     success: bool
     results: str
     source: str = "unknown"
@@ -68,6 +76,9 @@ class HotelResultPayload(BaseModel):
 
 class WeatherResultPayload(BaseModel):
     correlation_id: str
+    user_id: str = "unknown"
+    tenant_id: str = "default"
+    user_query: str = ""
     success: bool
     results: str
     source: str = "unknown"
@@ -79,6 +90,7 @@ class WeatherResultPayload(BaseModel):
 class SynthesisCompletedPayload(BaseModel):
     correlation_id: str
     user_id: str
+    tenant_id: str = "default"
     user_query: str
     flight_results: str
     hotel_results: str

@@ -1,7 +1,7 @@
 """
 Asynchronous Event Bus using Redis Streams and PubSub for CloudEvents choreography.
-Includes PEL recovery via XAUTOCLAIM, max-retry Dead Letter Queue (DLQ), stream trimming,
-resilient consumer group initialization, and NOGROUP recovery on eviction.
+Includes PEL recovery via XAUTOCLAIM, max-retry Dead Letter Queue (DLQ), stream trimming (MAXLEN ~ 10000),
+per-trip event streams (trip:events:{id}) with TTLs, and resilient consumer group initialization.
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from redis.exceptions import ResponseError
 from services.common.schemas import CloudEvent
 
 logger = logging.getLogger("travelbrain.event_bus")
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DLQ_STREAM = "stream:travel:dlq"
@@ -29,6 +30,7 @@ class EventBus:
         self.redis_url = redis_url
         self.password = password or None
         self.client: Any = None
+        self._last_percentages: dict[str, int] = {}
 
     async def connect(self) -> None:
         if aioredis is None:
@@ -53,11 +55,18 @@ class EventBus:
     async def publish(
         self, stream_name: str, event: CloudEvent[Any], maxlen: int = 10000
     ) -> str:
-        """Publishes a CloudEvent to a Redis Stream with MAXLEN trimming."""
+        """Publishes a CloudEvent to a Redis Stream with strict MAXLEN trimming."""
         if not self.client:
             await self.connect()
         if not self.client:
             return "dummy-msg-id"
+
+        # Set subject to correlation_id if missing
+        if not event.subject and isinstance(event.data, dict):
+            event.subject = event.data.get("correlation_id")
+        elif not event.subject and hasattr(event.data, "correlation_id"):
+            event.subject = event.data.correlation_id
+
         payload = event.model_dump()
         message_id = await self.client.xadd(
             stream_name,
@@ -70,18 +79,53 @@ class EventBus:
         )
         return message_id
 
-    async def publish_progress(self, channel_name: str, update: dict[str, Any]) -> int:
-        """Publishes real-time streaming progress to a Redis PubSub channel."""
+    async def publish_progress(
+        self, correlation_id: str, update: dict[str, Any]
+    ) -> str:
+        """
+        Publishes real-time streaming progress to a per-trip Redis Stream (trip:events:{id})
+        with MAXLEN trimming, 24-hour TTL, monotonic percentage enforcement, and PubSub fallback.
+        """
         if not self.client:
             await self.connect()
         if not self.client:
-            return 0
-        return await self.client.publish(channel_name, json.dumps(update))
+            return "0-0"
+
+        # Clean correlation_id prefix if present
+        cid = correlation_id.replace("trip:stream:", "").replace("trip:events:", "")
+        stream_name = f"trip:events:{cid}"
+
+        # Enforce monotonic percentage progress
+        raw_pct = update.get("percentage", 0)
+        last_pct = self._last_percentages.get(cid, 0)
+        mono_pct = max(last_pct, raw_pct)
+        self._last_percentages[cid] = mono_pct
+        update["percentage"] = mono_pct
+        update["correlation_id"] = cid
+
+        msg_payload = json.dumps(update)
+
+        # Write to stream with MAXLEN 1000 and 24h TTL
+        msg_id = await self.client.xadd(
+            stream_name,
+            {"data": msg_payload},
+            maxlen=1000,
+            approximate=True,
+        )
+        await self.client.expire(stream_name, 86400)
+
+        # Also publish to PubSub channel for legacy subscribers
+        pubsub_channel = f"trip:stream:{cid}"
+        await self.client.publish(pubsub_channel, msg_payload)
+
+        return msg_id
 
     async def create_consumer_group(
         self, stream_name: str, group_name: str, start_id: str = "$"
     ) -> None:
-        """Idempotently create consumer group on stream using start_id ('$' default to avoid replay)."""
+        """
+        Idempotently create consumer group on stream using start_id ('$' default to prevent full stream history replay).
+        """
         if not self.client:
             await self.connect()
         if not self.client:
@@ -115,6 +159,7 @@ class EventBus:
             delivery_count = 1
             if pending_info and len(pending_info) > 0:
                 delivery_count = pending_info[0].get("times_delivered", 1)
+
             if delivery_count > max_retries:
                 logger.error(
                     f"Message {message_id} on stream '{stream_name}' exceeded max retries ({delivery_count} > {max_retries}). "
@@ -168,6 +213,7 @@ class EventBus:
         logger.info(
             f"Consumer '{consumer_name}' listening on stream '{stream_name}' (group: {group_name})"
         )
+
         while stop_event is None or not stop_event.is_set():
             try:
                 if not self.client:

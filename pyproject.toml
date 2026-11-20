@@ -29,7 +29,6 @@ dependencies = [
     "tavily>=0.3.3",
     "uvicorn>=0.29.0",
 ]
-
 [project.optional-dependencies]
 local-llm = [
     "torch>=2.2.0",
@@ -40,6 +39,13 @@ google = [
     "google-genai>=0.1.0",
     "langchain-google-genai>=1.0.0",
 ]
-all = [
-    "multi-agent-travel-agent-planner[local-llm,google]",
+test = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.5.0",
 ]
+all = [
+    "multi-agent-travel-agent-planner[local-llm,google,test]",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

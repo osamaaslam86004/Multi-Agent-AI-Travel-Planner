@@ -48,7 +48,6 @@ class ResilientLLMChain:
                 GeminiLLMProvider(),
                 LocalHuggingFaceProvider(),
             ]
-
         self.enable_circuit_breaker = enable_circuit_breaker
         self.circuit_breakers: dict[str, CircuitBreaker] = {
             "groq": CircuitBreaker("GroqLLMBreaker", fail_max=3, reset_timeout=45.0),
@@ -72,34 +71,28 @@ class ResilientLLMChain:
         """
         last_error: Exception | None = None
         attempt_history: list[dict[str, Any]] = []
-
         with tracer.start_as_current_span("llm.request") as root_span:
             for index, provider in enumerate(self.providers, start=1):
                 provider_name = provider.provider_name
                 model_name = provider.model_name
-
                 # Check if provider is available
                 if not provider.is_available():
                     logger.info(
                         f"Skipping provider {provider_name} (credentials or dependencies missing)."
                     )
                     continue
-
                 breaker = self.circuit_breakers.get(provider_name)
                 start_time = time.perf_counter()
-
                 with tracer.start_as_current_span(
                     f"llm.provider.{provider_name}"
                 ) as span:
                     span.set_attribute("llm.provider", provider_name)
                     span.set_attribute("llm.model", model_name)
                     span.set_attribute("llm.tier_priority", index)
-
                     try:
                         logger.info(
                             f"[Tier {index}] Attempting generation with {provider_name} ({model_name})..."
                         )
-
                         if self.enable_circuit_breaker and breaker:
                             result = await breaker.call(
                                 provider.generate,
@@ -113,7 +106,6 @@ class ResilientLLMChain:
                                 temperature=temperature,
                                 **kwargs,
                             )
-
                         # Record successful metrics in OpenTelemetry
                         span.set_attribute(
                             "llm.tokens.prompt",
@@ -128,8 +120,8 @@ class ResilientLLMChain:
                             result.token_usage.get("total_tokens", 0),
                         )
                         span.set_attribute("llm.latency_ms", result.latency_ms)
-                        span.set_status(StatusCode.OK)
-
+                        if span and hasattr(span, "set_status"):
+                            span.set_status(StatusCode.OK)
                         # Set root span summary attributes
                         root_span.set_attribute("llm.selected_provider", provider_name)
                         root_span.set_attribute("llm.selected_model", model_name)
@@ -140,15 +132,14 @@ class ResilientLLMChain:
                             "llm.tokens.total",
                             result.token_usage.get("total_tokens", 0),
                         )
-                        root_span.set_status(StatusCode.OK)
-
+                        if root_span and hasattr(root_span, "set_status"):
+                            root_span.set_status(StatusCode.OK)
                         logger.info(
                             f"Generation SUCCEEDED with {provider_name} "
                             f"(Latency: {result.latency_ms:.1f}ms, "
                             f"Tokens: {result.token_usage.get('total_tokens', 0)})"
                         )
                         return result
-
                     except (
                         httpx.HTTPError,
                         RuntimeError,
@@ -166,18 +157,19 @@ class ResilientLLMChain:
                                 "latency_ms": latency_ms,
                             }
                         )
-
-                        span.record_exception(exc)
-                        span.set_status(StatusCode.ERROR, str(exc))
+                        if span and hasattr(span, "record_exception"):
+                            span.record_exception(exc)
+                        if span and hasattr(span, "set_status"):
+                            span.set_status(StatusCode.ERROR, str(exc))
                         logger.warning(
                             f"[Tier {index} FAILED] {provider_name} ({model_name}) error: {exc}. "
                             f"Failing over to next available provider..."
                         )
-
             # If all providers fail
-            root_span.set_status(
-                StatusCode.ERROR, "All LLM providers in fallback chain failed"
-            )
+            if root_span and hasattr(root_span, "set_status"):
+                root_span.set_status(
+                    StatusCode.ERROR, "All LLM providers in fallback chain failed"
+                )
             summary = "; ".join(
                 f"{a['provider']}: {a['error']}" for a in attempt_history
             )
@@ -197,30 +189,24 @@ class ResilientLLMChain:
         """
         last_error: Exception | None = None
         attempt_history: list[dict[str, Any]] = []
-
         with tracer.start_as_current_span("llm.request.structured") as root_span:
             for index, provider in enumerate(self.providers, start=1):
                 provider_name = provider.provider_name
                 model_name = provider.model_name
-
                 if not provider.is_available():
                     continue
-
                 breaker = self.circuit_breakers.get(provider_name)
                 time.perf_counter()
-
                 with tracer.start_as_current_span(
                     f"llm.provider.{provider_name}.structured"
                 ) as span:
                     span.set_attribute("llm.provider", provider_name)
                     span.set_attribute("llm.model", model_name)
                     span.set_attribute("llm.tier_priority", index)
-
                     try:
                         logger.info(
                             f"[Tier {index} Structured] Attempting generation with {provider_name}..."
                         )
-
                         if self.enable_circuit_breaker and breaker:
                             result = await breaker.call(
                                 provider.generate_structured,
@@ -236,18 +222,17 @@ class ResilientLLMChain:
                                 temperature=temperature,
                                 **kwargs,
                             )
-
                         span.set_attribute(
                             "llm.tokens.total",
                             result.token_usage.get("total_tokens", 0),
                         )
                         span.set_attribute("llm.latency_ms", result.latency_ms)
-                        span.set_status(StatusCode.OK)
-
+                        if span and hasattr(span, "set_status"):
+                            span.set_status(StatusCode.OK)
                         root_span.set_attribute("llm.selected_provider", provider_name)
-                        root_span.set_status(StatusCode.OK)
+                        if root_span and hasattr(root_span, "set_status"):
+                            root_span.set_status(StatusCode.OK)
                         return result
-
                     except (
                         httpx.HTTPError,
                         RuntimeError,
@@ -259,13 +244,17 @@ class ResilientLLMChain:
                         attempt_history.append(
                             {"provider": provider_name, "error": str(exc)}
                         )
-                        span.record_exception(exc)
-                        span.set_status(StatusCode.ERROR, str(exc))
+                        if span and hasattr(span, "record_exception"):
+                            span.record_exception(exc)
+                        if span and hasattr(span, "set_status"):
+                            span.set_status(StatusCode.ERROR, str(exc))
                         logger.warning(
                             f"[Tier {index} Structured FAILED] {provider_name} error: {exc}. Failing over..."
                         )
-
-            root_span.set_status(StatusCode.ERROR, "All structured providers failed")
+            if root_span and hasattr(root_span, "set_status"):
+                root_span.set_status(
+                    StatusCode.ERROR, "All structured providers failed"
+                )
             summary = "; ".join(
                 f"{a['provider']}: {a['error']}" for a in attempt_history
             )

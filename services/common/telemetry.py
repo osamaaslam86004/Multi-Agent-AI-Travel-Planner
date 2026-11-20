@@ -11,7 +11,6 @@ from opentelemetry import trace
 from opentelemetry.trace import Tracer
 
 logger = logging.getLogger("travelbrain.telemetry")
-
 # W3C traceparent regex: 00-{32 hex trace_id}-{16 hex parent_id}-{2 hex flags}
 TRACEPARENT_REGEX = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$")
 
@@ -26,7 +25,6 @@ def generate_traceparent() -> str:
 
 def extract_traceparent(headers: dict[str, Any]) -> str:
     """Extract or generate a W3C traceparent."""
-
     for key, value in headers.items():
         if (
             key.lower() == "traceparent"

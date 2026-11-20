@@ -11,6 +11,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -24,26 +25,27 @@ from services.bff_gateway.session_manager import (
     SESSION_COOKIE_NAME,
     SessionManager,
 )
+from services.common.db import (
+    get_trip_by_id,
+    relay_outbox,
+    write_outbox,
+)
 from services.common.event_bus import EventBus
 from services.common.pii_redactor import redact_pii
 from services.common.schemas import CloudEvent, PlanningInitiatedPayload
 from services.common.telemetry import extract_traceparent
 
 logger = logging.getLogger("travelbrain.gateway")
-
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://localhost:8001")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-
 app = FastAPI(
     title="TravelBrain API Gateway & BFF",
     version="2.0.0",
     description="Edge Gateway, Multi-Tenant Session Barrier, and Authenticated SSE Streaming",
 )
-
 session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
-
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 if FRONTEND_DIR.exists():
@@ -77,8 +79,24 @@ async def startup_event():
     try:
         await event_bus.connect()
         logger.info("BFF Gateway initialized and connected to Redis Event Bus.")
+        asyncio.create_task(periodic_outbox_relay())
     except (OSError, RuntimeError, ValueError) as exc:
         logger.warning("BFF Gateway startup event bus connect fallback: %s", exc)
+
+
+async def periodic_outbox_relay():
+    while True:
+        try:
+            await relay_outbox(event_bus)
+        except (
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            logger.debug("Outbox relay error: %s", exc)
+        await asyncio.sleep(1.0)
 
 
 @app.on_event("shutdown")
@@ -119,7 +137,6 @@ async def login(req: LoginRequest, request: Request, response: Response):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please wait a minute.",
         )
-
     async with httpx.AsyncClient() as client:
         auth_resp = await client.post(
             f"{AUTH_SERVICE_URL}/api/v1/auth/login",
@@ -136,13 +153,11 @@ async def login(req: LoginRequest, request: Request, response: Response):
                 detail="Authentication failed with Auth Service",
             )
         token_data = auth_resp.json()
-
     jwt_token = token_data["access_token"]
     user_id = token_data["user_id"]
     email = token_data["email"]
     tenant_id = token_data.get("tenant_id", req.tenant_id)
     roles = token_data.get("roles", ["traveler"])
-
     old_session_id = request.cookies.get(SESSION_COOKIE_NAME)
     session_id, csrf_token = await session_manager.create_session(
         jwt_token=jwt_token,
@@ -152,7 +167,6 @@ async def login(req: LoginRequest, request: Request, response: Response):
         roles=roles,
         old_session_id=old_session_id,
     )
-
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_id,
@@ -195,14 +209,12 @@ async def get_me(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthenticated. Missing session cookie.",
         )
-
     session_data = await session_manager.get_session(session_id)
     if not session_data:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired or invalid",
         )
-
     return {
         "user_id": session_data.get("user_id"),
         "email": session_data.get("email"),
@@ -220,7 +232,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
     session_data = await session_manager.validate_request(request)
     user_id = session_data["user_id"]
     tenant_id = session_data.get("tenant_id", "default")
-
     client_ip = request.client.host if request.client else "unknown"
     rate_limit_target = f"{tenant_id}:{user_id}:{client_ip}"
     if not await session_manager.check_rate_limit(
@@ -230,7 +241,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Please wait a moment before trying again.",
         )
-
     # Idempotency-Key Check
     idempotency_key = request.headers.get("Idempotency-Key") or request.headers.get(
         "x-idempotency-key"
@@ -244,36 +254,44 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
                 "Idempotency key hit for user %s (%s)", user_id, idempotency_key
             )
             return JSONResponse(content=json.loads(cached_resp))
-
     # Full 128-bit UUID for collision resistance and trip ownership
     correlation_id = f"trip_{uuid.uuid4().hex}"
-
     # Bind trip ownership in Redis
     if r:
         await r.setex(f"trip:ownership:{tenant_id}:{correlation_id}", 86400, user_id)
-
     clean_message = redact_pii(req.message)
     traceparent = extract_traceparent(dict(request.headers))
+    payload_data = PlanningInitiatedPayload(
+        correlation_id=correlation_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        user_query=clean_message,
+        destination=req.destination,
+        departure_city=req.departure_city,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        dates=req.dates,
+    )
 
     event = CloudEvent[PlanningInitiatedPayload](
         source="/services/bff-gateway",
-        type="com.travelbrain.planning.initiated",
+        type="com.travelbrain.planning.initiated.v1",
+        subject=correlation_id,
         traceparent=traceparent,
-        data=PlanningInitiatedPayload(
-            correlation_id=correlation_id,
-            user_id=user_id,
-            tenant_id=tenant_id,
-            user_query=clean_message,
-            destination=req.destination,
-            departure_city=req.departure_city,
-            start_date=req.start_date,
-            end_date=req.end_date,
-            dates=req.dates,
-        ),
+        data=payload_data,
     )
 
-    await event_bus.publish("stream:travel:planning:initiated", event)
+    # Write trip record and event to transactional Outbox in Postgres
+    await write_outbox(
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+        stream_name="stream:travel:planning:initiated",
+        event_type="com.travelbrain.planning.initiated.v1",
+        payload=payload_data.model_dump(),
+    )
 
+    # Publish directly for immediate dispatch
+    await event_bus.publish("stream:travel:planning:initiated", event)
     plan_response = {
         "correlation_id": correlation_id,
         "status": "initiated",
@@ -281,25 +299,28 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
         "tenant_id": tenant_id,
         "traceparent": traceparent,
     }
-
     # Cache response under Idempotency-Key if provided
     if idempotency_key and r:
         idem_redis_key = f"idempotency:{tenant_id}:{user_id}:{idempotency_key}"
         await r.setex(idem_redis_key, 3600, json.dumps(plan_response))
-
     return plan_response
 
 
 @app.get("/api/v1/trips/{correlation_id}/stream")
-async def stream_trip_progress(correlation_id: str, request: Request):
+async def stream_trip_progress(
+    correlation_id: str,
+    request: Request,
+    last_event_id: str | None = None,
+):
     """
-    Authenticated Server-Sent Events (SSE) trip progress stream with ownership verification.
+    Authenticated Server-Sent Events (SSE) trip progress stream reading from per-trip Redis Stream (trip:events:{id}).
+    Supports snapshot on connect, Last-Event-ID replay, id: field tagging, keepalives, and ownership verification.
     """
     session_data = await session_manager.validate_request(request)
     user_id = session_data["user_id"]
     tenant_id = session_data.get("tenant_id", "default")
-
     r = await session_manager.get_redis()
+
     if r:
         trip_owner = await r.get(f"trip:ownership:{tenant_id}:{correlation_id}")
         if trip_owner and trip_owner != user_id:
@@ -308,43 +329,65 @@ async def stream_trip_progress(correlation_id: str, request: Request):
                 detail="Access denied. Trip belongs to another user.",
             )
 
-    channel_name = f"trip:stream:{correlation_id}"
+    header_last_id = request.headers.get("Last-Event-ID") or last_event_id or "0-0"
+    stream_name = f"trip:events:{correlation_id}"
 
     async def sse_generator() -> AsyncGenerator[str, None]:
         if not r:
-            yield f"data: {json.dumps({'stage': 'initiated', 'message': 'Gateway in offline mode.'})}\n\n"
+            yield f"id: 0-0\ndata: {json.dumps({'stage': 'initiated', 'message': 'Gateway in offline mode.'})}\n\n"
             return
 
-        pubsub = r.pubsub()
-        await pubsub.subscribe(channel_name)
-        yield f"data: {json.dumps({'stage': 'initiated', 'message': 'Trip planning stream connected.'})}\n\n"
-        timeout_seconds = 120
-        start_time = asyncio.get_event_loop().time()
+        last_delivered_id = header_last_id if header_last_id != "0-0" else "0-0"
+
+        # Step 1: Replay existing stream events from last_delivered_id (Snapshot on connect)
         try:
-            while True:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed > timeout_seconds:
-                    yield f"data: {json.dumps({'stage': 'timeout', 'error': 'Trip synthesis timed out.'})}\n\n"
-                    break
-                message = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=1.0
+            range_events = await r.xrange(stream_name, min=last_delivered_id, max="+")
+            for msg_id, data in range_events:
+                if msg_id == header_last_id and header_last_id != "0-0":
+                    continue
+                payload_str = data.get("data", "{}")
+                yield f"id: {msg_id}\ndata: {payload_str}\n\n"
+                last_delivered_id = msg_id
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            logger.debug("Error replaying stream events: %s", exc)
+
+        # Step 2: Live stream reading with periodic keepalives
+        keepalive_counter = 0
+        while True:
+            try:
+                entries = await r.xread(
+                    {stream_name: last_delivered_id}, count=10, block=2000
                 )
-                if message and message.get("type") == "message":
-                    payload = message.get("data")
-                    yield f"data: {payload}\n\n"
-                    try:
-                        parsed = json.loads(payload)
-                        if isinstance(parsed, dict) and parsed.get("stage") in [
-                            "completed",
-                            "error",
-                        ]:
-                            break
-                    except (ValueError, AttributeError):
-                        pass
-                await asyncio.sleep(0.05)
-        finally:
-            await pubsub.unsubscribe(channel_name)
-            await pubsub.close()
+                if entries:
+                    for _, messages in entries:
+                        for msg_id, data in messages:
+                            payload_str = data.get("data", "{}")
+                            yield f"id: {msg_id}\ndata: {payload_str}\n\n"
+                            last_delivered_id = msg_id
+
+                            try:
+                                parsed = json.loads(payload_str)
+                                if isinstance(parsed, dict) and parsed.get("stage") in [
+                                    "completed",
+                                    "error",
+                                ]:
+                                    return
+                            except (json.JSONDecodeError, TypeError) as parse_err:
+                                logger.debug(
+                                    "Non-JSON SSE payload skipped: %s", parse_err
+                                )
+                else:
+                    # Send periodic keepalive comment every ~14 seconds to prevent 120s proxy timeout
+                    keepalive_counter += 2
+                    if keepalive_counter >= 14:
+                        yield ": keepalive\n\n"
+                        keepalive_counter = 0
+
+            except asyncio.CancelledError:
+                break
+            except (OSError, RuntimeError, TimeoutError, ValueError) as loop_err:
+                logger.error("SSE stream loop exception: %s", loop_err)
+                await asyncio.sleep(1.0)
 
     return StreamingResponse(
         sse_generator(),
@@ -355,3 +398,81 @@ async def stream_trip_progress(correlation_id: str, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/v1/trips/{correlation_id}")
+async def get_trip_details(correlation_id: str, request: Request):
+    """
+    GET /trips/{id} endpoint returning stored trip result from Postgres/state DB
+    with tenant isolation and ownership validation.
+    """
+    session_data = await session_manager.validate_request(request)
+    tenant_id = session_data.get("tenant_id", "default")
+    user_id = session_data["user_id"]
+
+    trip = await get_trip_by_id(correlation_id, tenant_id=tenant_id)
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Trip '{correlation_id}' not found.",
+        )
+
+    if (
+        trip.get("user_id")
+        and trip["user_id"] != user_id
+        and "admin" not in session_data.get("roles", [])
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Trip belongs to another user.",
+        )
+
+    return trip
+
+
+@app.post("/api/v1/admin/dlq/replay")
+async def replay_dlq_messages(request: Request):
+    """
+    DLQ Replay Tool endpoint restricted to users with the 'admin' role.
+    Reads failed messages from DLQ stream and re-publishes them to their original streams.
+    """
+    session_data = await session_manager.validate_request(request)
+    roles = session_data.get("roles", [])
+    if "admin" not in roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required for DLQ replay operations.",
+        )
+
+    r = await session_manager.get_redis()
+    if not r:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    replayed = 0
+    try:
+        messages = await r.xrange("stream:travel:dlq", count=100)
+        for msg_id, data in messages:
+            orig_stream = data.get("original_stream")
+            raw_event_data = data.get("data")
+            if orig_stream and raw_event_data:
+                parsed_data = json.loads(raw_event_data)
+                raw_event_str = parsed_data.get("event", "{}")
+                parsed_event = (
+                    json.loads(raw_event_str)
+                    if isinstance(raw_event_str, str)
+                    else raw_event_str
+                )
+                ce = CloudEvent[Any](**parsed_event)
+                await event_bus.publish(orig_stream, ce)
+                await r.xdel("stream:travel:dlq", msg_id)
+                replayed += 1
+    except (
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(status_code=500, detail=f"DLQ replay failed: {exc}")
+
+    return {"status": "success", "replayed_count": replayed}

@@ -26,6 +26,10 @@ SERVICE_ENTRYPOINTS = [
     "services.synthesis_service.api",
     "services.synthesis_service.worker",
     "services.synthesis_service.synthesizer",
+    "services.synthesis_service.barrier",
+    "services.trip_store.worker",
+    "services.common.db",
+    "tools.dlq_replay",
 ]
 
 

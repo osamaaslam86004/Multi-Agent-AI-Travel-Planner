@@ -2,24 +2,17 @@
 PII Redaction utility for sanitizing user queries, tool outputs, and telemetry streams.
 Redacts emails, phone numbers, credit card numbers, and government identification numbers.
 """
+
 import re
 
 # Regex patterns for common PII formats
-EMAIL_REGEX = re.compile(
-    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
-)
+EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_REGEX = re.compile(
     r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"
 )
-CREDIT_CARD_REGEX = re.compile(
-    r"\b(?:\d[ -]*?){13,16}\b"
-)
-SSN_REGEX = re.compile(
-    r"\b\d{3}-\d{2}-\d{4}\b"
-)
-PASSPORT_REGEX = re.compile(
-    r"\b[A-PR-WYa-pr-wy][0-9]{7,8}\b"
-)
+CREDIT_CARD_REGEX = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
+SSN_REGEX = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+PASSPORT_REGEX = re.compile(r"\b[A-PR-WYa-pr-wy][0-9]{7,8}\b")
 
 
 def redact_pii(text: str | None) -> str:
@@ -40,9 +33,7 @@ def redact_pii(text: str | None) -> str:
     return sanitized
 
 
-def sanitize_tool_output(
-    text: str | None, max_length: int = 3000
-) -> str:
+def sanitize_tool_output(text: str | None, max_length: int = 3000) -> str:
     """
     Sanitizes tool/MCP text output by redacting PII, stripping URLs/HTML,
     and enforcing token blowup max character bounds.

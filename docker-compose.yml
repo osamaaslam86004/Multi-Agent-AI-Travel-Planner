@@ -1,13 +1,10 @@
 name: travelbrain-microservices
-
 networks:
   travelbrain-mesh:
     driver: bridge
-
 volumes:
   redis-data:
   postgres-data:
-
 services:
   bff-gateway:
     build:
@@ -18,19 +15,39 @@ services:
     ports:
       - "127.0.0.1:${PORT:-8000}:8000"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-broker:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - AUTH_SERVICE_URL=http://auth-service:8001
       - AUTH_SERVICE_JWKS_URL=http://auth-service:8001/.well-known/jwks.json
       - ENVIRONMENT=production
     depends_on:
-      redis:
+      trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
+
+  redis-broker:
         condition: service_healthy
       auth-service:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   auth-service:
     build:
       context: .
@@ -43,13 +60,34 @@ services:
       - PORT=8001
       - JWT_ISSUER=https://auth.travelbrain.ai
       - JWT_AUDIENCE=https://api.travelbrain.ai
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-broker:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - ENVIRONMENT=production
     depends_on:
-      redis:
+      trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
+
+  redis-broker:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -67,7 +105,6 @@ services:
       retries: 3
     networks:
       - travelbrain-mesh
-
   flight-service:
     build:
       context: .
@@ -76,15 +113,36 @@ services:
     command: ["python", "-m", "services.flight_service.worker"]
     restart: unless-stopped
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_CACHE_URL=redis://redis-cache:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - AVIATIONSTACK_API_KEY=${AVIATIONSTACK_API_KEY}
     depends_on:
-      redis:
+      trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - travelbrain-mesh
 
+  redis-broker:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
   hotel-service:
     build:
       context: .
@@ -93,15 +151,36 @@ services:
     command: ["python", "-m", "services.hotel_service.worker"]
     restart: unless-stopped
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_CACHE_URL=redis://redis-cache:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
     depends_on:
-      redis:
+      trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - travelbrain-mesh
 
+  redis-broker:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
   weather-service:
     build:
       context: .
@@ -110,15 +189,36 @@ services:
     command: ["python", "-m", "services.weather_service.worker"]
     restart: unless-stopped
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_CACHE_URL=redis://redis-cache:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
     depends_on:
-      redis:
+      trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - travelbrain-mesh
 
+  redis-broker:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
   synthesis-service:
     build:
       context: .
@@ -127,20 +227,61 @@ services:
     command: ["python", "-m", "services.synthesis_service.worker"]
     restart: unless-stopped
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-broker:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOCAL_LLM_URL=${LOCAL_LLM_URL:-http://localhost:11434/v1}
     depends_on:
-      redis:
+      trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - travelbrain-mesh
 
-  redis:
+  redis-broker:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
+  trip-store-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.worker
+    container_name: tb-trip-store-service
+    command: ["python", "-m", "services.trip_store.worker"]
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis-broker:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
+    depends_on:
+      redis-broker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - travelbrain-mesh
+
+  redis-broker:
     image: redis:7-alpine
-    container_name: tb-redis
+    container_name: tb-redis-broker
     restart: unless-stopped
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
@@ -166,7 +307,6 @@ services:
       retries: 5
     networks:
       - travelbrain-mesh
-
   postgres:
     image: postgres:16-alpine
     container_name: tb-postgres
@@ -182,6 +322,34 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U travelbrain -d travelbrain"]
       interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - travelbrain-mesh
+
+  redis-cache:
+    image: redis:7-alpine
+    container_name: tb-redis-cache
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${REDIS_CACHE_PORT:-6380}:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
+    volumes:
+      - redis-cache-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "-a",
+          "${REDIS_PASSWORD:-travelbrain_redis_pass_2026}",
+          "ping",
+        ]
+      interval: 5s
       timeout: 3s
       retries: 5
     networks:
