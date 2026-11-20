@@ -6,7 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [1.4.0] - 2026-11-19
+## [1.5.0] - 2026-11-20
+
+### Added
+- **Identity & OIDC Hardening (`services/auth_service/main.py`, `services/auth_service/security.py`, `services/auth_service/models.py`)**:
+  - Added Google OIDC authorization URL generation with CSRF `state`, `nonce`, and PKCE (`S256` code challenge / `code_verifier`) persisted with TTL, paired with `id_token` JWT signature/claim/nonce/email-verification checks[cite: 2, 3].
+  - Added UUIDv5-based deterministic user IDs (`generate_user_id`), Argon2id password hashing/verification (`hash_password`, `verify_password`), refresh token issuance, and Redis-backed `jti` token revocation (`POST /api/v1/auth/revoke`)[cite: 2, 3].
+- **Key Management, JWKS & Token Lifecycle (`services/auth_service/security.py`, `services/common/auth_middleware.py`)**:
+  - Derived `kid` from RFC 7638 JWK thumbprints (`compute_rfc7638_kid`) and supported primary + previous key rotation overlap in `get_jwks()`[cite: 2, 3].
+  - Offloaded JWKS signing-key lookup off the async event loop via `asyncio.to_thread(...)`, checked token revocation in `get_current_user`, and added explicit `require_any_role` and `require_all_roles` RBAC helpers[cite: 2, 3].
+- **BFF Gateway, Tenancy, Sessions & Trip Ownership (`services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`)**:
+  - Enforced `SessionManager.validate_request` (session + `X-CSRF-Token`) on `POST /api/v1/trips/plan` and `GET /api/v1/trips/{correlation_id}/stream`, added per-user/tenant/IP sliding-window rate limiting, added `Idempotency-Key` response caching, bound `trip:ownership:{tenant_id}:{correlation_id}` records in Redis, and used full 128-bit UUIDs (`trip_<uuid4().hex>`)[cite: 2, 3].
+  - Propagated `tenant_id` across session keys (`session:{tenant_id}:{session_id}`), rate-limit keys, provider cache keys, and `PlanningInitiatedPayload`[cite: 2, 3].
+- **Kubernetes Infrastructure, Isolation & Security Hardening (`k8s/namespace.yaml`, `k8s/network-policies.yaml`, `k8s/postgres.yaml`, `k8s/redis.yaml`, `k8s/auth-service.yaml`, `k8s/bff-gateway.yaml`, `k8s/domain-workers.yaml`)**:
+  - Added `k8s/postgres.yaml`, `k8s/redis.yaml`, and `k8s/network-policies.yaml` (default-deny ingress/egress plus least-privilege service/egress policies), and applied Pod Security Admission `restricted` labels in `k8s/namespace.yaml` along with non-root `securityContext` and digest-pinned container images[cite: 2, 3].
+- **LLM, MCP & Stream Privacy Hardening (`services/common/pii_redactor.py`, `services/synthesis_service/synthesizer.py`, `services/synthesis_service/worker.py`, `services/flight_service/provider.py`, `services/hotel_service/provider.py`, `services/weather_service/provider.py`)**:
+  - Redacted PII (`redact_pii`), stripped links/HTML, truncated inputs, and wrapped untrusted user queries and flight/hotel/weather tool outputs in XML delimiters in `SynthesisEngine`, replacing shared mutable `last_result` state with a `contextvars.ContextVar`[cite: 2, 3].
+  - Enforced `asyncio.timeout(...)` on MCP calls, strict tool allowlists without arbitrary `tools[0]` fallbacks, and scoped environment variables passed to MCP subprocesses[cite: 2, 3].
+
+### Changed
+- **Session Lifecycle & Auth Endpoints (`services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`, `services/auth_service/main.py`)**:
+  - Rotated sessions on login, enforced session absolute TTLs and `Secure` cookie flags in production, and removed unauthenticated guest session minting on `GET /api/v1/auth/me`[cite: 2, 3].
+  - Gated direct password login on `ENVIRONMENT != "production"` and failed closed on missing/invalid Google OIDC configuration or state/nonce/token validation[cite: 2, 3].
+- **Redis Eviction & Container Runtime (`docker-compose.yml`, `k8s/redis.yaml`, `services/Dockerfile.worker`)**:
+  - Switched Redis memory policy from `allkeys-lru` to `noeviction` with AOF persistence (`--appendonly yes`) and authentication (`--requirepass`) in `docker-compose.yml` and `k8s/redis.yaml`, and set `UV_PYTHON_DOWNLOADS=never` with pinned MCP tool versions in `services/Dockerfile.worker`[cite: 2, 3].
+
+### Fixed
+- **Lint & Exception Handling (`services/auth_service/main.py`, `services/bff_gateway/main.py`, `services/common/auth_middleware.py`, `services/common/event_bus.py`, `services/flight_service/provider.py`, `services/hotel_service/provider.py`, `services/synthesis_service/synthesizer.py`, `services/weather_service/provider.py`)**:
+  - Imported missing `time` module in `services/auth_service/main.py` and narrowed broad `except Exception:` handlers to specific exception tuples to pass `ruff check .`.
+
 
 ## [1.4.0] - 2026-11-19
 
@@ -145,6 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
+[1.5.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.1.0...v1.2.0

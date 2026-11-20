@@ -1,6 +1,6 @@
 """
 Weather Provider with OpenWeather API + MCP, Redis caching, and fallback resilience.
-MCP is attempted after direct API path fails or when configured.
+Includes strict MCP tool allowlists, subprocess timeouts, and environment isolation.
 """
 
 import asyncio
@@ -20,6 +20,7 @@ logger = logging.getLogger("travelbrain.weather_service")
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/3")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 OPENWEATHER_MCP_COMMAND = os.getenv("OPENWEATHER_MCP_COMMAND", "openweather-mcp")
 
 weather_breaker = CircuitBreaker("OpenWeatherBreaker", fail_max=4, reset_timeout=30.0)
@@ -41,17 +42,24 @@ class WeatherProvider:
 
     def __init__(self, redis_url: str = REDIS_URL):
         self.redis_url = redis_url
-        self._redis: aioredis.Redis | None = None
-        self._mcp_client: MultiServerMCPClient | None = None
+        self._redis: Any = None
+        self._mcp_client: Any = None
 
-    async def get_redis(self) -> aioredis.Redis:
+    async def get_redis(self) -> Any:
+        if aioredis is None:
+            return None
         if self._redis is None:
             self._redis = aioredis.from_url(
-                self.redis_url, encoding="utf-8", decode_responses=True
+                self.redis_url,
+                password=os.getenv("REDIS_PASSWORD", "") or None,
+                encoding="utf-8",
+                decode_responses=True,
             )
         return self._redis
 
-    async def get_mcp_client(self) -> MultiServerMCPClient:
+    async def get_mcp_client(self) -> Any:
+        if MultiServerMCPClient is None:
+            raise RuntimeError("langchain_mcp_adapters library not installed")
         if self._mcp_client is None:
             cmd = OPENWEATHER_MCP_COMMAND
             args_env = os.getenv("OPENWEATHER_MCP_ARGS", "")
@@ -86,24 +94,30 @@ class WeatherProvider:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
-    def _cache_key(self, city: str) -> str:
-        h = hashlib.sha256(city.strip().lower().encode()).hexdigest()[:16]
-        return f"weather:cache:{h}"
+    def _cache_key(self, city: str, tenant_id: str = "default") -> str:
+        h = hashlib.sha256(f"{tenant_id}:{city.strip().lower()}".encode()).hexdigest()[
+            :16
+        ]
+        return f"weather:cache:{tenant_id}:{h}"
 
     async def get_weather(
         self,
         query: str,
         destination: str | None = None,
         dates: str | None = None,
+        tenant_id: str = "default",
     ) -> ProviderResult:
         """High-level weather lookup using structured destination or query."""
         city = destination or query
         redis = await self.get_redis()
-        cache_key = self._cache_key(city)
-        cached_data = await redis.get(cache_key)
-        if cached_data:
-            logger.info("Weather cache hit for city: '%s'", city)
-            return ProviderResult(**json.loads(cached_data))
+        cache_key = self._cache_key(city, tenant_id)
+        if redis:
+            cached_data = await redis.get(cache_key)
+            if cached_data:
+                logger.info(
+                    "Weather cache hit for city: '%s' (tenant: %s)", city, tenant_id
+                )
+                return ProviderResult(**json.loads(cached_data))
 
         results: ProviderResult = await resilient_execute(
             breaker=weather_breaker,
@@ -113,18 +127,16 @@ class WeatherProvider:
             dates=dates,
         )
 
-        # Cache discipline: Do not cache degraded fallback results for 6h
-        if not results.degraded:
-            await redis.setex(cache_key, 21600, json.dumps(results.model_dump()))
-        else:
-            await redis.setex(cache_key, 60, json.dumps(results.model_dump()))
-
+        if redis:
+            if not results.degraded:
+                await redis.setex(cache_key, 21600, json.dumps(results.model_dump()))
+            else:
+                await redis.setex(cache_key, 60, json.dumps(results.model_dump()))
         return results
 
     async def _fetch_weather(
         self, city: str, dates: str | None = None
     ) -> ProviderResult:
-        """Try OpenWeather MCP."""
         errors: list[str] = []
         try:
             text = await weather_mcp_breaker.call(
@@ -153,7 +165,6 @@ class WeatherProvider:
 
     @staticmethod
     def _build_weather_tool_args(tool: Any, city: str) -> dict[str, Any]:
-        """Adapt city/location arguments to discovered MCP tool schema."""
         fields = WeatherProvider._tool_fields(tool)
         if not fields:
             return {"city": city}
@@ -183,7 +194,6 @@ class WeatherProvider:
 
     @staticmethod
     def _normalize_mcp_output(output: Any) -> str:
-        """Convert MCP result types into plain text."""
         if output is None:
             return ""
         if isinstance(output, str):
@@ -207,30 +217,21 @@ class WeatherProvider:
         return str(output)
 
     async def _fetch_openweather_mcp(self, city: str) -> str:
-        """Discover and invoke a weather-capable OpenWeather MCP tool."""
+        """Discover and invoke a weather-capable OpenWeather MCP tool with 10s timeout."""
         if not OPENWEATHER_API_KEY:
             raise ValueError("OpenWeather API key required for MCP")
-
         async with asyncio.timeout(10.0):
             client = await self.get_mcp_client()
             tools = await client.get_tools()
             if not tools:
                 raise RuntimeError("No tools discovered from OpenWeather MCP")
 
+            # Strict allowlist matching — NO arbitrary tools[0] fallback!
             matching = [
                 tool
                 for tool in tools
                 if getattr(tool, "name", "").lower() in APPROVED_WEATHER_TOOLS
             ]
-            if not matching:
-                matching = [
-                    tool
-                    for tool in tools
-                    if any(
-                        kw in getattr(tool, "name", "").lower()
-                        for kw in ("weather", "forecast", "current")
-                    )
-                ]
             if not matching:
                 raise RuntimeError(
                     "No approved weather tool found in allowlist. Discovered: "
@@ -250,7 +251,6 @@ class WeatherProvider:
     async def _fallback_weather(
         self, city: str, dates: str | None = None
     ) -> ProviderResult:
-        """Fallback when live weather services are unavailable."""
         text = (
             f"Weather Forecast for '{city}':\n"
             f"- Status: Live weather data unavailable (degraded fallback).\n"

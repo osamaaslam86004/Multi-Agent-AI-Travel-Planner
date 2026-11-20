@@ -1,0 +1,166 @@
+# Kubernetes NetworkPolicies enforcing Default-Deny and Least-Privilege Inter-Service Isolation
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: travelbrain
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-bff-gateway
+  namespace: travelbrain
+spec:
+  podSelector:
+    matchLabels:
+      app: bff-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: auth-service
+      ports:
+        - protocol: TCP
+          port: 8001
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis-service
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-auth-service
+  namespace: travelbrain
+spec:
+  podSelector:
+    matchLabels:
+      app: auth-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: bff-gateway
+      ports:
+        - protocol: TCP
+          port: 8001
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis-service
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres-service
+      ports:
+        - protocol: TCP
+          port: 5432
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-domain-workers
+  namespace: travelbrain
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - flight-service
+          - hotel-service
+          - weather-service
+          - synthesis-service
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis-service
+      ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-service
+  namespace: travelbrain
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: bff-gateway
+        - podSelector:
+            matchLabels:
+              app: auth-service
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - flight-service
+                  - hotel-service
+                  - weather-service
+                  - synthesis-service
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-service
+  namespace: travelbrain
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: auth-service
+      ports:
+        - protocol: TCP
+          port: 5432

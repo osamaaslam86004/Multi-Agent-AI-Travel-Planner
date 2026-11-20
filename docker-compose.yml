@@ -1,14 +1,14 @@
 name: travelbrain-microservices
+
 networks:
   travelbrain-mesh:
     driver: bridge
+
 volumes:
   redis-data:
   postgres-data:
+
 services:
-  # ---------------------------------------------------------------------------
-  # 1. Edge & API Gateway / BFF
-  # ---------------------------------------------------------------------------
   bff-gateway:
     build:
       context: .
@@ -16,9 +16,10 @@ services:
     container_name: tb-bff-gateway
     restart: unless-stopped
     ports:
-      - "${PORT:-8000}:8000"
+      - "127.0.0.1:${PORT:-8000}:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - AUTH_SERVICE_URL=http://auth-service:8001
       - AUTH_SERVICE_JWKS_URL=http://auth-service:8001/.well-known/jwks.json
       - ENVIRONMENT=production
@@ -29,9 +30,7 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-  # ---------------------------------------------------------------------------
-  # 2. Centralized Auth & Identity Service (OIDC / JWT / JWKS)
-  # ---------------------------------------------------------------------------
+
   auth-service:
     build:
       context: .
@@ -44,8 +43,16 @@ services:
       - PORT=8001
       - JWT_ISSUER=https://auth.travelbrain.ai
       - JWT_AUDIENCE=https://api.travelbrain.ai
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - ENVIRONMENT=production
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -60,9 +67,7 @@ services:
       retries: 3
     networks:
       - travelbrain-mesh
-  # ---------------------------------------------------------------------------
-  # 3. Domain Agent Microservices (Stateless Event-Driven Workers)
-  # ---------------------------------------------------------------------------
+
   flight-service:
     build:
       context: .
@@ -72,12 +77,14 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - AVIATIONSTACK_API_KEY=${AVIATIONSTACK_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - travelbrain-mesh
+
   hotel-service:
     build:
       context: .
@@ -87,12 +94,14 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - travelbrain-mesh
+
   weather-service:
     build:
       context: .
@@ -102,12 +111,14 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - travelbrain-mesh
+
   synthesis-service:
     build:
       context: .
@@ -117,48 +128,54 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LOCAL_LLM_URL=${LOCAL_LLM_URL:-http://localhost:11434/v1}
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-  # ---------------------------------------------------------------------------
-  # 4. Distributed State: Redis Streams Broker + Distributed Cache
-  # ---------------------------------------------------------------------------
+
   redis:
     image: redis:7-alpine
     container_name: tb-redis
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     command: >
       redis-server
       --appendonly yes
       --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
+      --requirepass ${REDIS_PASSWORD:-travelbrain_redis_pass_2026}
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "-a",
+          "${REDIS_PASSWORD:-travelbrain_redis_pass_2026}",
+          "ping",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
     networks:
       - travelbrain-mesh
-  # ---------------------------------------------------------------------------
-  # 5. Persistent Relational Store (PostgreSQL)
-  # ---------------------------------------------------------------------------
+
   postgres:
     image: postgres:16-alpine
     container_name: tb-postgres
     restart: unless-stopped
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-travelbrain}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-travelbrain}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-travelbrain_pg_pass_2026}
       POSTGRES_DB: ${POSTGRES_DB:-travelbrain}
     volumes:
       - postgres-data:/var/lib/postgresql/data

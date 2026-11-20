@@ -25,7 +25,6 @@ STREAM_OUT = "stream:travel:hotels:completed"
 CONSUMER_GROUP = "cg-hotel-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"hotel-worker-{HOSTNAME}-{os.getpid()}"
-
 event_bus = EventBus(redis_url=REDIS_URL)
 provider = HotelProvider(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
@@ -89,7 +88,6 @@ async def handle_planning_initiated(
             },
         )
         logger.info(f"Published hotel results for trip {correlation_id}")
-
     except (
         aioredis.RedisError,
         TimeoutError,

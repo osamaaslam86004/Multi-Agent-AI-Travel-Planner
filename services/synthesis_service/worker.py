@@ -1,6 +1,6 @@
 """
 Synthesis & Itinerary Worker: Scatter-Gather Barrier Aggregator and LLM Orchestrator.
-Uses Atomic Lua Barrier Claim and PEL Recovery.
+Uses Atomic Lua Barrier Claim, PEL Recovery, and PII Redaction.
 """
 
 import asyncio
@@ -9,6 +9,7 @@ import os
 import signal
 
 from services.common.event_bus import EventBus
+from services.common.pii_redactor import redact_pii, sanitize_tool_output
 from services.common.schemas import (
     CloudEvent,
     SynthesisCompletedPayload,
@@ -17,6 +18,7 @@ from services.synthesis_service.synthesizer import SynthesisEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("travelbrain.synthesis_worker")
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 STREAM_FLIGHTS = "stream:travel:flights:completed"
 STREAM_HOTELS = "stream:travel:hotels:completed"
@@ -26,7 +28,6 @@ CONSUMER_GROUP = "cg-synthesis-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"synthesis-worker-{HOSTNAME}-{os.getpid()}"
 
-# Lua script to ensure atomic barrier evaluation and claim
 SYNTHESIS_CLAIM_LUA = """
 local barrier_key = KEYS[1]
 local started = redis.call('HGET', barrier_key, 'synthesis_started')
@@ -56,8 +57,6 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
     """Checks if scatter-gather barrier is fulfilled atomically via Lua script, requiring user_query."""
     r = event_bus.client
     barrier_key = f"barrier:{correlation_id}"
-
-    # Atomic Lua evaluation and claim
     claim_res = await r.eval(SYNTHESIS_CLAIM_LUA, 1, barrier_key)
     if claim_res != 1:
         return
@@ -75,18 +74,28 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
         },
     )
 
-    query = data.get("user_query")
+    raw_query = data.get("user_query", "")
     user_id = data.get("user_id", "guest")
-    flights = data.get("flight_results", "")
-    hotels = data.get("hotel_results", "")
-    weather = data.get("weather_results", "")
+    tenant_id = data.get("tenant_id", "default")
+    raw_flights = data.get("flight_results", "")
+    raw_hotels = data.get("hotel_results", "")
+    raw_weather = data.get("weather_results", "")
+
     flight_degraded = data.get("flight_degraded", "false").lower() == "true"
     hotel_degraded = data.get("hotel_degraded", "false").lower() == "true"
     weather_degraded = data.get("weather_degraded", "false").lower() == "true"
 
-    itinerary = await engine.generate_itinerary(query, flights, hotels, weather)
+    # Redact PII and sanitize inputs before LLM provider call and persistent stream publishing
+    clean_query = redact_pii(raw_query)
+    clean_flights = sanitize_tool_output(raw_flights, max_length=3000)
+    clean_hotels = sanitize_tool_output(raw_hotels, max_length=3000)
+    clean_weather = sanitize_tool_output(raw_weather, max_length=3000)
+
+    itinerary = await engine.generate_itinerary(
+        clean_query, clean_flights, clean_hotels, clean_weather
+    )
     final_response = await engine.format_final_response(
-        query, flights, hotels, weather, itinerary
+        clean_query, clean_flights, clean_hotels, clean_weather, itinerary
     )
 
     out_event = CloudEvent[SynthesisCompletedPayload](
@@ -96,10 +105,10 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
         data=SynthesisCompletedPayload(
             correlation_id=correlation_id,
             user_id=user_id,
-            user_query=query,
-            flight_results=flights,
-            hotel_results=hotels,
-            weather_results=weather,
+            user_query=clean_query,
+            flight_results=clean_flights,
+            hotel_results=clean_hotels,
+            weather_results=clean_weather,
             itinerary=itinerary,
             final_response=final_response,
             flight_degraded=flight_degraded,
@@ -119,7 +128,9 @@ async def check_and_synthesize(correlation_id: str, traceparent: str | None) -> 
             "degraded": flight_degraded or hotel_degraded or weather_degraded,
         },
     )
-    logger.info(f"Synthesis finished and delivered to client for trip {correlation_id}")
+    logger.info(
+        f"Synthesis finished and delivered to client for trip {correlation_id} (tenant: {tenant_id})"
+    )
 
 
 async def handle_flight_completed(event: CloudEvent) -> None:
@@ -173,6 +184,7 @@ async def handle_planning_initiated(event: CloudEvent) -> None:
         mapping={
             "user_query": data.get("user_query", ""),
             "user_id": data.get("user_id", "guest"),
+            "tenant_id": data.get("tenant_id", "default"),
             "destination": data.get("destination", "") or "",
             "departure_city": data.get("departure_city", "") or "",
         },
@@ -189,7 +201,6 @@ async def main():
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
             pass
-
     await asyncio.gather(
         event_bus.consume(
             "stream:travel:planning:initiated",

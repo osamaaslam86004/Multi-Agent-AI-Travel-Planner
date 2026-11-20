@@ -25,7 +25,6 @@ STREAM_OUT = "stream:travel:flights:completed"
 CONSUMER_GROUP = "cg-flight-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"flight-worker-{HOSTNAME}-{os.getpid()}"
-
 event_bus = EventBus(redis_url=REDIS_URL)
 provider = FlightProvider(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
@@ -96,7 +95,6 @@ async def handle_planning_initiated(
             },
         )
         logger.info(f"Published flight results for trip {correlation_id}")
-
     except (
         aioredis.RedisError,
         TimeoutError,
@@ -105,7 +103,6 @@ async def handle_planning_initiated(
         ValueError,
     ) as exc:
         logger.error(f"Flight search failed for trip {correlation_id}: {exc}")
-
         out_event = CloudEvent[FlightResultPayload](
             source="/services/flight-agent",
             type="com.travelbrain.flights.completed",

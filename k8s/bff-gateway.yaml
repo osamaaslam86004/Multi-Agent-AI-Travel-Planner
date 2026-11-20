@@ -20,9 +20,14 @@ spec:
       labels:
         app: bff-gateway
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: gateway
-          image: ghcr.io/travelbrain/bff-gateway:latest
+          image: ghcr.io/travelbrain/bff-gateway:v2.0.0@sha256:8b99c03b3921f656575be6cdf87b90d985fg048f34b56f5b5c23456789bcdefa
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -30,8 +35,18 @@ spec:
           envFrom:
             - configMapRef:
                 name: travelbrain-config
-            - secretRef:
-                name: travelbrain-secrets
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: REDIS_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: 250m

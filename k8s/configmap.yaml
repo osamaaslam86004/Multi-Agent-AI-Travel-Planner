@@ -5,6 +5,9 @@ metadata:
   namespace: travelbrain
 data:
   REDIS_URL: "redis://redis-service.travelbrain.svc.cluster.local:6379/0"
+  POSTGRES_HOST: "postgres-service.travelbrain.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "travelbrain"
   AUTH_SERVICE_URL: "http://auth-service.travelbrain.svc.cluster.local:8001"
   AUTH_SERVICE_JWKS_URL: "http://auth-service.travelbrain.svc.cluster.local:8001/.well-known/jwks.json"
   JWT_ISSUER: "https://auth.travelbrain.ai"

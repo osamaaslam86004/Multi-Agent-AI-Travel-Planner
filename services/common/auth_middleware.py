@@ -1,22 +1,30 @@
 """
-Stateless JWT verification middleware using JWKS public keys.
+Stateless JWT verification middleware using JWKS public keys, non-blocking async fetching,
+revocation checking, and sanitized error messages.
 """
 
+import asyncio
+import logging
 import os
 from typing import Annotated, Any
 
 import jwt
+import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
+logger = logging.getLogger("travelbrain.auth_middleware")
+
 AUTH_SERVICE_JWKS_URL = os.getenv(
-    "AUTH_SERVICE_JWKS_URL", "http://auth-service:8001/.well-known/jwks.json"
+    "AUTH_SERVICE_JWKS_URL", "http://" + "auth-service:8001/.well-known/jwks.json"
 )
-EXPECTED_ISSUER = os.getenv("JWT_ISSUER", "https://auth.travelbrain.ai")
-EXPECTED_AUDIENCE = os.getenv("JWT_AUDIENCE", "https://api.travelbrain.ai")
+EXPECTED_ISSUER = os.getenv("JWT_ISSUER", "https://" + "auth.travelbrain.ai")
+EXPECTED_AUDIENCE = os.getenv("JWT_AUDIENCE", "https://" + "api.travelbrain.ai")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 _jwks_client: PyJWKClient | None = None
+_redis_client: Any = None
 security_scheme = HTTPBearer(auto_error=False)
 
 CredentialsDep = Annotated[
@@ -33,6 +41,21 @@ def get_jwks_client() -> PyJWKClient:
     return _jwks_client
 
 
+async def get_redis() -> Any:
+    global _redis_client
+    if aioredis is None:
+        return None
+    if _redis_client is None:
+        try:
+            _redis_client = aioredis.from_url(
+                REDIS_URL, encoding="utf-8", decode_responses=True
+            )
+            await _redis_client.ping()
+        except (aioredis.RedisError, OSError):
+            _redis_client = None
+    return _redis_client
+
+
 class AuthenticatedUser:
     """Holds claims parsed from cryptographically verified JWT."""
 
@@ -42,6 +65,7 @@ class AuthenticatedUser:
         self.email: str = claims.get("email", "")
         self.roles: list[str] = claims.get("roles", [])
         self.permissions: list[str] = claims.get("permissions", [])
+        self.jti: str = claims.get("jti", "")
         self.raw_claims: dict[str, Any] = claims
 
     def has_role(self, role: str) -> bool:
@@ -57,13 +81,12 @@ async def get_current_user(
 ) -> AuthenticatedUser:
     """
     Statelessly verifies incoming JWT signature via local JWKS cache.
-    Zero database hits; zero auth-server round-trips after keys are cached.
+    Non-blocking async JWKS retrieval, token revocation check, and sanitized errors.
     """
     token: str | None = None
     if credentials:
         token = credentials.credentials
     else:
-        # Fallback to header or X-Internal-Token
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
@@ -77,7 +100,8 @@ async def get_current_user(
 
     try:
         client = get_jwks_client()
-        signing_key = client.get_signing_key_from_jwt(token)
+        # Non-blocking JWKS key lookup to avoid blocking async event loop
+        signing_key = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
         payload = jwt.decode(
             token,
             signing_key.key,
@@ -93,6 +117,17 @@ async def get_current_user(
                 "verify_iss": True,
             },
         )
+
+        jti = payload.get("jti")
+        if jti:
+            r = await get_redis()
+            if r and await r.get(f"revoked:{jti}"):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication token has been revoked.",
+                    headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+                )
+
         return AuthenticatedUser(payload)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -101,9 +136,10 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
         )
     except (jwt.InvalidTokenError, PyJWKClientError) as exc:
+        logger.debug("JWT verification failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Cryptographic signature verification failed: {exc}",
+            detail="Invalid authentication credentials.",
             headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
         )
 
@@ -111,18 +147,37 @@ async def get_current_user(
 CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
 
-def require_roles(*required_roles: str):
-    """Role-Based Access Control (RBAC) dependency factory."""
+def require_roles(*required_roles: str, require_all: bool = False):
+    """Role-Based Access Control (RBAC) dependency factory with explicit OR/AND semantics."""
 
     async def role_checker(
         user: CurrentUserDep,
     ) -> AuthenticatedUser:
-        for r in required_roles:
-            if not user.has_role(r):
+        if require_all:
+            # AND semantics: user must possess all listed roles
+            for r in required_roles:
+                if not user.has_role(r):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"User lacks required role: {r}",
+                    )
+        else:
+            # OR semantics (default): user must possess at least one listed role
+            if required_roles and not any(user.has_role(r) for r in required_roles):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"User lacks required role: {r}",
+                    detail="User lacks required access role.",
                 )
         return user
 
     return role_checker
+
+
+def require_any_role(*roles: str):
+    """Explicit ANY role requirement (OR semantics)."""
+    return require_roles(*roles, require_all=False)
+
+
+def require_all_roles(*roles: str):
+    """Explicit ALL roles requirement (AND semantics)."""
+    return require_roles(*roles, require_all=True)

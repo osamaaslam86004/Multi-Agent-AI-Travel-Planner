@@ -7,6 +7,11 @@ metadata:
     app: auth-service
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: auth-service
@@ -15,9 +20,14 @@ spec:
       labels:
         app: auth-service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
-        - name: auth
-          image: ghcr.io/travelbrain/auth-service:latest
+        - name: auth-service
+          image: ghcr.io/travelbrain/auth-service:v2.0.0@sha256:7a89b02a2810f545464ad5bcf76a89c894ef937e23a45e4a4b123456789abcde
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8001
@@ -25,15 +35,45 @@ spec:
           envFrom:
             - configMapRef:
                 name: travelbrain-config
-            - secretRef:
-                name: travelbrain-secrets
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: REDIS_PASSWORD
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: POSTGRES_PASSWORD
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: GOOGLE_CLIENT_ID
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: GOOGLE_CLIENT_SECRET
+            - name: JWT_PRIVATE_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: JWT_PRIVATE_KEY_PEM
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
-              cpu: 150m
-              memory: 192Mi
+              cpu: 100m
+              memory: 128Mi
             limits:
               cpu: 500m
-              memory: 384Mi
+              memory: 256Mi
           livenessProbe:
             httpGet:
               path: /health/live

@@ -25,7 +25,6 @@ STREAM_OUT = "stream:travel:weather:completed"
 CONSUMER_GROUP = "cg-weather-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"weather-worker-{HOSTNAME}-{os.getpid()}"
-
 event_bus = EventBus(redis_url=REDIS_URL)
 provider = WeatherProvider(redis_url=REDIS_URL)
 stop_event = asyncio.Event()

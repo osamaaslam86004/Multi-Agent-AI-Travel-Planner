@@ -1,5 +1,6 @@
 """
 Flight Provider with AviationStack REST / MCP, Redis Caching, and Resilience.
+Includes strict MCP tool allowlists, subprocess timeouts, and environment isolation.
 """
 
 import asyncio
@@ -22,6 +23,7 @@ AVIATIONSTACK_API_KEY = (
     os.getenv("AVIATION_STACK_API_KEY") or os.getenv("AVIATIONSTACK_API_KEY") or ""
 )
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/1")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 AVIATIONSTACK_MCP_COMMAND = os.getenv("AVIATIONSTACK_MCP_COMMAND", "aviationstack-mcp")
 
 flight_breaker = CircuitBreaker("AviationStackBreaker", fail_max=4, reset_timeout=30.0)
@@ -45,21 +47,29 @@ class FlightProvider:
 
     def __init__(self, redis_url: str = REDIS_URL):
         self.redis_url = redis_url
-        self._redis: aioredis.Redis | None = None
-        self._mcp_client: MultiServerMCPClient | None = None
+        self._redis: Any = None
+        self._mcp_client: Any = None
 
-    async def get_redis(self) -> aioredis.Redis:
+    async def get_redis(self) -> Any:
+        if aioredis is None:
+            return None
         if self._redis is None:
             self._redis = aioredis.from_url(
-                self.redis_url, encoding="utf-8", decode_responses=True
+                self.redis_url,
+                password=os.getenv("REDIS_PASSWORD", "") or None,
+                encoding="utf-8",
+                decode_responses=True,
             )
         return self._redis
 
-    async def get_mcp_client(self) -> MultiServerMCPClient:
+    async def get_mcp_client(self) -> Any:
+        if MultiServerMCPClient is None:
+            raise RuntimeError("langchain_mcp_adapters library not installed")
         if self._mcp_client is None:
             cmd = AVIATIONSTACK_MCP_COMMAND
             args_env = os.getenv("AVIATIONSTACK_MCP_ARGS", "")
             args = args_env.split() if args_env else []
+            # Sanitized least-privilege environment passed to MCP subprocess
             server_config = {
                 "aviationstack": {
                     "command": cmd,
@@ -95,10 +105,11 @@ class FlightProvider:
         query: str,
         departure_city: str | None = None,
         destination: str | None = None,
+        tenant_id: str = "default",
     ) -> str:
-        raw = f"{query.strip().lower()}:{departure_city or ''}:{destination or ''}"
+        raw = f"{tenant_id}:{query.strip().lower()}:{departure_city or ''}:{destination or ''}"
         h = hashlib.sha256(raw.encode()).hexdigest()[:16]
-        return f"flight:cache:{h}"
+        return f"flight:cache:{tenant_id}:{h}"
 
     async def search_flights(
         self,
@@ -106,15 +117,19 @@ class FlightProvider:
         departure_city: str | None = None,
         destination: str | None = None,
         dates: str | None = None,
+        tenant_id: str = "default",
     ) -> ProviderResult:
-        """High-level flight search with caching and circuit-broken execution."""
+        """High-level flight search with tenant-isolated caching and circuit breaker."""
         redis = await self.get_redis()
-        cache_key = self._cache_key(query, departure_city, destination)
-        cached_data = await redis.get(cache_key)
-        if cached_data:
-            logger.info("Flight cache hit for query: '%s'", query)
-            data_dict = json.loads(cached_data)
-            return ProviderResult(**data_dict)
+        cache_key = self._cache_key(query, departure_city, destination, tenant_id)
+        if redis:
+            cached_data = await redis.get(cache_key)
+            if cached_data:
+                logger.info(
+                    "Flight cache hit for query: '%s' (tenant: %s)", query, tenant_id
+                )
+                data_dict = json.loads(cached_data)
+                return ProviderResult(**data_dict)
 
         results: ProviderResult = await resilient_execute(
             breaker=flight_breaker,
@@ -126,12 +141,11 @@ class FlightProvider:
             dates=dates,
         )
 
-        # Cache discipline: Do not cache degraded fallback results for long TTL
-        if not results.degraded:
-            await redis.setex(cache_key, 86400, json.dumps(results.model_dump()))
-        else:
-            await redis.setex(cache_key, 60, json.dumps(results.model_dump()))
-
+        if redis:
+            if not results.degraded:
+                await redis.setex(cache_key, 86400, json.dumps(results.model_dump()))
+            else:
+                await redis.setex(cache_key, 60, json.dumps(results.model_dump()))
         return results
 
     async def _fetch_flights(
@@ -141,7 +155,7 @@ class FlightProvider:
         destination: str | None = None,
         dates: str | None = None,
     ) -> ProviderResult:
-        """Try the AviationStack MCP."""
+        """Try AviationStack MCP with strict timeout and tool allowlist enforcement."""
         errors: list[str] = []
         try:
             text = await flight_mcp_breaker.call(
@@ -155,11 +169,9 @@ class FlightProvider:
                     text=text, source="aviationstack_mcp", degraded=False
                 )
             raise RuntimeError("AviationStack MCP returned empty output")
-
         except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"MCP: {exc}")
             logger.warning("AviationStack MCP failed: %s", exc)
-
         raise RuntimeError("Flight provider tiers exhausted: " + "; ".join(errors))
 
     @staticmethod
@@ -175,7 +187,6 @@ class FlightProvider:
 
     @staticmethod
     def _build_flight_tool_args(tool: Any, query: str) -> dict[str, Any]:
-        """Build tool inputs based on its dynamically discovered schema."""
         fields = FlightProvider._tool_fields(tool)
         if not fields:
             return {"query": query}
@@ -215,7 +226,6 @@ class FlightProvider:
 
     @staticmethod
     def _normalize_mcp_output(output: Any) -> str:
-        """Convert MCP response shapes into readable text."""
         if output is None:
             return ""
         if isinstance(output, str):
@@ -244,18 +254,17 @@ class FlightProvider:
         departure_city: str | None = None,
         destination: str | None = None,
     ) -> str:
-        """Discover AviationStack tools and invoke a flight-related tool."""
+        """Discover AviationStack tools, enforce allowlist, and execute with strict 10s timeout."""
         if not AVIATIONSTACK_API_KEY:
             raise ValueError("AVIATION_STACK_API_KEY not configured")
-
         search_target = f"{departure_city or ''} to {destination or query}".strip()
-
         async with asyncio.timeout(10.0):
             client = await self.get_mcp_client()
             tools = await client.get_tools()
             if not tools:
                 raise RuntimeError("No tools discovered from AviationStack MCP")
 
+            # Strict allowlist matching — NO arbitrary tools[0] fallback!
             matching = [
                 tool
                 for tool in tools
@@ -269,7 +278,9 @@ class FlightProvider:
                         kw in getattr(tool, "name", "").lower()
                         for kw in ("flight", "airline", "schedule", "airport")
                     )
+                    and getattr(tool, "name", "").lower() in APPROVED_FLIGHT_TOOLS
                 ]
+
             if not matching:
                 raise RuntimeError(
                     "No approved flight tool found in allowlist. Discovered: "
@@ -293,7 +304,6 @@ class FlightProvider:
         destination: str | None = None,
         dates: str | None = None,
     ) -> ProviderResult:
-        """Graceful fallback when upstream APIs/MCP are unavailable."""
         dep = departure_city or "origin"
         dest = destination or query
         text = (

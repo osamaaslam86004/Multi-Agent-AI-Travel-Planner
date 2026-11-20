@@ -1,7 +1,7 @@
 """
 Hotel Provider with 3-Tier Fallback Architecture:
 Tier 1: Tavily Search API (Primary)
-Tier 2: DuckDuckGo MCP Server via stdio (Secondary)
+Tier 2: DuckDuckGo MCP Server via stdio (Secondary, strictly allowlisted)
 Tier 3: Static Accommodation Heuristics (Tertiary Guaranteed Fallback)
 """
 
@@ -23,6 +23,7 @@ logger = logging.getLogger("travelbrain.hotel_service")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/2")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DUCKDUCKGO_MCP_COMMAND = os.getenv("DUCKDUCKGO_MCP_COMMAND", "duckduckgo-mcp")
 
 tavily_breaker = CircuitBreaker("TavilyHotelBreaker", fail_max=3, reset_timeout=30.0)
@@ -36,19 +37,26 @@ class HotelProvider:
 
     def __init__(self, redis_url: str = REDIS_URL):
         self.redis_url = redis_url
-        self._redis: aioredis.Redis | None = None
-        self._mcp_client: MultiServerMCPClient | None = None
+        self._redis: Any = None
+        self._mcp_client: Any = None
         self.tavily_breaker = tavily_breaker
         self.mcp_breaker = mcp_breaker
 
-    async def get_redis(self) -> aioredis.Redis:
+    async def get_redis(self) -> Any:
+        if aioredis is None:
+            return None
         if self._redis is None:
             self._redis = aioredis.from_url(
-                self.redis_url, encoding="utf-8", decode_responses=True
+                self.redis_url,
+                password=os.getenv("REDIS_PASSWORD", "") or None,
+                encoding="utf-8",
+                decode_responses=True,
             )
         return self._redis
 
-    async def get_mcp_client(self) -> MultiServerMCPClient:
+    async def get_mcp_client(self) -> Any:
+        if MultiServerMCPClient is None:
+            raise RuntimeError("langchain_mcp_adapters library not installed")
         if self._mcp_client is None:
             cmd = DUCKDUCKGO_MCP_COMMAND
             args_env = os.getenv("DUCKDUCKGO_MCP_ARGS", "")
@@ -58,6 +66,7 @@ class HotelProvider:
                     "command": cmd,
                     "args": args,
                     "transport": "stdio",
+                    "env": {},
                 }
             }
             self._mcp_client = MultiServerMCPClient(server_config)
@@ -82,43 +91,44 @@ class HotelProvider:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
-    def _cache_key(self, query: str, destination: str | None = None) -> str:
-        raw = f"{query.strip().lower()}:{destination or ''}"
+    def _cache_key(
+        self, query: str, destination: str | None = None, tenant_id: str = "default"
+    ) -> str:
+        raw = f"{tenant_id}:{query.strip().lower()}:{destination or ''}"
         h = hashlib.sha256(raw.encode()).hexdigest()[:16]
-        return f"hotel:cache:{h}"
+        return f"hotel:cache:{tenant_id}:{h}"
 
     async def search_hotels(
         self,
         query: str,
         destination: str | None = None,
         dates: str | None = None,
+        tenant_id: str = "default",
     ) -> ProviderResult:
         """High-level hotel search with Redis caching and 3-Tier failover execution."""
         r = await self.get_redis()
-        cache_key = self._cache_key(query, destination)
-        cached_data = await r.get(cache_key)
-        if cached_data:
-            logger.info(f"Hotel cache hit for query: '{query}'")
-            return ProviderResult(**json.loads(cached_data))
+        cache_key = self._cache_key(query, destination, tenant_id)
+        if r:
+            cached_data = await r.get(cache_key)
+            if cached_data:
+                logger.info(
+                    "Hotel cache hit for query: '%s' (tenant: %s)", query, tenant_id
+                )
+                return ProviderResult(**json.loads(cached_data))
 
         target_location = destination or query
         results = await self._execute_tiered_search(target_location)
 
-        # Cache discipline: Do not cache degraded fallback results for 12h
-        if not results.degraded:
-            await r.setex(cache_key, 43200, json.dumps(results.model_dump()))
-        else:
-            await r.setex(cache_key, 60, json.dumps(results.model_dump()))
-
+        if r:
+            if not results.degraded:
+                await r.setex(cache_key, 43200, json.dumps(results.model_dump()))
+            else:
+                await r.setex(cache_key, 60, json.dumps(results.model_dump()))
         return results
 
     async def _execute_tiered_search(self, target_location: str) -> ProviderResult:
-        """Orchestrates sequential failover across Tier 1 (Tavily), Tier 2 (DuckDuckGo MCP), and Tier 3 (Fallback)."""
         # Tier 1 — Primary Provider (Tavily API)
         try:
-            logger.info(
-                f"Attempting Tier 1 (Tavily API) hotel search for: '{target_location}'"
-            )
             text = await self.tavily_breaker.call(
                 self._fetch_tavily_hotels, target_location
             )
@@ -130,9 +140,6 @@ class HotelProvider:
 
         # Tier 2 — Secondary Fallback (DuckDuckGo MCP Server)
         try:
-            logger.info(
-                f"Attempting Tier 2 (DuckDuckGo MCP Server) hotel search for: '{target_location}'"
-            )
             text = await self.mcp_breaker.call(
                 self._fetch_duckduckgo_mcp, target_location
             )
@@ -143,13 +150,11 @@ class HotelProvider:
             )
 
         # Tier 3 — Tertiary Fallback (Static Heuristics)
-        logger.info(f"Executing Tier 3 (Fallback) for: '{target_location}'")
         return self._fallback_hotels(target_location)
 
     async def _fetch_tavily_hotels(self, location: str) -> str:
-        """Call Tavily search API asynchronously without blocking event loop."""
-        if not TAVILY_API_KEY:
-            raise ValueError("Tavily API key not configured")
+        if TavilyClient is None or not TAVILY_API_KEY:
+            raise ValueError("Tavily API key not configured or client missing")
 
         def _sync_search():
             client = TavilyClient(api_key=TAVILY_API_KEY)
@@ -160,7 +165,6 @@ class HotelProvider:
             )
 
         response = await asyncio.to_thread(_sync_search)
-
         snippets = [
             f"- {item.get('title')}: {item.get('content')}"
             for item in response.get("results", [])
@@ -172,29 +176,20 @@ class HotelProvider:
         return res_text
 
     async def _fetch_duckduckgo_mcp(self, location: str) -> str:
-        """Secondary fallback: Connect to DuckDuckGo MCP Server via stdio and execute search."""
+        """Connect to DuckDuckGo MCP Server, enforce strict allowlist, and execute search with 10s timeout."""
         search_query = f"Best recommended hotels accommodations in {location}"
-
         async with asyncio.timeout(10.0):
             client = await self.get_mcp_client()
             tools = await client.get_tools()
             if not tools:
                 raise RuntimeError("No tools discovered from DuckDuckGo MCP server")
 
+            # Strict allowlist matching — NO arbitrary tools[0] fallback!
             matching_tools = [
                 t
                 for t in tools
                 if getattr(t, "name", "").lower() in APPROVED_HOTEL_TOOLS
             ]
-            if not matching_tools:
-                matching_tools = [
-                    t
-                    for t in tools
-                    if any(
-                        kw in getattr(t, "name", "").lower()
-                        for kw in ("search", "ddg", "duck")
-                    )
-                ]
             if not matching_tools:
                 raise RuntimeError(
                     "No approved hotel search tool found in allowlist. Discovered: "
@@ -221,7 +216,6 @@ class HotelProvider:
             return normalized.strip()
 
     def _normalize_mcp_output(self, output: Any) -> str:
-        """Normalizes list, content-block, dict, or string output from MCP tools into clean text snippets with newlines."""
         if not output:
             return ""
         if isinstance(output, str):
@@ -229,40 +223,23 @@ class HotelProvider:
         if isinstance(output, list):
             snippets = []
             for item in output:
-                if isinstance(item, str):
-                    if item.strip():
-                        snippets.append(f"- {item.strip()}")
+                if isinstance(item, str) and item.strip():
+                    snippets.append(f"- {item.strip()}")
                 elif isinstance(item, dict):
-                    title = (
-                        item.get("title")
-                        or item.get("name")
-                        or item.get("heading")
-                        or ""
-                    )
+                    title = item.get("title") or item.get("name") or ""
                     content = (
                         item.get("content")
                         or item.get("snippet")
                         or item.get("text")
-                        or item.get("description")
                         or str(item)
                     )
-                    if title and content and title != content:
-                        snippets.append(f"- {title}: {content}")
-                    else:
-                        snippets.append(f"- {content}")
-                elif hasattr(item, "text"):
-                    text_val = getattr(item, "text", "")
-                    if text_val:
-                        snippets.append(f"- {text_val}")
-                else:
-                    snippets.append(f"- {item!s}")
+                    snippets.append(
+                        f"- {title}: {content}" if title else f"- {content}"
+                    )
             return "\n".join(snippets).strip()
         if isinstance(output, dict):
             results = (
-                output.get("results")
-                or output.get("data")
-                or output.get("content")
-                or output.get("output")
+                output.get("results") or output.get("data") or output.get("content")
             )
             if results and results != output:
                 return self._normalize_mcp_output(results)
@@ -270,7 +247,6 @@ class HotelProvider:
         return str(output).strip()
 
     def _fallback_hotels(self, location: str) -> ProviderResult:
-        """Tertiary fallback accommodation recommendations when live services are unavailable."""
         text = (
             f"Hotel Information for '{location}':\n"
             f"- Status: Live accommodation data unavailable (degraded fallback).\n"

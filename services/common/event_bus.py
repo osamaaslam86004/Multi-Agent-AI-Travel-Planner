@@ -1,7 +1,7 @@
 """
 Asynchronous Event Bus using Redis Streams and PubSub for CloudEvents choreography.
 Includes PEL recovery via XAUTOCLAIM, max-retry Dead Letter Queue (DLQ), stream trimming,
-and resilient consumer group initialization.
+resilient consumer group initialization, and NOGROUP recovery on eviction.
 """
 
 import asyncio
@@ -12,25 +12,34 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import redis.asyncio as aioredis
+from redis.exceptions import ResponseError
 
 from services.common.schemas import CloudEvent
 
 logger = logging.getLogger("travelbrain.event_bus")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DLQ_STREAM = "stream:travel:dlq"
 
 
 class EventBus:
     """Production Redis Streams Event Bus supporting Consumer Groups & CloudEvents."""
 
-    def __init__(self, redis_url: str = REDIS_URL):
+    def __init__(self, redis_url: str = REDIS_URL, password: str = REDIS_PASSWORD):
         self.redis_url = redis_url
-        self.client: aioredis.Redis | None = None
+        self.password = password or None
+        self.client: Any = None
 
     async def connect(self) -> None:
+        if aioredis is None:
+            logger.warning("redis-py not installed; EventBus running in dummy mode.")
+            return
         if not self.client:
             self.client = aioredis.from_url(
-                self.redis_url, encoding="utf-8", decode_responses=True
+                self.redis_url,
+                password=self.password,
+                encoding="utf-8",
+                decode_responses=True,
             )
             await self.client.ping()
             logger.info(f"Connected to EventBus Redis at {self.redis_url}")
@@ -47,6 +56,8 @@ class EventBus:
         """Publishes a CloudEvent to a Redis Stream with MAXLEN trimming."""
         if not self.client:
             await self.connect()
+        if not self.client:
+            return "dummy-msg-id"
         payload = event.model_dump()
         message_id = await self.client.xadd(
             stream_name,
@@ -63,6 +74,8 @@ class EventBus:
         """Publishes real-time streaming progress to a Redis PubSub channel."""
         if not self.client:
             await self.connect()
+        if not self.client:
+            return 0
         return await self.client.publish(channel_name, json.dumps(update))
 
     async def create_consumer_group(
@@ -71,6 +84,8 @@ class EventBus:
         """Idempotently create consumer group on stream using start_id ('$' default to avoid replay)."""
         if not self.client:
             await self.connect()
+        if not self.client:
+            return
         try:
             await self.client.xgroup_create(
                 stream_name, group_name, id=start_id, mkstream=True
@@ -78,7 +93,7 @@ class EventBus:
             logger.info(
                 f"Created consumer group '{group_name}' on stream '{stream_name}' with start_id='{start_id}'"
             )
-        except aioredis.ResponseError as e:
+        except ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
 
@@ -94,14 +109,12 @@ class EventBus:
     ) -> None:
         """Process message with delivery counter, idempotency, DLQ routing, and ACK."""
         try:
-            # Check delivery attempt count from pending entries list
             pending_info = await self.client.xpending_range(
                 stream_name, group_name, min=message_id, max=message_id, count=1
             )
             delivery_count = 1
             if pending_info and len(pending_info) > 0:
                 delivery_count = pending_info[0].get("times_delivered", 1)
-
             if delivery_count > max_retries:
                 logger.error(
                     f"Message {message_id} on stream '{stream_name}' exceeded max retries ({delivery_count} > {max_retries}). "
@@ -149,10 +162,7 @@ class EventBus:
         stop_event: asyncio.Event | None = None,
     ) -> None:
         """
-        Runs continuous loop:
-        1. Autoclaim unacknowledged pending messages older than min_idle_ms via XAUTOCLAIM (PEL recovery).
-        2. Read new messages via XREADGROUP ('>').
-        3. Deliver to handler, track retries, route poison messages to DLQ, and ACK cleanly.
+        Runs continuous loop with automatic NOGROUP recovery on Redis eviction.
         """
         await self.create_consumer_group(stream_name, group_name, start_id="$")
         logger.info(
@@ -160,6 +170,10 @@ class EventBus:
         )
         while stop_event is None or not stop_event.is_set():
             try:
+                if not self.client:
+                    await asyncio.sleep(1.0)
+                    continue
+
                 # Step 1: Recover stuck PEL entries via XAUTOCLAIM
                 try:
                     autoclaim_res = await self.client.xautoclaim(
@@ -181,17 +195,35 @@ class EventBus:
                                 msg_data,
                                 handler,
                             )
-                except (aioredis.RedisError, TimeoutError, OSError) as pel_err:
+                except (
+                    ResponseError,
+                    aioredis.RedisError,
+                    TimeoutError,
+                    OSError,
+                ) as pel_err:
                     logger.debug(f"XAUTOCLAIM info on '{stream_name}': {pel_err}")
 
-                # Step 2: Read new messages
-                entries = await self.client.xreadgroup(
-                    group_name,
-                    consumer_name,
-                    {stream_name: ">"},
-                    count=batch_size,
-                    block=block_ms,
-                )
+                # Step 2: Read new messages via XREADGROUP
+                try:
+                    entries = await self.client.xreadgroup(
+                        group_name,
+                        consumer_name,
+                        {stream_name: ">"},
+                        count=batch_size,
+                        block=block_ms,
+                    )
+                except ResponseError as re_err:
+                    if "NOGROUP" in str(re_err):
+                        logger.warning(
+                            f"NOGROUP error detected on '{stream_name}'. Re-creating consumer group '{group_name}' after Redis eviction..."
+                        )
+                        await self.create_consumer_group(
+                            stream_name, group_name, start_id="$"
+                        )
+                        await asyncio.sleep(0.5)
+                        continue
+                    raise
+
                 if not entries:
                     await asyncio.sleep(0.01)
                     continue
@@ -209,6 +241,7 @@ class EventBus:
             except asyncio.CancelledError:
                 break
             except (
+                ResponseError,
                 aioredis.RedisError,
                 TimeoutError,
                 OSError,
