@@ -28,6 +28,7 @@ dependencies = [
     "requests>=2.31.0",
     "tavily>=0.3.3",
     "uvicorn>=0.29.0",
+    "prometheus-client>=0.26.0",
 ]
 [project.optional-dependencies]
 local-llm = [

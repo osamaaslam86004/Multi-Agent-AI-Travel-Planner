@@ -23,10 +23,12 @@ REDIS_CACHE_URL = os.getenv(
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 OPENWEATHER_MCP_COMMAND = os.getenv("OPENWEATHER_MCP_COMMAND", "openweather-mcp")
+
 weather_breaker = CircuitBreaker("OpenWeatherBreaker", fail_max=4, reset_timeout=30.0)
 weather_mcp_breaker = CircuitBreaker(
     "OpenWeatherMCPBreaker", fail_max=3, reset_timeout=20.0
 )
+
 APPROVED_WEATHER_TOOLS = {
     "get_current_weather",
     "get_weather_forecast",
@@ -90,7 +92,7 @@ class WeatherProvider:
         if self._redis is not None:
             try:
                 await self._redis.close()
-            except (aioredis.RedisError, OSError, RuntimeError) as exc:
+            except (OSError, RuntimeError) as exc:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
@@ -109,11 +111,9 @@ class WeatherProvider:
         dates: str | None = None,
         tenant_id: str = "default",
     ) -> ProviderResult:
-        """High-level weather lookup using structured city & dates, single-flight locks, and non-caching of degraded results."""
         city = destination or query
         redis = await self.get_redis()
         cache_key = self._cache_key(city, dates, tenant_id)
-
         if redis:
             cached_data = await redis.get(cache_key)
             if cached_data:
@@ -121,16 +121,13 @@ class WeatherProvider:
                     "Weather cache hit for key '%s' (tenant: %s)", cache_key, tenant_id
                 )
                 return ProviderResult(**json.loads(cached_data))
-
         if cache_key not in self._single_flight_locks:
             self._single_flight_locks[cache_key] = asyncio.Lock()
-
         async with self._single_flight_locks[cache_key]:
             if redis:
                 cached_data = await redis.get(cache_key)
                 if cached_data:
                     return ProviderResult(**json.loads(cached_data))
-
             results: ProviderResult = await resilient_execute(
                 breaker=weather_breaker,
                 primary_func=self._fetch_weather,
@@ -138,11 +135,8 @@ class WeatherProvider:
                 city=city,
                 dates=dates,
             )
-
-            # Never cache degraded/fallback results (L8 compliance)
             if redis and not results.degraded:
                 await redis.setex(cache_key, 21600, json.dumps(results.model_dump()))
-
             return results
 
     async def _fetch_weather(
@@ -228,7 +222,6 @@ class WeatherProvider:
         return str(output)
 
     async def _fetch_openweather_mcp(self, city: str) -> str:
-        """Discover and invoke a weather-capable OpenWeather MCP tool with 10s timeout."""
         if not OPENWEATHER_API_KEY:
             raise ValueError("OpenWeather API key required for MCP")
         async with asyncio.timeout(10.0):
@@ -236,7 +229,6 @@ class WeatherProvider:
             tools = await client.get_tools()
             if not tools:
                 raise RuntimeError("No tools discovered from OpenWeather MCP")
-            # Strict allowlist matching — NO arbitrary tools[0] fallback!
             matching = [
                 tool
                 for tool in tools

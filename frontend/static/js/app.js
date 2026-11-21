@@ -7,7 +7,6 @@
    ============================================================ */
 (function () {
   "use strict";
-
   /* ---------------- DOM Helpers ---------------- */
   var $ = function (id) {
     return document.getElementById(id);
@@ -23,14 +22,12 @@
   var composerWrap = document.querySelector(".composer-wrap");
   var statusBtn = $("apiStatus");
   var statusText = statusBtn ? statusBtn.querySelector(".status-text") : null;
-
   /* ---------------- State ---------------- */
   var THEME_KEY = "travelbrain.theme";
   var csrfToken = "";
   var userSession = null;
   var busy = false;
   var currentEventSource = null;
-
   /* ---------------- Utilities ---------------- */
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -38,7 +35,6 @@
     if (text !== undefined && text !== null) node.textContent = text;
     return node;
   }
-
   function icon(paths, cls) {
     var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -53,7 +49,6 @@
     svg.appendChild(p);
     return svg;
   }
-
   var toastTimer;
   function toast(msg) {
     if (!toastEl) return;
@@ -70,7 +65,6 @@
       }, 250);
     }, 2800);
   }
-
   function scrollToEnd(smooth) {
     requestAnimationFrame(function () {
       if (conversation) {
@@ -81,7 +75,6 @@
       }
     });
   }
-
   /* ---------------- Theme ---------------- */
   function initTheme() {
     var stored = null;
@@ -96,7 +89,6 @@
       stored || (prefersLight ? "light" : "dark"),
     );
   }
-
   var themeToggle = $("themeToggle");
   if (themeToggle) {
     themeToggle.addEventListener("click", function () {
@@ -110,14 +102,12 @@
       } catch (e) {}
     });
   }
-
   /* ---------------- Session & BFF Auth ---------------- */
   function initSession() {
     if (statusBtn && statusText) {
       statusBtn.setAttribute("data-state", "checking");
       statusText.textContent = "Connecting…";
     }
-
     return fetch("/api/v1/auth/me", { credentials: "same-origin" })
       .then(function (res) {
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -142,7 +132,6 @@
         updateEmptyState();
       });
   }
-
   function updateEmptyState() {
     var hasMessages = messages && messages.children.length > 0;
     if (hero) hero.classList.toggle("is-hidden", hasMessages);
@@ -150,7 +139,6 @@
     if (input) input.disabled = busy;
     if (sendBtn) sendBtn.disabled = busy;
   }
-
   /* ---------------- Rendering ---------------- */
   function renderUser(text) {
     var wrap = el("div", "msg msg-user");
@@ -158,7 +146,6 @@
     messages.appendChild(wrap);
     return wrap;
   }
-
   function toText(value) {
     if (value === null || value === undefined) return "";
     if (typeof value === "string") return value;
@@ -178,7 +165,6 @@
     }
     return String(value);
   }
-
   function mdBlock(source, emptyText) {
     var box = el("div", "md");
     var text = toText(source).trim();
@@ -202,7 +188,6 @@
     }
     return box;
   }
-
   function toolButton(label, pathD, handler) {
     var b = el("button", "icon-btn sm");
     b.type = "button";
@@ -212,11 +197,9 @@
     b.addEventListener("click", handler);
     return b;
   }
-
   function plainTextOf(content, query) {
     return ["# " + (query || "Trip Plan"), "", toText(content)].join("\n");
   }
-
   function renderResult(finalContent, userQuery) {
     var card = el("article", "card");
     var head = el("div", "card-head");
@@ -227,12 +210,10 @@
       ),
     );
     head.appendChild(avatar);
-
     var titleBox = el("div", "card-title");
     titleBox.appendChild(el("strong", null, "TravelBrain AI"));
     titleBox.appendChild(el("small", null, "Plan Ready"));
     head.appendChild(titleBox);
-
     var tools = el("div", "card-tools");
     tools.appendChild(
       toolButton(
@@ -287,17 +268,14 @@
     );
     head.appendChild(tools);
     card.appendChild(head);
-
     var body = el("div", "card-body");
     body.appendChild(mdBlock(finalContent, "Empty response returned."));
     card.appendChild(body);
-
     var wrap = el("div", "msg");
     wrap.appendChild(card);
     messages.appendChild(wrap);
     return wrap;
   }
-
   function renderError(message, detailText) {
     var card = el("article", "card error-card");
     var body = el("div", "error-body");
@@ -319,13 +297,11 @@
     );
     body.appendChild(textBox);
     card.appendChild(body);
-
     var wrap = el("div", "msg");
     wrap.appendChild(card);
     messages.appendChild(wrap);
     return wrap;
   }
-
   /* ---------------- Real-time SSE Progress Card ---------------- */
   function renderProgressCard() {
     var card = el("article", "card progress-card");
@@ -337,17 +313,14 @@
     head.appendChild(label);
     head.appendChild(meta);
     card.appendChild(head);
-
     var track = el("div", "progress-track");
     var fill = el("div", "progress-fill");
     fill.style.width = "0%";
     track.appendChild(fill);
     card.appendChild(track);
-
     var wrap = el("div", "msg");
     wrap.appendChild(card);
     messages.appendChild(wrap);
-
     return {
       node: wrap,
       update: function (percentage, messageText) {
@@ -362,21 +335,18 @@
       },
     };
   }
-
   /* ---------------- Send Query & Handle SSE Stream ---------------- */
   function setBusy(state) {
     busy = state;
     if (sendBtn) sendBtn.classList.toggle("is-busy", state);
     updateEmptyState();
   }
-
   function send(text, structuredDest, structuredDep) {
     if (busy) return;
     var message = String(
       text == null ? (input ? input.value : "") : text,
     ).trim();
     if (!message) return;
-
     if (input) {
       input.value = "";
       autosize();
@@ -384,21 +354,17 @@
     setBusy(true);
     renderUser(message);
     updateEmptyState();
-
     var progressCard = renderProgressCard();
     scrollToEnd(true);
-
     var headers = { "Content-Type": "application/json" };
     if (csrfToken) {
       headers["X-CSRF-Token"] = csrfToken;
     }
-
     var payload = {
       message: message,
       destination: structuredDest || null,
       departure_city: structuredDep || null,
     };
-
     fetch("/api/v1/trips/plan", {
       method: "POST",
       headers: headers,
@@ -422,21 +388,17 @@
         if (!streamUrl) {
           throw new Error("Server did not return a stream URL.");
         }
-
         if (currentEventSource) {
           currentEventSource.close();
         }
-
         var evtSource = new EventSource(streamUrl);
         currentEventSource = evtSource;
-
         evtSource.onmessage = function (e) {
           try {
             var data = JSON.parse(e.data);
             if (data.percentage !== undefined) {
               progressCard.update(data.percentage, data.message);
             }
-
             if (data.stage === "completed" || data.final_response) {
               evtSource.close();
               currentEventSource = null;
@@ -444,7 +406,6 @@
               if (progressCard.node.parentNode) {
                 progressCard.node.remove();
               }
-
               var resultText = data.final_response || data.itinerary || "";
               renderResult(resultText, message);
               scrollToEnd(true);
@@ -468,7 +429,6 @@
             console.error("Error parsing SSE event:", err, e.data);
           }
         };
-
         evtSource.onerror = function (err) {
           console.warn("SSE connection error:", err);
           evtSource.close();
@@ -497,7 +457,6 @@
         if (input) input.focus();
       });
   }
-
   /* ---------------- New Trip ---------------- */
   function startNewTrip() {
     if (busy) {
@@ -512,19 +471,16 @@
     updateEmptyState();
     if (input) input.focus();
   }
-
   var newTripBtn = $("newTripBtn");
   if (newTripBtn) {
     newTripBtn.addEventListener("click", startNewTrip);
   }
-
   /* ---------------- Composer & Trip Builder ---------------- */
   function autosize() {
     if (!input) return;
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 200) + "px";
   }
-
   if (input) {
     input.addEventListener("input", autosize);
     input.addEventListener("keydown", function (e) {
@@ -534,14 +490,12 @@
       }
     });
   }
-
   if (composer) {
     composer.addEventListener("submit", function (e) {
       e.preventDefault();
       send();
     });
   }
-
   document.querySelectorAll(".suggestion").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var prompt = btn.getAttribute("data-prompt");
@@ -550,7 +504,6 @@
       send(prompt, dest, dep);
     });
   });
-
   var builderToggle = $("builderToggle");
   if (builderToggle && builder) {
     builderToggle.addEventListener("click", function () {
@@ -560,13 +513,11 @@
       if (show && $("fFrom")) $("fFrom").focus();
     });
   }
-
   document.querySelectorAll("#interestChips .chip").forEach(function (chip) {
     chip.addEventListener("click", function () {
       chip.classList.toggle("on");
     });
   });
-
   var builderClear = $("builderClear");
   if (builderClear) {
     builderClear.addEventListener("click", function () {
@@ -580,7 +531,6 @@
       });
     });
   }
-
   var builderApply = $("builderApply");
   if (builderApply) {
     builderApply.addEventListener("click", function () {
@@ -596,13 +546,11 @@
         .forEach(function (c) {
           interests.push(c.getAttribute("data-value"));
         });
-
       if (!to) {
         toast("Add a destination first.");
         if ($("fTo")) $("fTo").focus();
         return;
       }
-
       var parts = ["Plan a"];
       if (days) parts.push(days + " day");
       parts.push("trip to " + to);
@@ -626,18 +574,14 @@
         );
       if (budget) parts.push("with a budget of " + budget);
       if (interests.length) parts.push("focused on " + interests.join(", "));
-
       var sentence =
         parts.join(" ") +
         ". Find flights, hotels, the weather outlook and a day-by-day itinerary.";
-
       if (builder) builder.hidden = true;
       if (builderToggle) builderToggle.classList.remove("is-on");
-
       send(sentence, to, from);
     });
   }
-
   /* ---------------- Boot ---------------- */
   initTheme();
   updateEmptyState();

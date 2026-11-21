@@ -22,7 +22,6 @@ ISSUER = os.getenv("JWT_ISSUER", "https://" + "auth.travelbrain.ai")
 AUDIENCE = os.getenv("JWT_AUDIENCE", "https://" + "api.travelbrain.ai")
 ACCESS_TOKEN_EXPIRE_SECONDS = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", "3600"))
 REFRESH_TOKEN_EXPIRE_SECONDS = int(os.getenv("REFRESH_TOKEN_EXPIRE_SECONDS", "604800"))
-
 _primary_private_key: rsa.RSAPrivateKey | None = None
 _previous_private_key: rsa.RSAPrivateKey | None = None
 
@@ -96,18 +95,15 @@ def _load_key_from_pem_or_env(
         if pem_path and os.path.exists(pem_path):
             with open(pem_path, "rb") as f:
                 pem_bytes = f.read()
-
     if pem_bytes:
         return serialization.load_pem_private_key(
             pem_bytes, password=None, backend=default_backend()
         )
-
     if os.path.exists(fallback_path):
         with open(fallback_path, "rb") as f:
             return serialization.load_pem_private_key(
                 f.read(), password=None, backend=default_backend()
             )
-
     key = rsa.generate_private_key(
         public_exponent=65537, key_size=2048, backend=default_backend()
     )
@@ -131,7 +127,6 @@ def get_primary_private_key() -> rsa.RSAPrivateKey:
     global _primary_private_key
     if _primary_private_key is not None:
         return _primary_private_key
-
     fallback_path = os.getenv(
         "JWT_PRIMARY_FALLBACK_PATH", "/tmp/tb_jwt_primary_private.pem"
     )
@@ -146,7 +141,6 @@ def get_previous_private_key() -> rsa.RSAPrivateKey | None:
     global _previous_private_key
     if _previous_private_key is not None:
         return _previous_private_key
-
     pem_path = os.getenv("JWT_PREVIOUS_PRIVATE_KEY_PATH")
     pem_str = os.getenv("JWT_PREVIOUS_PRIVATE_KEY_PEM")
     if pem_str:
@@ -179,7 +173,6 @@ def get_jwks() -> dict[str, Any]:
             "e": int_to_base64url(primary_num.e),
         }
     )
-
     prev_priv = get_previous_private_key()
     if prev_priv:
         prev_pub = prev_priv.public_key()
@@ -196,7 +189,6 @@ def get_jwks() -> dict[str, Any]:
                     "e": int_to_base64url(prev_num.e),
                 }
             )
-
     return {"keys": keys}
 
 
@@ -215,7 +207,6 @@ def issue_jwt(
     now = int(time.time())
     exp = now + ACCESS_TOKEN_EXPIRE_SECONDS
     jti = f"jwt_{uuid.uuid4().hex}"
-
     payload = {
         "iss": ISSUER,
         "sub": user_id,
@@ -231,14 +222,12 @@ def issue_jwt(
     }
     if custom_claims:
         payload.update(custom_claims)
-
     access_token = jwt.encode(
         payload,
         priv,
         algorithm="RS256",
         headers={"kid": kid},
     )
-
     refresh_jti = f"ref_{uuid.uuid4().hex}"
     refresh_payload = {
         "iss": ISSUER,
@@ -258,5 +247,4 @@ def issue_jwt(
         algorithm="RS256",
         headers={"kid": kid},
     )
-
     return access_token, refresh_token, ACCESS_TOKEN_EXPIRE_SECONDS

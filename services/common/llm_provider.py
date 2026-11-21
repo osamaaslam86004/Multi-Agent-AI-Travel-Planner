@@ -1,8 +1,9 @@
 """
 Modular Multi-Provider LLM Abstraction with Token Tracking, Latency Measurement,
-and Structured Output Enforcement.
+Structured Output Enforcement, and Fixed Local Tier Mechanics.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -52,14 +53,12 @@ class BaseLLMProvider(ABC):
     def _extract_json_from_text(self, text: str) -> dict[str, Any]:
         """Utility to safely extract and parse JSON object from markdown or freeform text."""
         cleaned = text.strip()
-        # Strip markdown code fences if present
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```(?:json)?\n?", "", cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r"\n?```$", "", cleaned)
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            # Fallback search for first outer curly brace pair
             match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
             if match:
                 return json.loads(match.group(1))
@@ -111,7 +110,7 @@ class GroqLLMProvider(BaseLLMProvider):
         start_time = time.perf_counter()
         response = await client.ainvoke(messages)
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-        # Extract token usage metadata from response
+
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if hasattr(response, "response_metadata") and response.response_metadata:
             raw_usage = response.response_metadata.get("token_usage", {})
@@ -126,6 +125,7 @@ class GroqLLMProvider(BaseLLMProvider):
                 "output_tokens", 0
             )
             token_usage["total_tokens"] = response.usage_metadata.get("total_tokens", 0)
+
         return LLMResult(
             content=str(response.content),
             provider_name=self.provider_name,
@@ -161,12 +161,14 @@ class GroqLLMProvider(BaseLLMProvider):
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         content = str(response.content)
         parsed_data = self._extract_json_from_text(content)
+
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if hasattr(response, "response_metadata") and response.response_metadata:
             raw_usage = response.response_metadata.get("token_usage", {})
             token_usage["prompt_tokens"] = raw_usage.get("prompt_tokens", 0)
             token_usage["completion_tokens"] = raw_usage.get("completion_tokens", 0)
             token_usage["total_tokens"] = raw_usage.get("total_tokens", 0)
+
         return LLMResult(
             content=content,
             provider_name=self.provider_name,
@@ -236,10 +238,7 @@ class GeminiLLMProvider(BaseLLMProvider):
                 endpoint, json=body, headers={"x-goog-api-key": self.api_key}
             )
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Gemini API returned error {resp.status_code}: {resp.status_code}"
-                )
+            resp.raise_for_status()
             data = resp.json()
         candidates = data.get("candidates", [])
         if not candidates:
@@ -286,10 +285,7 @@ class GeminiLLMProvider(BaseLLMProvider):
                 endpoint, json=body, headers={"x-goog-api-key": self.api_key}
             )
             latency_ms = (time.perf_counter() - start_time) * 1000.0
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Gemini API structured request failed: {resp.status_code}"
-                )
+            resp.raise_for_status()
             data = resp.json()
         candidates = data.get("candidates", [])
         content = "".join(
@@ -319,8 +315,9 @@ class GeminiLLMProvider(BaseLLMProvider):
 class LocalHuggingFaceProvider(BaseLLMProvider):
     """
     Air-gapped, consumer hardware local model running strictly within < 12GB VRAM.
-    Supports local OpenAI-compatible inference servers (Ollama / llama.cpp / vLLM),
-    compact HuggingFace Transformers 4-bit pipelines, and a deterministic offline fallback.
+    Supports local OpenAI-compatible inference servers (Ollama / llama.cpp / vLLM)
+    and compact HuggingFace Transformers 4-bit pipelines.
+    No false availability reporting or canned itinerary generation on failure.
     """
 
     def __init__(
@@ -329,9 +326,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         local_endpoint_url: str | None = None,
         device: str = "auto",
     ):
-        selected_model = (
-            model_name or os.getenv("LOCAL_LLM_MODEL") or "Qwen/Qwen2.5-7B-Instruct"
-        )
+        selected_model = model_name or os.getenv("LOCAL_LLM_MODEL") or "qwen2.5:7b"
         super().__init__(provider_name="local_huggingface", model_name=selected_model)
         self.endpoint_url = local_endpoint_url or os.getenv(
             "LOCAL_LLM_URL", "http://localhost:11434/v1"
@@ -339,41 +334,51 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         self.device = device
         self._pipeline = None
         self._checked_pipeline = False
+        self._endpoint_available = None
 
     def is_available(self) -> bool:
-        if self.endpoint_url and self.endpoint_url != "http://localhost:11434/v1":
+        if self._endpoint_available is True:
             return True
         if self._pipeline is not None:
             return True
+
+        try:
+            resp = httpx.get(f"{self.endpoint_url.rstrip('/')}/models", timeout=1.0)
+            if resp.status_code == 200:
+                self._endpoint_available = True
+                return True
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            logger.debug("Local LLM endpoint check failed: %s", exc)
+
         pipe = self._load_transformers_pipeline()
         return pipe is not None
 
-    def _format_messages_for_prompt(self, messages: list[BaseMessage]) -> str:
-        """Format messages using standard chat templating."""
+    def _convert_messages_to_dict(
+        self, messages: list[BaseMessage]
+    ) -> list[dict[str, str]]:
         formatted = []
         for msg in messages:
             if isinstance(msg, SystemMessage):
-                formatted.append(f"<|im_start|>system\n{msg.content}<|im_end|>")
+                formatted.append({"role": "system", "content": msg.content})
             elif isinstance(msg, HumanMessage):
-                formatted.append(f"<|im_start|>user\n{msg.content}<|im_end|>")
+                formatted.append({"role": "user", "content": msg.content})
             elif isinstance(msg, AIMessage):
-                formatted.append(f"<|im_start|>assistant\n{msg.content}<|im_end|>")
+                formatted.append({"role": "assistant", "content": msg.content})
             else:
-                formatted.append(f"<|im_start|>user\n{msg.content}<|im_end|>")
-        formatted.append("<|im_start|>assistant\n")
-        return "\n".join(formatted)
+                formatted.append({"role": "user", "content": str(msg.content)})
+        return formatted
 
     async def _try_local_endpoint(
-        self, prompt: str, temperature: float
+        self, messages: list[BaseMessage], temperature: float
     ) -> tuple[str, dict[str, int]] | None:
-        """Try querying local OpenAI-compatible endpoint (e.g. Ollama or llama.cpp) if running."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            formatted_messages = self._convert_messages_to_dict(messages)
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     f"{self.endpoint_url.rstrip('/')}/chat/completions",
                     json={
                         "model": self.model_name,
-                        "messages": [{"role": "user", "content": prompt}],
+                        "messages": formatted_messages,
                         "temperature": temperature,
                         "max_tokens": 1024,
                     },
@@ -383,25 +388,27 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                     content = data["choices"][0]["message"]["content"]
                     usage = data.get("usage", {})
                     token_usage = {
-                        "prompt_tokens": usage.get(
-                            "prompt_tokens", len(prompt.split())
-                        ),
-                        "completion_tokens": usage.get(
-                            "completion_tokens", len(content.split())
-                        ),
-                        "total_tokens": usage.get(
-                            "total_tokens", len(prompt.split()) + len(content.split())
-                        ),
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
                     }
+                    self._endpoint_available = True
                     return content, token_usage
-        except (httpx.HTTPError, TimeoutError, OSError, KeyError, ValueError) as exc:
+        except (
+            httpx.HTTPError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            json.JSONDecodeError,
+        ) as exc:
             logger.debug(
-                "Local LLM endpoint unavailable at %s: %s", self.endpoint_url, exc
+                "Local LLM endpoint unreachable at %s: %s", self.endpoint_url, exc
             )
+            self._endpoint_available = False
         return None
 
     def _load_transformers_pipeline(self):
-        """Lazy load compact transformers pipeline (<12GB VRAM) if packages are installed."""
         if self._checked_pipeline:
             return self._pipeline
         self._checked_pipeline = True
@@ -409,7 +416,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             import torch
             from transformers import pipeline
 
-            # Ensure model stays strictly under 12GB VRAM (e.g., float16 or 4-bit)
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             self._pipeline = pipeline(
                 "text-generation",
@@ -420,29 +426,15 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             )
             logger.info(f"Loaded local HuggingFace pipeline for '{self.model_name}'")
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
-            logger.debug(
-                f"Transformers pipeline not loaded ({exc}). Using offline generation."
-            )
+            logger.debug("Transformers pipeline unavailable (%s)", exc)
             self._pipeline = None
         return self._pipeline
 
-    def _offline_fallback_generation(self, messages: list[BaseMessage]) -> str:
-        """Deterministic, intelligent local synthesis fallback when no GPU/LLM is reachable."""
-        combined_text = "\n".join(str(m.content) for m in messages)
-        return (
-            "### [Local Offline Synthesis Engine]\n\n"
-            "**Notice:** Processed locally on air-gapped system (<12GB VRAM footprint).\n\n"
-            f"**Synthesis Summary:**\n"
-            f"Generated from inputs:\n{combined_text[:600]}...\n\n"
-            "**Day 1: Arrival, Check-In & Local Exploration**\n"
-            "- Check into accommodation; explore the central district and local cuisine.\n\n"
-            "**Day 2: City Landmarks & Highlights**\n"
-            "- Morning cultural walking tour; afternoon scenic exploration.\n\n"
-            "**Day 3: Day Excursion & Scenic Highlights**\n"
-            "- Optimized based on local weather conditions; evening dining.\n\n"
-            "**Day 4: Leisure & Departure**\n"
-            "- Souvenir shopping and transfer to the departure airport."
+    def _run_pipeline_blocking(self, prompt: str, temperature: float) -> str:
+        res = self._pipeline(
+            prompt, max_new_tokens=1024, do_sample=True, temperature=temperature
         )
+        return res[0]["generated_text"].replace(prompt, "").strip()
 
     async def generate(
         self,
@@ -451,9 +443,8 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> LLMResult:
         start_time = time.perf_counter()
-        prompt = self._format_messages_for_prompt(messages)
-        # 1. Try local OpenAI-compatible endpoint (Ollama / llama.cpp)
-        endpoint_res = await self._try_local_endpoint(prompt, temperature)
+
+        endpoint_res = await self._try_local_endpoint(messages, temperature)
         if endpoint_res:
             content, token_usage = endpoint_res
             latency_ms = (time.perf_counter() - start_time) * 1000.0
@@ -464,13 +455,15 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 token_usage=token_usage,
                 latency_ms=round(latency_ms, 2),
             )
-        # 2. Try in-process HuggingFace transformers pipeline
-        pipe = self._load_transformers_pipeline()
+
+        pipe = await asyncio.to_thread(self._load_transformers_pipeline)
         if pipe:
-            res = pipe(
-                prompt, max_new_tokens=1024, do_sample=True, temperature=temperature
+            prompt = "\n".join(
+                f"{getattr(m, 'type', 'user')}: {m.content}" for m in messages
             )
-            content = res[0]["generated_text"].replace(prompt, "").strip()
+            content = await asyncio.to_thread(
+                self._run_pipeline_blocking, prompt, temperature
+            )
             prompt_tokens = len(prompt.split())
             comp_tokens = len(content.split())
             token_usage = {
@@ -486,22 +479,9 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 token_usage=token_usage,
                 latency_ms=round(latency_ms, 2),
             )
-        # 3. Deterministic air-gapped generation
-        content = self._offline_fallback_generation(messages)
-        latency_ms = (time.perf_counter() - start_time) * 1000.0
-        prompt_tokens = len(prompt.split())
-        comp_tokens = len(content.split())
-        token_usage = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": comp_tokens,
-            "total_tokens": prompt_tokens + comp_tokens,
-        }
-        return LLMResult(
-            content=content,
-            provider_name=self.provider_name,
-            model_name=self.model_name,
-            token_usage=token_usage,
-            latency_ms=round(latency_ms, 2),
+
+        raise RuntimeError(
+            f"LocalHuggingFaceProvider ({self.model_name}) is unavailable at {self.endpoint_url}."
         )
 
     async def generate_structured(
@@ -512,11 +492,9 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> LLMResult:
         res = await self.generate(messages, temperature=temperature, **kwargs)
-
         try:
             parsed = self._extract_json_from_text(res.content)
         except ValueError:
             parsed = response_format
-
         res.structured_data = parsed
         return res

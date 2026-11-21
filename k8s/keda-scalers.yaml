@@ -1,0 +1,87 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: flight-service-scaler
+  namespace: travelbrain
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: flight-service
+  minReplicaCount: 2
+  maxReplicaCount: 15
+  cooldownPeriod: 300
+  pollingInterval: 15
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis.travelbrain.svc.cluster.local:6379
+        stream: stream:travel:planning:initiated
+        consumerGroup: cg-flight-service
+        pendingEntriesCount: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: hotel-service-scaler
+  namespace: travelbrain
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hotel-service
+  minReplicaCount: 2
+  maxReplicaCount: 15
+  cooldownPeriod: 300
+  pollingInterval: 15
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis.travelbrain.svc.cluster.local:6379
+        stream: stream:travel:planning:initiated
+        consumerGroup: cg-hotel-service
+        pendingEntriesCount: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: weather-service-scaler
+  namespace: travelbrain
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: weather-service
+  minReplicaCount: 2
+  maxReplicaCount: 15
+  cooldownPeriod: 300
+  pollingInterval: 15
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis.travelbrain.svc.cluster.local:6379
+        stream: stream:travel:planning:initiated
+        consumerGroup: cg-weather-service
+        pendingEntriesCount: "5"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: synthesis-service-scaler
+  namespace: travelbrain
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: synthesis-service
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 300
+  pollingInterval: 15
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis.travelbrain.svc.cluster.local:6379
+        stream: stream:travel:flights:completed
+        consumerGroup: cg-synthesis-service
+        pendingEntriesCount: "5"

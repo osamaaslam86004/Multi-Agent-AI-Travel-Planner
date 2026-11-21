@@ -1,13 +1,10 @@
 name: Release Workflow
-
 on:
   push:
     tags:
       - "v*.*.*"
-
 permissions:
   contents: write
-
 jobs:
   build-and-release:
     name: Create GitHub Release
@@ -17,12 +14,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Package Release Asset
         run: |
           FILES_TO_TAR="frontend services k8s docker-compose.yml pyproject.toml .python-version README.md"
@@ -32,7 +27,6 @@ jobs:
             fi
           done
           tar -czvf travelbrain-${{ github.ref_name }}.tar.gz $FILES_TO_TAR
-
       - name: Create Release Notes & Tag Release
         uses: softprops/action-gh-release@v2
         with:

@@ -35,13 +35,11 @@ from services.auth_service.security import (
 )
 
 logger = logging.getLogger("travelbrain.auth_service")
-
 app = FastAPI(
     title="TravelBrain Auth & Identity Service",
     version="2.0.0",
     description="Enterprise OIDC Authentication, Argon2id Identity, RS256 JWT Issuance & JWKS Provider",
 )
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,7 +47,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_OIDC_DISCOVERY_URL = (
@@ -58,7 +55,6 @@ GOOGLE_OIDC_DISCOVERY_URL = (
 GOOGLE_JWKS_URL = "https://" + "www.googleapis.com/oauth2/v3/certs"
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
 # In-memory user store fallback when Postgres is offline
 _in_memory_users: dict[str, dict[str, Any]] = {}
 _google_jwks_client: PyJWKClient | None = None
@@ -123,16 +119,13 @@ async def direct_login(req: UserLoginRequest):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Direct password login disabled in production. Use OIDC SSO.",
         )
-
     if not req.password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Password is required for direct authentication.",
         )
-
     email_clean = str(req.email).lower().strip()
     user_id = generate_user_id(email_clean)
-
     # Validate or create user in state store
     if email_clean in _in_memory_users:
         user_record = _in_memory_users[email_clean]
@@ -153,7 +146,6 @@ async def direct_login(req: UserLoginRequest):
             "roles": roles,
             "tenant_id": req.tenant_id,
         }
-
     access_token, refresh_token, expires_in = issue_jwt(
         user_id=user_id,
         email=email_clean,
@@ -161,7 +153,6 @@ async def direct_login(req: UserLoginRequest):
         tenant_id=req.tenant_id,
         email_verified=True,
     )
-
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -179,19 +170,16 @@ async def get_google_auth_url(redirect_uri: str):
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     code_verifier = secrets.token_urlsafe(48)
-
     # Compute S256 PKCE Code Challenge
     code_challenge_bytes = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = (
         base64.urlsafe_b64encode(code_challenge_bytes).rstrip(b"=").decode("ascii")
     )
-
     # Store state metadata in Redis (or in-memory fallback) with 600s TTL
     state_data = json.dumps({"nonce": nonce, "code_verifier": code_verifier})
     r = await get_redis()
     if r:
         await r.setex(f"oidc:state:{state}", 600, state_data)
-
     params = {
         "client_id": GOOGLE_CLIENT_ID or "mock-google-client-id",
         "redirect_uri": redirect_uri,
@@ -223,7 +211,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Google OIDC client credentials are not configured.",
         )
-
     # Validate state parameter against stored Redis state
     r = await get_redis()
     stored_state_raw = None
@@ -231,17 +218,14 @@ async def google_callback(req: GoogleTokenExchangeRequest):
         stored_state_raw = await r.get(f"oidc:state:{req.state}")
         if stored_state_raw:
             await r.delete(f"oidc:state:{req.state}")
-
     if not stored_state_raw:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OIDC state parameter is invalid, expired, or missing.",
         )
-
     state_meta = json.loads(stored_state_raw)
     expected_nonce = state_meta.get("nonce")
     code_verifier = req.code_verifier or state_meta.get("code_verifier")
-
     # Real Google OIDC Token Exchange
     token_url = "https://" + "oauth2.googleapis.com/token"
     data = {
@@ -253,7 +237,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
     }
     if code_verifier:
         data["code_verifier"] = code_verifier
-
     async with httpx.AsyncClient() as client:
         resp = await client.post(token_url, data=data)
         if resp.status_code != 200:
@@ -262,14 +245,12 @@ async def google_callback(req: GoogleTokenExchangeRequest):
                 detail=f"Google OAuth token exchange failed: {resp.text}",
             )
         tokens = resp.json()
-
     id_token_raw = tokens.get("id_token")
     if not id_token_raw:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Google token response missing id_token.",
         )
-
     # Cryptographically verify id_token signature using Google JWKS
     try:
         jwks_client = get_google_jwks_client()
@@ -287,24 +268,20 @@ async def google_callback(req: GoogleTokenExchangeRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid Google id_token signature or claims: {exc}",
         )
-
     # Validate Nonce & Email Verification
     if expected_nonce and id_claims.get("nonce") != expected_nonce:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OIDC id_token nonce verification failed.",
         )
-
     if not id_claims.get("email_verified", False):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unverified Google email address.",
         )
-
     google_sub = id_claims.get("sub", "")
     email = id_claims.get("email", "")
     user_id = f"usr_google_{google_sub}" if google_sub else generate_user_id(email)
-
     access_token, refresh_token, expires_in = issue_jwt(
         user_id=user_id,
         email=email,
@@ -312,7 +289,6 @@ async def google_callback(req: GoogleTokenExchangeRequest):
         tenant_id="default",
         email_verified=True,
     )
-
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,

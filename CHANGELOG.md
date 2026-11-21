@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.7.0] - 2026-11-21
+
+### Added
+- **End-to-End OpenTelemetry SDK, OTLP Exporter & Structured JSON Logging (`services/common/telemetry.py`, `services/common/event_bus.py`, `services/bff_gateway/main.py`)**:
+  - Configured a real OpenTelemetry `TracerProvider` with OTLP export and automatic instrumentation for FastAPI, `httpx`, and Redis (`opentelemetry-instrumentation-fastapi`, `opentelemetry-instrumentation-httpx`, `opentelemetry-instrumentation-redis`), replacing inert API-only no-op tracing.
+  - Extracted incoming W3C `traceparent` headers into active OpenTelemetry contexts inside event bus consumer handlers and started root spans at the BFF gateway so distributed spans correlate end-to-end across HTTP and Redis Streams.
+  - Added structured JSON logging enriched with `trace_id`, `correlation_id`, and `tenant_id` across services and workers.
+- **Prometheus Metrics & Observability Instrumentation (`pyproject.toml`, `services/common/metrics.py`, `services/bff_gateway/main.py`, `services/*/worker.py`)**:
+  - Added `prometheus-client` to project dependencies in `pyproject.toml` and exposed Prometheus metrics endpoints across gateway and worker services.
+  - Instrumented stream lag, pending-entry list (PEL) age, synthesis barrier age, circuit breaker states (`CLOSED`/`HALF_OPEN`/`OPEN`), degraded response ratios, active SSE connections, and per-tenant token and cost accounting with bounded label cardinality.
+- **FinOps Token Accounting, Pre-Flight Tenant Budgets & Prompt Controls (`services/common/db.py`, `services/synthesis_service/synthesizer.py`, `services/synthesis_service/worker.py`, `services/bff_gateway/main.py`)**:
+  - Persisted `LLMResult.token_usage`, `provider`, `model`, and estimated cost into `llm_usage` and attached usage metadata to synthesis event payloads.
+  - Enforced pre-flight per-tenant token/cost budget quotas before dispatching planning workflows, capped input prompt sizes and `max_tokens`, and supported routing cheaper models for drafting stages.
+- **Kubernetes Autoscaling, Pod Disruption Budgets & Graceful Drain (`k8s/keda-scaledobjects.yaml`, `k8s/bff-gateway.yaml`, `k8s/domain-workers.yaml`, `k8s/pdb.yaml`, `k8s/ingress.yaml`)**:
+  - Added KEDA `ScaledObject` definitions scaling domain workers on Redis Stream lag and scaling `bff-gateway` on active SSE connections rather than CPU utilization.
+  - Added Pod Disruption Budgets (`PDB`), pod topology spread / anti-affinity rules, worker health probes, extended `terminationGracePeriodSeconds`, and `preStop` drain hooks so in-flight stream consumers complete cleanly before termination.
+  - Migrated Ingress configuration from deprecated `kubernetes.io/ingress.class` annotations to `spec.ingressClassName` and removed unused WebSocket annotations.
+- **Dependencies, Lockfile & Code Quality Verification (`pyproject.toml`, `uv.lock`, `requirements.txt`)**:
+  - Added `prometheus-client` (alongside OpenTelemetry SDK/instrumentation packages) to `pyproject.toml`, regenerated `uv.lock`, and exported updated pinned dependencies to `requirements.txt`.
+  - Verified all changes pass `ruff check .` and `ruff format --check .` cleanly.
+
+### Changed
+- **LLM Fallback Tier Architecture & Distributed Circuit Breakers (`services/common/llm_provider.py`, `services/common/resilient_chain.py`, `services/common/resilience.py`, `k8s/llm-inference.yaml`)**:
+  - Overhauled Tier 3 local LLM execution to target an external quantized (4-bit) vLLM or Ollama inference endpoint (with configurable second cloud provider fallback) instead of running blocking in-process Hugging Face model loads inside async workers, removing the silent canned `_offline_fallback_generation` so exhausted chains surface honest degraded signals.
+  - Fixed local `/chat/completions` message formatting to send structured role messages without double-applying ChatML templates and corrected model tag handling.
+  - Shared circuit breaker state across replicas in Redis, enforced single-probe concurrency in `HALF_OPEN` state, excluded configuration `ValueError` exceptions from tripping breakers, respected `Retry-After` headers, and eliminated duplicate nested outer/inner breaker wrapping.
+
+
+
 ## [1.6.0] - 2026-11-20
 
 ### Added
@@ -20,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added standalone CLI DLQ replay utility (`tools/dlq_replay.py`) and admin replay endpoint in `bff_gateway` to re-publish failed messages from `stream:travel:dlq` back to their original streams.
 - **Phase 3 Integration & Async Test Suite (`tests/test_phase3_features.py`, `pyproject.toml`, `uv.lock`, `requirements.txt`)**:
   - Added async Phase 3 test suite covering CloudEvents v1.0 schemas, outbox write/relay, barrier state machine and janitor expiration, single-call synthesis, structured cache keys with single-flight locking, and `trip_store` upsert/retrieval.
-  - Added `test` optional dependency group (`pytest>=8.4.0`, `pytest-asyncio>=1.5.0`) in `pyproject.toml`, updated `uv.lock`, and exported pinned runtime dependencies to `requirements.txt`[cite: 5, 6].
+  - Added `test` optional dependency group (`pytest>=8.4.0`, `pytest-asyncio>=1.5.0`) in `pyproject.toml`, updated `uv.lock`, and exported pinned runtime dependencies to `requirements.txt`.
 
 ### Fixed
 - **Linting, Regex Escape Sequences & Exception Handling (`services/bff_gateway/main.py`, `services/common/db.py`, `services/flight_service/provider.py`, `services/synthesis_service/worker.py`, `tools/dlq_replay.py`)**:
@@ -32,26 +61,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Identity & OIDC Hardening (`services/auth_service/main.py`, `services/auth_service/security.py`, `services/auth_service/models.py`)**:
-  - Added Google OIDC authorization URL generation with CSRF `state`, `nonce`, and PKCE (`S256` code challenge / `code_verifier`) persisted with TTL, paired with `id_token` JWT signature/claim/nonce/email-verification checks[cite: 2, 3].
-  - Added UUIDv5-based deterministic user IDs (`generate_user_id`), Argon2id password hashing/verification (`hash_password`, `verify_password`), refresh token issuance, and Redis-backed `jti` token revocation (`POST /api/v1/auth/revoke`)[cite: 2, 3].
+  - Added Google OIDC authorization URL generation with CSRF `state`, `nonce`, and PKCE (`S256` code challenge / `code_verifier`) persisted with TTL, paired with `id_token` JWT signature/claim/nonce/email-verification checks.
+  - Added UUIDv5-based deterministic user IDs (`generate_user_id`), Argon2id password hashing/verification (`hash_password`, `verify_password`), refresh token issuance, and Redis-backed `jti` token revocation (`POST /api/v1/auth/revoke`).
 - **Key Management, JWKS & Token Lifecycle (`services/auth_service/security.py`, `services/common/auth_middleware.py`)**:
-  - Derived `kid` from RFC 7638 JWK thumbprints (`compute_rfc7638_kid`) and supported primary + previous key rotation overlap in `get_jwks()`[cite: 2, 3].
-  - Offloaded JWKS signing-key lookup off the async event loop via `asyncio.to_thread(...)`, checked token revocation in `get_current_user`, and added explicit `require_any_role` and `require_all_roles` RBAC helpers[cite: 2, 3].
+  - Derived `kid` from RFC 7638 JWK thumbprints (`compute_rfc7638_kid`) and supported primary + previous key rotation overlap in `get_jwks()`.
+  - Offloaded JWKS signing-key lookup off the async event loop via `asyncio.to_thread(...)`, checked token revocation in `get_current_user`, and added explicit `require_any_role` and `require_all_roles` RBAC helpers.
 - **BFF Gateway, Tenancy, Sessions & Trip Ownership (`services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`)**:
-  - Enforced `SessionManager.validate_request` (session + `X-CSRF-Token`) on `POST /api/v1/trips/plan` and `GET /api/v1/trips/{correlation_id}/stream`, added per-user/tenant/IP sliding-window rate limiting, added `Idempotency-Key` response caching, bound `trip:ownership:{tenant_id}:{correlation_id}` records in Redis, and used full 128-bit UUIDs (`trip_<uuid4().hex>`)[cite: 2, 3].
-  - Propagated `tenant_id` across session keys (`session:{tenant_id}:{session_id}`), rate-limit keys, provider cache keys, and `PlanningInitiatedPayload`[cite: 2, 3].
+  - Enforced `SessionManager.validate_request` (session + `X-CSRF-Token`) on `POST /api/v1/trips/plan` and `GET /api/v1/trips/{correlation_id}/stream`, added per-user/tenant/IP sliding-window rate limiting, added `Idempotency-Key` response caching, bound `trip:ownership:{tenant_id}:{correlation_id}` records in Redis, and used full 128-bit UUIDs (`trip_<uuid4().hex>`).
+  - Propagated `tenant_id` across session keys (`session:{tenant_id}:{session_id}`), rate-limit keys, provider cache keys, and `PlanningInitiatedPayload`.
 - **Kubernetes Infrastructure, Isolation & Security Hardening (`k8s/namespace.yaml`, `k8s/network-policies.yaml`, `k8s/postgres.yaml`, `k8s/redis.yaml`, `k8s/auth-service.yaml`, `k8s/bff-gateway.yaml`, `k8s/domain-workers.yaml`)**:
-  - Added `k8s/postgres.yaml`, `k8s/redis.yaml`, and `k8s/network-policies.yaml` (default-deny ingress/egress plus least-privilege service/egress policies), and applied Pod Security Admission `restricted` labels in `k8s/namespace.yaml` along with non-root `securityContext` and digest-pinned container images[cite: 2, 3].
+  - Added `k8s/postgres.yaml`, `k8s/redis.yaml`, and `k8s/network-policies.yaml` (default-deny ingress/egress plus least-privilege service/egress policies), and applied Pod Security Admission `restricted` labels in `k8s/namespace.yaml` along with non-root `securityContext` and digest-pinned container images.
 - **LLM, MCP & Stream Privacy Hardening (`services/common/pii_redactor.py`, `services/synthesis_service/synthesizer.py`, `services/synthesis_service/worker.py`, `services/flight_service/provider.py`, `services/hotel_service/provider.py`, `services/weather_service/provider.py`)**:
-  - Redacted PII (`redact_pii`), stripped links/HTML, truncated inputs, and wrapped untrusted user queries and flight/hotel/weather tool outputs in XML delimiters in `SynthesisEngine`, replacing shared mutable `last_result` state with a `contextvars.ContextVar`[cite: 2, 3].
-  - Enforced `asyncio.timeout(...)` on MCP calls, strict tool allowlists without arbitrary `tools[0]` fallbacks, and scoped environment variables passed to MCP subprocesses[cite: 2, 3].
+  - Redacted PII (`redact_pii`), stripped links/HTML, truncated inputs, and wrapped untrusted user queries and flight/hotel/weather tool outputs in XML delimiters in `SynthesisEngine`, replacing shared mutable `last_result` state with a `contextvars.ContextVar`.
+  - Enforced `asyncio.timeout(...)` on MCP calls, strict tool allowlists without arbitrary `tools[0]` fallbacks, and scoped environment variables passed to MCP subprocesses.
 
 ### Changed
 - **Session Lifecycle & Auth Endpoints (`services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`, `services/auth_service/main.py`)**:
-  - Rotated sessions on login, enforced session absolute TTLs and `Secure` cookie flags in production, and removed unauthenticated guest session minting on `GET /api/v1/auth/me`[cite: 2, 3].
-  - Gated direct password login on `ENVIRONMENT != "production"` and failed closed on missing/invalid Google OIDC configuration or state/nonce/token validation[cite: 2, 3].
+  - Rotated sessions on login, enforced session absolute TTLs and `Secure` cookie flags in production, and removed unauthenticated guest session minting on `GET /api/v1/auth/me`.
+  - Gated direct password login on `ENVIRONMENT != "production"` and failed closed on missing/invalid Google OIDC configuration or state/nonce/token validation.
 - **Redis Eviction & Container Runtime (`docker-compose.yml`, `k8s/redis.yaml`, `services/Dockerfile.worker`)**:
-  - Switched Redis memory policy from `allkeys-lru` to `noeviction` with AOF persistence (`--appendonly yes`) and authentication (`--requirepass`) in `docker-compose.yml` and `k8s/redis.yaml`, and set `UV_PYTHON_DOWNLOADS=never` with pinned MCP tool versions in `services/Dockerfile.worker`[cite: 2, 3].
+  - Switched Redis memory policy from `allkeys-lru` to `noeviction` with AOF persistence (`--appendonly yes`) and authentication (`--requirepass`) in `docker-compose.yml` and `k8s/redis.yaml`, and set `UV_PYTHON_DOWNLOADS=never` with pinned MCP tool versions in `services/Dockerfile.worker`.
 
 ### Fixed
 - **Lint & Exception Handling (`services/auth_service/main.py`, `services/bff_gateway/main.py`, `services/common/auth_middleware.py`, `services/common/event_bus.py`, `services/flight_service/provider.py`, `services/hotel_service/provider.py`, `services/synthesis_service/synthesizer.py`, `services/weather_service/provider.py`)**:
@@ -195,7 +224,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
-[1.6.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.4.0...v1.6.0
+[1.7.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.2.0...v1.3.0

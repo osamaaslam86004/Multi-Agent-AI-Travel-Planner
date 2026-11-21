@@ -1,6 +1,6 @@
 """
 Itinerary and Synthesis LLM Engine with Resilient Multi-Provider Fallback Chain,
-XML Prompt Delimitation, PII Redaction, Input Truncation, and Single-Call Synthesis.
+Strict XML Delimitation, PII Redaction, Input Truncation, Prompt Bounding, and Single-Call Synthesis.
 """
 
 import contextvars
@@ -35,7 +35,7 @@ class StructuredItinerarySchema(BaseModel):
 class SynthesisEngine:
     """
     Orchestrates LLM prompts for multi-agent synthesis and final itinerary formatting
-    with strict XML delimitation, input truncation, PII redaction, and thread safety.
+    with strict XML delimitation, input truncation, PII redaction, prompt bounds, and thread safety.
     Consolidates LLM generation into a single execution pass for efficiency.
     """
 
@@ -49,7 +49,6 @@ class SynthesisEngine:
 
     @property
     def last_result(self) -> LLMResult | None:
-        """Thread-safe contextvar accessor for the last LLM call result."""
         return last_llm_result_var.get()
 
     async def synthesize_plan(
@@ -59,11 +58,9 @@ class SynthesisEngine:
         hotel_results: str,
         weather_results: str,
         temperature: float = 0.3,
+        tenant_id: str = "default",
+        max_tokens: int = 2048,
     ) -> tuple[str, str]:
-        """
-        Single-call synthesis combining itinerary creation and final executive dossier formatting.
-        Returns a tuple of (itinerary, final_response) using exactly 1 LLM call.
-        """
         clean_query = redact_pii(user_query[:1000])
         clean_flights = sanitize_tool_output(flight_results, max_length=3000)
         clean_hotels = sanitize_tool_output(hotel_results, max_length=3000)
@@ -81,6 +78,7 @@ class SynthesisEngine:
             "Section 1: Detailed Day-by-Day Itinerary\n"
             "Section 2: Executive Trip Dossier (with summary, tables, logistics, and advisories)."
         )
+
         user_prompt = (
             f"<user_query>\n{clean_query}\n</user_query>\n\n"
             f"<untrusted_flight_data>\n{clean_flights}\n</untrusted_flight_data>\n\n"
@@ -88,13 +86,19 @@ class SynthesisEngine:
             f"<untrusted_weather_data>\n{clean_weather}\n</untrusted_weather_data>\n\n"
             f"Generate the complete travel plan."
         )
+
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
         try:
-            result = await self.chain.generate(messages, temperature=temperature)
+            result = await self.chain.generate(
+                messages,
+                temperature=temperature,
+                tenant_id=tenant_id,
+                max_tokens=max_tokens,
+            )
             last_llm_result_var.set(result)
             logger.info(
                 f"Single-call synthesis complete via provider: {result.provider_name} "
@@ -113,7 +117,6 @@ class SynthesisEngine:
                 final_response = raw_text.strip()
 
             return itinerary, final_response
-
         except (
             httpx.HTTPError,
             RuntimeError,
@@ -139,9 +142,15 @@ class SynthesisEngine:
         hotel_results: str,
         weather_results: str,
         temperature: float = 0.3,
+        tenant_id: str = "default",
     ) -> str:
         itin, _ = await self.synthesize_plan(
-            user_query, flight_results, hotel_results, weather_results, temperature
+            user_query,
+            flight_results,
+            hotel_results,
+            weather_results,
+            temperature,
+            tenant_id=tenant_id,
         )
         return itin
 
@@ -153,9 +162,15 @@ class SynthesisEngine:
         weather_results: str,
         itinerary: str,
         temperature: float = 0.2,
+        tenant_id: str = "default",
     ) -> str:
         _, resp = await self.synthesize_plan(
-            user_query, flight_results, hotel_results, weather_results, temperature
+            user_query,
+            flight_results,
+            hotel_results,
+            weather_results,
+            temperature,
+            tenant_id=tenant_id,
         )
         return resp
 

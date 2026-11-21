@@ -8,41 +8,29 @@ import logging
 import time
 from typing import Any
 
-try:
-    import redis.asyncio as aioredis
-except ImportError:
-    aioredis = None
-
 logger = logging.getLogger("travelbrain.barrier")
-
 CLAIM_BARRIER_LUA = """
 local barrier_key = KEYS[1]
 local deadline_zset = KEYS[2]
 local cid = ARGV[1]
-
 local status = redis.call('HGET', barrier_key, 'status')
 if status == 'SYNTHESIZING' or status == 'DONE' then
     return 0
 end
-
 local query = redis.call('HGET', barrier_key, 'user_query')
 if not query or query == '' then
     return 0
 end
-
 local fl = redis.call('HEXISTS', barrier_key, 'flight_results')
 local ht = redis.call('HEXISTS', barrier_key, 'hotel_results')
 local wt = redis.call('HEXISTS', barrier_key, 'weather_results')
-
 local force_partial = ARGV[2]
-
 if (fl == 1 and ht == 1 and wt == 1) or force_partial == 'true' then
     redis.call('HSET', barrier_key, 'status', 'SYNTHESIZING')
     redis.call('HSET', barrier_key, 'synthesis_started_at', tostring(ARGV[3]))
     redis.call('ZREM', deadline_zset, cid)
     return 1
 end
-
 return 0
 """
 
@@ -69,11 +57,9 @@ class BarrierStateMachine:
         """Initialize barrier hash and register deadline score in ZSET."""
         if not self.redis:
             return
-
         timeout = deadline_seconds or self.deadline_seconds
         deadline_ts = time.time() + timeout
         barrier_key = f"barrier:{correlation_id}"
-
         mapping = {
             "status": "GATHERING",
             "user_query": user_query,
@@ -84,7 +70,6 @@ class BarrierStateMachine:
         }
         await self.redis.hset(barrier_key, mapping=mapping)
         await self.redis.expire(barrier_key, 3600)
-
         # Register in deadline ZSET
         await self.redis.zadd(self.deadline_zset, {correlation_id: deadline_ts})
 
@@ -99,7 +84,6 @@ class BarrierStateMachine:
         """Records agent output into barrier hash."""
         if not self.redis:
             return
-
         barrier_key = f"barrier:{correlation_id}"
         mapping = {
             f"{domain}_results": results,
@@ -118,11 +102,9 @@ class BarrierStateMachine:
         """
         if not self.redis:
             return True
-
         barrier_key = f"barrier:{correlation_id}"
         now_str = str(time.time())
         force_str = "true" if force_partial else "false"
-
         res = await self.redis.eval(
             CLAIM_BARRIER_LUA,
             2,
@@ -148,21 +130,17 @@ class BarrierStateMachine:
         """
         if not self.redis:
             return []
-
         now = time.time()
         expired_cids = await self.redis.zrangebyscore(
             self.deadline_zset, min=0, max=now
         )
         ready_for_synthesis: list[str] = []
-
         for cid in expired_cids:
             barrier_key = f"barrier:{cid}"
             data = await self.redis.hgetall(barrier_key)
-
             if not data or data.get("status") != "GATHERING":
                 await self.redis.zrem(self.deadline_zset, cid)
                 continue
-
             # Fill missing agent domains with degraded fallback markers
             updates = {}
             if "flight_results" not in data:
@@ -171,22 +149,18 @@ class BarrierStateMachine:
                 )
                 updates["flight_degraded"] = "true"
                 updates["flight_source"] = "timeout_fallback"
-
             if "hotel_results" not in data:
                 updates["hotel_results"] = "Hotel data unavailable (deadline timeout)."
                 updates["hotel_degraded"] = "true"
                 updates["hotel_source"] = "timeout_fallback"
-
             if "weather_results" not in data:
                 updates["weather_results"] = (
                     "Weather data unavailable (deadline timeout)."
                 )
                 updates["weather_degraded"] = "true"
                 updates["weather_source"] = "timeout_fallback"
-
             if updates:
                 await self.redis.hset(barrier_key, mapping=updates)
-
             # Try claiming synthesis for partial generation
             claimed = await self.try_claim_synthesis(cid, force_partial=True)
             if claimed:
@@ -194,14 +168,12 @@ class BarrierStateMachine:
                     f"Janitor triggered partial synthesis for timed-out trip '{cid}'"
                 )
                 ready_for_synthesis.append(cid)
-
         return ready_for_synthesis
 
     async def mark_done(self, correlation_id: str) -> None:
         """Marks barrier status as DONE and cleans up deadline ZSET."""
         if not self.redis:
             return
-
         barrier_key = f"barrier:{correlation_id}"
         await self.redis.hset(barrier_key, "status", "DONE")
         await self.redis.zrem(self.deadline_zset, correlation_id)

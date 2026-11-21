@@ -15,18 +15,15 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
 logger = logging.getLogger("travelbrain.auth_middleware")
-
 AUTH_SERVICE_JWKS_URL = os.getenv(
     "AUTH_SERVICE_JWKS_URL", "http://" + "auth-service:8001/.well-known/jwks.json"
 )
 EXPECTED_ISSUER = os.getenv("JWT_ISSUER", "https://" + "auth.travelbrain.ai")
 EXPECTED_AUDIENCE = os.getenv("JWT_AUDIENCE", "https://" + "api.travelbrain.ai")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
 _jwks_client: PyJWKClient | None = None
 _redis_client: Any = None
 security_scheme = HTTPBearer(auto_error=False)
-
 CredentialsDep = Annotated[
     HTTPAuthorizationCredentials | None, Depends(security_scheme)
 ]
@@ -90,14 +87,12 @@ async def get_current_user(
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
-
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
     try:
         client = get_jwks_client()
         # Non-blocking JWKS key lookup to avoid blocking async event loop
@@ -117,7 +112,6 @@ async def get_current_user(
                 "verify_iss": True,
             },
         )
-
         jti = payload.get("jti")
         if jti:
             r = await get_redis()
@@ -127,7 +121,6 @@ async def get_current_user(
                     detail="Authentication token has been revoked.",
                     headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
                 )
-
         return AuthenticatedUser(payload)
     except jwt.ExpiredSignatureError:
         raise HTTPException(

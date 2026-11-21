@@ -52,7 +52,6 @@ async def test_cloudevent_v1_schemas():
 async def test_outbox_write_and_relay():
     """Verify Outbox write and async relay mechanism."""
     mock_bus = AsyncMock(spec=EventBus)
-
     cid = f"trip_outbox_{int(time.time())}"
     payload = {
         "correlation_id": cid,
@@ -60,7 +59,6 @@ async def test_outbox_write_and_relay():
         "tenant_id": "default",
         "user_query": "Fly to Paris",
     }
-
     res_cid = await write_outbox(
         tenant_id="default",
         correlation_id=cid,
@@ -69,7 +67,6 @@ async def test_outbox_write_and_relay():
         payload=payload,
     )
     assert res_cid == cid
-
     relayed = await relay_outbox(mock_bus)
     assert relayed >= 1
     assert mock_bus.publish.called
@@ -79,7 +76,6 @@ async def test_outbox_write_and_relay():
 async def test_barrier_state_machine_and_janitor():
     """Verify Scatter-Gather Barrier State Machine transitions and Janitor expiration."""
     mock_redis = AsyncMock()
-
     mock_redis.hgetall.return_value = {
         "status": "GATHERING",
         "user_query": "Trip to Rome",
@@ -89,16 +85,12 @@ async def test_barrier_state_machine_and_janitor():
     }
     mock_redis.eval.return_value = 1
     mock_redis.zrangebyscore.return_value = ["trip_rome_123"]
-
     barrier = BarrierStateMachine(redis_client=mock_redis, default_deadline_seconds=5.0)
-
     await barrier.init_barrier("trip_rome_123", "Trip to Rome")
     assert mock_redis.hset.called
     assert mock_redis.zadd.called
-
     await barrier.record_agent_result("trip_rome_123", "flight", "Flight options found")
     assert mock_redis.hset.called
-
     ready_cids = await barrier.check_expired_barriers()
     assert "trip_rome_123" in ready_cids
     assert mock_redis.hset.called
@@ -114,7 +106,6 @@ async def test_single_call_synthesis():
         hotel_results="Downtown boutique hotel",
         weather_results="Mild 18C sunny",
     )
-
     assert itin is not None
     assert final_resp is not None
     assert (
@@ -130,7 +121,6 @@ async def test_structured_cache_keys_and_single_flight_lock():
     fp = FlightProvider(redis_url="redis://localhost:6379/1")
     hp = HotelProvider(redis_url="redis://localhost:6379/2")
     wp = WeatherProvider(redis_url="redis://localhost:6379/3")
-
     f_key = fp._cache_key(
         departure_city="NYC",
         destination="LON",
@@ -142,11 +132,9 @@ async def test_structured_cache_keys_and_single_flight_lock():
         destination="PAR", dates="2026-11-05", pax=1, tenant_id="tenant_a"
     )
     w_key = wp._cache_key(city="TYO", dates="2026-12-01", tenant_id="tenant_a")
-
     assert f_key.startswith("flight:cache:tenant_a:")
     assert h_key.startswith("hotel:cache:tenant_a:")
     assert w_key.startswith("weather:cache:tenant_a:")
-
     fallback_res = await fp._fallback_flights("NYC to LON")
     assert fallback_res.degraded is True
     assert fallback_res.source == "fallback"
@@ -167,12 +155,10 @@ async def test_trip_store_upsert_and_retrieval():
         itinerary="Day 1: Temples",
         final_response="# Kyoto Plan",
     )
-
     fetched = await get_trip_by_id(cid, tenant_id="tenant_beta")
     assert fetched is not None
     assert fetched["correlation_id"] == cid
     assert fetched["tenant_id"] == "tenant_beta"
     assert fetched["status"] == "DONE"
-
     isolated = await get_trip_by_id(cid, tenant_id="other_tenant")
     assert isolated is None

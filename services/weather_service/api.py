@@ -9,7 +9,6 @@ from services.weather_service.provider import WeatherProvider
 
 app = FastAPI(title="Weather Agent Service", version="2.0.0")
 provider = WeatherProvider()
-
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
 

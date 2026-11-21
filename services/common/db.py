@@ -1,6 +1,7 @@
 """
 Postgres Database connection pool management, tenant RLS context setting,
 and transactional operations for trips, append-only event audit, LLM usage ledger, and outbox.
+FinOps persistence for token usage, cost estimates, model, and provider.
 """
 
 import contextlib
@@ -12,6 +13,10 @@ from typing import Any
 
 import psycopg
 
+_PSYCOPG_ERRORS = (psycopg.Error,)
+
+from services.common.telemetry import record_llm_metrics
+
 logger = logging.getLogger("travelbrain.db")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
@@ -20,8 +25,8 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "travelbrain")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "travelbrain")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "travelbrain_pg_pass_2026")
 
-_DB_ERRORS: tuple[type[Exception], ...] = (
-    psycopg.Error,
+_DB_ERRORS: tuple[type[Exception], ...] = _PSYCOPG_ERRORS + (
+    ImportError,
     OSError,
     RuntimeError,
     ValueError,
@@ -37,12 +42,27 @@ _in_memory_db: dict[str, Any] = {
 }
 
 
+def calculate_cost(
+    provider: str, model: str, prompt_tokens: int, completion_tokens: int
+) -> float:
+    """Computes estimated cost in USD for LLM inference."""
+    p_lower = provider.lower()
+    if "groq" in p_lower:
+        return (prompt_tokens * 0.59 / 1_000_000.0) + (
+            completion_tokens * 0.79 / 1_000_000.0
+        )
+    elif "gemini" in p_lower:
+        return (prompt_tokens * 0.15 / 1_000_000.0) + (
+            completion_tokens * 0.60 / 1_000_000.0
+        )
+    return 0.0
+
+
 async def init_db_pool() -> Any:
     """Initializes the psycopg_pool connection pool if psycopg is available."""
     global _pool
     if _pool is not None:
         return _pool
-
     try:
         from psycopg_pool import AsyncConnectionPool
 
@@ -56,7 +76,7 @@ async def init_db_pool() -> Any:
         await _pool.open()
         logger.info("Initialized Postgres connection pool.")
         return _pool
-    except _DB_ERRORS as exc:
+    except (ImportError, OSError, RuntimeError, ValueError, psycopg.Error) as exc:
         logger.warning(
             f"Postgres pool initialization unavailable: {exc}. Using fallback in-memory database store."
         )
@@ -79,13 +99,12 @@ async def close_db_pool() -> None:
 async def get_tenant_conn(tenant_id: str = "default") -> AsyncGenerator[Any, None]:
     """
     Yields an active database connection with tenant RLS set: SET LOCAL app.current_tenant_id = tenant_id.
-    Yields None if Postgres is unavailable (allowing fallback execution).
+    Yields None if Postgres is unavailable.
     """
     pool = await init_db_pool()
     if pool is None:
         yield None
         return
-
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -112,14 +131,12 @@ async def write_outbox(
         if conn:
             try:
                 async with conn.transaction(), conn.cursor() as cur:
-                    # Ensure default user exists if referenced
                     user_id = payload.get("user_id", "guest")
                     await cur.execute(
                         "INSERT INTO users (user_id, tenant_id, email) VALUES (%s, %s, %s) "
                         "ON CONFLICT (user_id) DO NOTHING;",
                         (user_id, tenant_id, f"{user_id}@{tenant_id}.local"),
                     )
-                    # Upsert initial trip
                     trip_id = f"trip_{correlation_id}"
                     query = payload.get("user_query", "")
                     await cur.execute(
@@ -128,7 +145,6 @@ async def write_outbox(
                         "ON CONFLICT (correlation_id) DO NOTHING;",
                         (trip_id, tenant_id, user_id, correlation_id, query),
                     )
-                    # Write outbox event
                     await cur.execute(
                         "INSERT INTO outbox (tenant_id, correlation_id, stream_name, event_type, payload) "
                         "VALUES (%s, %s, %s, %s, %s::jsonb);",
@@ -146,7 +162,6 @@ async def write_outbox(
             except _DB_ERRORS as exc:
                 logger.error(f"Failed writing outbox entry: {exc}")
 
-    # Also store in fallback memory
     _in_memory_db["outbox"].append(
         {
             "tenant_id": tenant_id,
@@ -204,7 +219,6 @@ async def relay_outbox(event_bus: Any) -> int:
         except _DB_ERRORS as exc:
             logger.debug(f"Outbox relay DB poll exception: {exc}")
 
-    # Fallback memory outbox relay
     for item in _in_memory_db["outbox"]:
         if not item["processed"]:
             from services.common.schemas import CloudEvent
@@ -218,7 +232,6 @@ async def relay_outbox(event_bus: Any) -> int:
             await event_bus.publish(item["stream_name"], ce)
             item["processed"] = True
             relayed_count += 1
-
     return relayed_count
 
 
@@ -292,7 +305,6 @@ async def upsert_trip_result(
             except _DB_ERRORS as exc:
                 logger.error(f"Failed upserting trip result to DB: {exc}")
 
-    # Fallback memory store
     _in_memory_db["trips"][correlation_id] = {
         "correlation_id": correlation_id,
         "tenant_id": tenant_id,
@@ -333,7 +345,6 @@ async def record_trip_event(
                 await conn.commit()
             except _DB_ERRORS as exc:
                 logger.debug(f"Failed recording trip event audit log: {exc}")
-
     _in_memory_db["trip_events"].append(
         {
             "tenant_id": tenant_id,
@@ -356,7 +367,15 @@ async def record_llm_usage(
     latency_ms: float = 0.0,
     cost_estimate: float = 0.0,
 ) -> None:
-    """Inserts LLM token usage tracking ledger record into `llm_usage`."""
+    """
+    Inserts FinOps LLM usage record into Postgres `llm_usage` table with token tracking and cost estimates.
+    """
+    final_cost = (
+        cost_estimate
+        if cost_estimate > 0.0
+        else calculate_cost(provider, model, prompt_tokens, completion_tokens)
+    )
+
     async with get_tenant_conn(tenant_id) as conn:
         if conn:
             try:
@@ -381,7 +400,7 @@ async def record_llm_usage(
                             completion_tokens,
                             total_tokens,
                             latency_ms,
-                            cost_estimate,
+                            final_cost,
                         ),
                     )
                 await conn.commit()
@@ -395,9 +414,48 @@ async def record_llm_usage(
             "correlation_id": correlation_id,
             "provider": provider,
             "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "latency_ms": latency_ms,
+            "cost_estimate": final_cost,
         }
     )
+
+    record_llm_metrics(
+        tenant_id=tenant_id,
+        provider=provider,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost_estimate=final_cost,
+    )
+
+
+async def get_tenant_total_tokens_today(tenant_id: str) -> int:
+    """Returns total tokens consumed by tenant today for pre-flight budget enforcement."""
+    pool = await init_db_pool()
+    if pool:
+        try:
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COALESCE(SUM(total_tokens), 0) FROM llm_usage "
+                    "WHERE tenant_id = %s AND created_at >= CURRENT_DATE;",
+                    (tenant_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    return int(row[0])
+        except _DB_ERRORS:
+            pass
+
+    total = sum(
+        item["total_tokens"]
+        for item in _in_memory_db["llm_usage"]
+        if item.get("tenant_id") == tenant_id
+    )
+    return total
 
 
 async def get_trip_by_id(

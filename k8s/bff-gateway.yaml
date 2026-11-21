@@ -20,6 +20,20 @@ spec:
       labels:
         app: bff-gateway
     spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: bff-gateway
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: bff-gateway
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -32,6 +46,10 @@ spec:
           ports:
             - containerPort: 8000
               name: http
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           envFrom:
             - configMapRef:
                 name: travelbrain-config
@@ -100,3 +118,10 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
+    - type: External
+      external:
+        metric:
+          name: travelbrain_active_sse_connections
+        target:
+          type: Value
+          averageValue: "50"

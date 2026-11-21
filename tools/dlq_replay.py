@@ -10,15 +10,12 @@ import os
 import sys
 from typing import Any
 
-try:
-    import redis.asyncio as aioredis
-except ImportError:
-    aioredis = None
+import redis.asyncio as aioredis
+
 from services.common.schemas import CloudEvent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dlq_replay")
-
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DLQ_STREAM = "stream:travel:dlq"
@@ -34,26 +31,21 @@ async def replay_dlq(max_messages: int = 100) -> int:
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         logger.error(f"Failed to connect to Redis at {REDIS_URL}: {exc}")
         return 0
-
     messages = await r.xrange(DLQ_STREAM, count=max_messages)
     if not messages:
         logger.info("No messages found in DLQ.")
         await r.close()
         return 0
-
     logger.info(
         f"Found {len(messages)} messages in DLQ stream '{DLQ_STREAM}'. Starting replay..."
     )
-
     replayed_count = 0
     for msg_id, data in messages:
         orig_stream = data.get("original_stream")
         raw_event_data = data.get("data")
-
         if not orig_stream or not raw_event_data:
             logger.warning(f"Skipping malformed DLQ message {msg_id}")
             continue
-
         try:
             parsed_data = json.loads(raw_event_data)
             raw_event_str = parsed_data.get("event", "{}")
@@ -62,10 +54,8 @@ async def replay_dlq(max_messages: int = 100) -> int:
                 if isinstance(raw_event_str, str)
                 else raw_event_str
             )
-
             ce = CloudEvent[Any](**parsed_event)
             payload = ce.model_dump()
-
             await r.xadd(
                 orig_stream,
                 {"event": json.dumps(payload)},
@@ -77,7 +67,6 @@ async def replay_dlq(max_messages: int = 100) -> int:
             logger.info(
                 f"Replayed message {msg_id} -> {orig_stream} (Event: {ce.type})"
             )
-
         except (
             OSError,
             RuntimeError,
@@ -86,7 +75,6 @@ async def replay_dlq(max_messages: int = 100) -> int:
             TypeError,
         ) as exc:
             logger.error(f"Failed replaying message {msg_id}: {exc}")
-
     await r.close()
     logger.info(f"DLQ Replay finish: {replayed_count} messages replayed.")
     return replayed_count

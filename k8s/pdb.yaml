@@ -1,0 +1,54 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bff-gateway-pdb
+  namespace: travelbrain
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: bff-gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: flight-service-pdb
+  namespace: travelbrain
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: flight-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hotel-service-pdb
+  namespace: travelbrain
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: hotel-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: weather-service-pdb
+  namespace: travelbrain
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: weather-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: synthesis-service-pdb
+  namespace: travelbrain
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: synthesis-service

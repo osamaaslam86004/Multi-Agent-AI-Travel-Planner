@@ -9,7 +9,6 @@ from services.hotel_service.provider import HotelProvider
 
 app = FastAPI(title="Hotel Agent Service", version="2.0.0")
 provider = HotelProvider()
-
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
 

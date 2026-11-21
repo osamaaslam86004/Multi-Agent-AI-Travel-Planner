@@ -22,14 +22,12 @@ def redact_pii(text: str | None) -> str:
     """
     if not text:
         return ""
-
     sanitized = str(text)
     sanitized = EMAIL_REGEX.sub("[REDACTED_EMAIL]", sanitized)
     sanitized = SSN_REGEX.sub("[REDACTED_SSN]", sanitized)
     sanitized = PHONE_REGEX.sub("[REDACTED_PHONE]", sanitized)
     sanitized = CREDIT_CARD_REGEX.sub("[REDACTED_CARD]", sanitized)
     sanitized = PASSPORT_REGEX.sub("[REDACTED_ID]", sanitized)
-
     return sanitized
 
 
@@ -40,22 +38,17 @@ def sanitize_tool_output(text: str | None, max_length: int = 3000) -> str:
     """
     if not text:
         return ""
-
     # Redact PII
     cleaned = redact_pii(text)
-
     # Strip markdown and plain HTTP links to mitigate indirect prompt injection
     cleaned = re.sub(r"\[([^\]]+)\]\(https?://[^\)]+\)", r"\1", cleaned)
     cleaned = re.sub(r"https?://\S+", "[LINK_REMOVED]", cleaned)
-
     # Strip HTML tags
     cleaned = re.sub(r"<[^>]+>", "", cleaned)
-
     # Enforce maximum character boundary
     if len(cleaned) > max_length:
         cleaned = (
             cleaned[:max_length]
             + f"\n...[Output truncated to {max_length} characters to prevent token blowup]"
         )
-
     return cleaned

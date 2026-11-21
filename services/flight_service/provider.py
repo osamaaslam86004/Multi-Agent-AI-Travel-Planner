@@ -18,7 +18,6 @@ from services.common.resilience import CircuitBreaker, resilient_execute
 from services.common.schemas import ProviderResult
 
 logger = logging.getLogger("travelbrain.flight_service")
-
 AVIATIONSTACK_API_KEY = (
     os.getenv("AVIATION_STACK_API_KEY") or os.getenv("AVIATIONSTACK_API_KEY") or ""
 )
@@ -95,11 +94,10 @@ class FlightProvider:
                         logger.warning("Error closing MCP client: %s", exc)
                     break
             self._mcp_client = None
-
         if self._redis is not None:
             try:
                 await self._redis.close()
-            except (aioredis.RedisError, OSError, RuntimeError) as exc:
+            except (OSError, RuntimeError) as exc:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
@@ -127,12 +125,10 @@ class FlightProvider:
         pax: int = 1,
         tenant_id: str = "default",
     ) -> ProviderResult:
-        """High-level flight search with structured key, single-flight locking, and no degraded caching."""
         redis = await self.get_redis()
         cache_key = self._cache_key(
             departure_city, destination or query, dates, pax, tenant_id
         )
-
         if redis:
             cached_data = await redis.get(cache_key)
             if cached_data:
@@ -142,17 +138,13 @@ class FlightProvider:
                 data_dict = json.loads(cached_data)
                 return ProviderResult(**data_dict)
 
-        # Single-flight lock per key to prevent thundering herd stampede
         if cache_key not in self._single_flight_locks:
             self._single_flight_locks[cache_key] = asyncio.Lock()
-
         async with self._single_flight_locks[cache_key]:
-            # Double check cache after acquiring lock
             if redis:
                 cached_data = await redis.get(cache_key)
                 if cached_data:
                     return ProviderResult(**json.loads(cached_data))
-
             results: ProviderResult = await resilient_execute(
                 breaker=flight_breaker,
                 primary_func=self._fetch_flights,
@@ -162,11 +154,8 @@ class FlightProvider:
                 destination=destination,
                 dates=dates,
             )
-
-            # Never cache degraded/fallback results (L8 compliance)
             if redis and not results.degraded:
                 await redis.setex(cache_key, 86400, json.dumps(results.model_dump()))
-
             return results
 
     async def _fetch_flights(
@@ -192,7 +181,6 @@ class FlightProvider:
         except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             errors.append(f"MCP: {exc}")
             logger.warning("AviationStack MCP failed: %s", exc)
-
         raise RuntimeError("Flight provider tiers exhausted: " + "; ".join(errors))
 
     @staticmethod
@@ -230,11 +218,9 @@ class FlightProvider:
             if field in fields:
                 args[field] = query
                 break
-
         upper = query.upper()
         flight_match = re.search(r"\b([A-Z]{2,3}\d{1,4})\b", upper)
         airport_match = re.search(r"\b([A-Z]{3})\b", upper)
-
         for field in fields:
             field_lower = field.lower()
             if field in args:

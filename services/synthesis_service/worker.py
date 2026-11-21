@@ -1,13 +1,18 @@
 """
 Synthesis & Itinerary Worker: Scatter-Gather Barrier Aggregator and LLM Orchestrator.
 Uses State Machine Barrier (GATHERING -> SYNTHESIZING -> DONE), Deadline ZSET with Janitor,
-Off-consume-loop bounded semaphore execution, single-call LLM synthesis, and PII Redaction.
+Off-consume-loop bounded semaphore execution, single-call LLM synthesis, PII Redaction,
+Traceparent Context Propagation, Structured Logging, and Health Probes.
 """
 
 import asyncio
 import logging
 import os
 import signal
+
+from aiohttp import web
+from opentelemetry import trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from services.common.db import record_llm_usage, record_trip_event, upsert_trip_result
 from services.common.event_bus import EventBus
@@ -16,10 +21,16 @@ from services.common.schemas import (
     CloudEvent,
     SynthesisCompletedPayload,
 )
+from services.common.telemetry import (
+    configure_structured_logging,
+    get_tracer,
+    set_log_context,
+    setup_telemetry,
+)
 from services.synthesis_service.barrier import BarrierStateMachine
 from services.synthesis_service.synthesizer import SynthesisEngine
 
-logging.basicConfig(level=logging.INFO)
+configure_structured_logging()
 logger = logging.getLogger("travelbrain.synthesis_worker")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -31,28 +42,50 @@ CONSUMER_GROUP = "cg-synthesis-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"synthesis-worker-{HOSTNAME}-{os.getpid()}"
 
+setup_telemetry(service_name="synthesis-service")
+tracer = get_tracer("travelbrain.synthesis_worker")
+
 event_bus = EventBus(redis_url=REDIS_URL)
 engine = SynthesisEngine()
 barrier_sm: BarrierStateMachine | None = None
-synthesis_semaphore = asyncio.Semaphore(10)  # Bounded execution off the consume loop
+synthesis_semaphore = asyncio.Semaphore(10)
 stop_event = asyncio.Event()
+is_healthy = True
+
+
+async def handle_liveness(request):
+    return web.json_response({"status": "UP", "service": "synthesis-worker"})
+
+
+async def handle_readiness(request):
+    if is_healthy and not stop_event.is_set():
+        return web.json_response({"status": "READY"})
+    return web.json_response({"status": "DRAINING"}, status=503)
+
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/health/live", handle_liveness)
+    app.router.add_get("/health/ready", handle_readiness)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    logger.info("Synthesis worker health probe server listening on port 8080")
 
 
 async def execute_synthesis(
     correlation_id: str, traceparent: str | None = None
 ) -> None:
-    """
-    Off-consume-loop synthesis runner bounded by semaphore.
-    Executes single-call LLM synthesis pass, publishes completion event, and records state.
-    """
     async with synthesis_semaphore:
         if not barrier_sm:
             return
-
         data = await barrier_sm.get_barrier_data(correlation_id)
         if not data:
             return
 
+        tenant_id = data.get("tenant_id", "default")
+        set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
         logger.info(f"Executing off-loop synthesis for trip '{correlation_id}'")
 
         await event_bus.publish_progress(
@@ -63,10 +96,8 @@ async def execute_synthesis(
                 "percentage": 75,
             },
         )
-
         raw_query = data.get("user_query", "")
         user_id = data.get("user_id", "guest")
-        tenant_id = data.get("tenant_id", "default")
         raw_flights = data.get("flight_results", "")
         raw_hotels = data.get("hotel_results", "")
         raw_weather = data.get("weather_results", "")
@@ -74,16 +105,26 @@ async def execute_synthesis(
         hotel_degraded = data.get("hotel_degraded", "false").lower() == "true"
         weather_degraded = data.get("weather_degraded", "false").lower() == "true"
 
-        # Redact PII and sanitize inputs
         clean_query = redact_pii(raw_query)
         clean_flights = sanitize_tool_output(raw_flights, max_length=3000)
         clean_hotels = sanitize_tool_output(raw_hotels, max_length=3000)
         clean_weather = sanitize_tool_output(raw_weather, max_length=3000)
 
-        # Single LLM call pass (llm_calls = 1)
-        itinerary, final_response = await engine.synthesize_plan(
-            clean_query, clean_flights, clean_hotels, clean_weather
-        )
+        # Context propagation for OTel
+        carrier = {"traceparent": traceparent} if traceparent else {}
+        otel_ctx = TraceContextTextMapPropagator().extract(carrier)
+
+        token = trace.use_span(tracer.start_span("synthesis.execute", context=otel_ctx))
+        try:
+            itinerary, final_response = await engine.synthesize_plan(
+                clean_query,
+                clean_flights,
+                clean_hotels,
+                clean_weather,
+                tenant_id=tenant_id,
+            )
+        finally:
+            token.__exit__(None, None, None)
 
         out_payload = SynthesisCompletedPayload(
             correlation_id=correlation_id,
@@ -100,7 +141,6 @@ async def execute_synthesis(
             weather_degraded=weather_degraded,
             llm_calls=1,
         )
-
         out_event = CloudEvent[SynthesisCompletedPayload](
             source="/services/synthesis-service",
             type="com.travelbrain.synthesis.completed.v1",
@@ -108,10 +148,8 @@ async def execute_synthesis(
             traceparent=traceparent,
             data=out_payload,
         )
-
         await event_bus.publish(STREAM_OUT, out_event)
 
-        # Update per-trip progress stream
         await event_bus.publish_progress(
             correlation_id,
             {
@@ -124,7 +162,6 @@ async def execute_synthesis(
             },
         )
 
-        # Upsert into Postgres DB / State store idempotently
         await upsert_trip_result(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -139,7 +176,6 @@ async def execute_synthesis(
             hotel_degraded=hotel_degraded,
             weather_degraded=weather_degraded,
         )
-
         await record_trip_event(
             tenant_id=tenant_id,
             correlation_id=correlation_id,
@@ -147,7 +183,6 @@ async def execute_synthesis(
             payload=out_payload.model_dump(),
         )
 
-        # Record token usage
         last_llm = engine.last_result
         if last_llm:
             await record_llm_usage(
@@ -161,22 +196,23 @@ async def execute_synthesis(
                 total_tokens=last_llm.token_usage.get("total_tokens", 0),
                 latency_ms=last_llm.latency_ms,
             )
-
         if barrier_sm:
             await barrier_sm.mark_done(correlation_id)
-
         logger.info(f"Synthesis completed successfully for trip '{correlation_id}'")
 
 
 async def handle_planning_initiated(event: CloudEvent) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
+    tenant_id = data.get("tenant_id", "default")
+    set_log_context(correlation_id=cid, tenant_id=tenant_id)
+
     if barrier_sm:
         await barrier_sm.init_barrier(
             correlation_id=cid,
             user_query=data.get("user_query", ""),
             user_id=data.get("user_id", "guest"),
-            tenant_id=data.get("tenant_id", "default"),
+            tenant_id=tenant_id,
         )
         claimed = await barrier_sm.try_claim_synthesis(cid)
         if claimed:
@@ -186,6 +222,9 @@ async def handle_planning_initiated(event: CloudEvent) -> None:
 async def handle_agent_completed(event: CloudEvent, domain: str) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
+    tenant_id = data.get("tenant_id", "default")
+    set_log_context(correlation_id=cid, tenant_id=tenant_id)
+
     if barrier_sm:
         await barrier_sm.record_agent_result(
             correlation_id=cid,
@@ -200,7 +239,7 @@ async def handle_agent_completed(event: CloudEvent, domain: str) -> None:
 
 
 async def janitor_loop() -> None:
-    """Background janitor scanning for timed-out barriers every 1 second."""
+
     while not stop_event.is_set():
         try:
             if barrier_sm:
@@ -213,17 +252,25 @@ async def janitor_loop() -> None:
 
 
 async def main():
+
     global barrier_sm
+
     await event_bus.connect()
     barrier_sm = BarrierStateMachine(event_bus.client, default_deadline_seconds=15.0)
 
     loop = asyncio.get_running_loop()
+
+    def handle_shutdown():
+        logger.info("SIGTERM/SIGINT received. Initiating graceful shutdown drain...")
+        stop_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, handle_shutdown)
         except NotImplementedError:
             pass
 
+    asyncio.create_task(start_health_server())
     janitor_task = asyncio.create_task(janitor_loop())
 
     try:
@@ -259,6 +306,8 @@ async def main():
         )
     finally:
         janitor_task.cancel()
+        await event_bus.close()
+        logger.info("Synthesis worker shutdown complete.")
 
 
 if __name__ == "__main__":

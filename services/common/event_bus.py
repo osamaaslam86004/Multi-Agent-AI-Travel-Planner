@@ -17,7 +17,6 @@ from redis.exceptions import ResponseError
 from services.common.schemas import CloudEvent
 
 logger = logging.getLogger("travelbrain.event_bus")
-
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DLQ_STREAM = "stream:travel:dlq"
@@ -55,18 +54,14 @@ class EventBus:
     async def publish(
         self, stream_name: str, event: CloudEvent[Any], maxlen: int = 10000
     ) -> str:
-        """Publishes a CloudEvent to a Redis Stream with strict MAXLEN trimming."""
         if not self.client:
             await self.connect()
         if not self.client:
             return "dummy-msg-id"
-
-        # Set subject to correlation_id if missing
         if not event.subject and isinstance(event.data, dict):
             event.subject = event.data.get("correlation_id")
         elif not event.subject and hasattr(event.data, "correlation_id"):
             event.subject = event.data.correlation_id
-
         payload = event.model_dump()
         message_id = await self.client.xadd(
             stream_name,
@@ -82,30 +77,20 @@ class EventBus:
     async def publish_progress(
         self, correlation_id: str, update: dict[str, Any]
     ) -> str:
-        """
-        Publishes real-time streaming progress to a per-trip Redis Stream (trip:events:{id})
-        with MAXLEN trimming, 24-hour TTL, monotonic percentage enforcement, and PubSub fallback.
-        """
         if not self.client:
             await self.connect()
         if not self.client:
             return "0-0"
-
-        # Clean correlation_id prefix if present
         cid = correlation_id.replace("trip:stream:", "").replace("trip:events:", "")
         stream_name = f"trip:events:{cid}"
-
-        # Enforce monotonic percentage progress
         raw_pct = update.get("percentage", 0)
         last_pct = self._last_percentages.get(cid, 0)
         mono_pct = max(last_pct, raw_pct)
         self._last_percentages[cid] = mono_pct
         update["percentage"] = mono_pct
         update["correlation_id"] = cid
-
         msg_payload = json.dumps(update)
 
-        # Write to stream with MAXLEN 1000 and 24h TTL
         msg_id = await self.client.xadd(
             stream_name,
             {"data": msg_payload},
@@ -114,18 +99,13 @@ class EventBus:
         )
         await self.client.expire(stream_name, 86400)
 
-        # Also publish to PubSub channel for legacy subscribers
         pubsub_channel = f"trip:stream:{cid}"
         await self.client.publish(pubsub_channel, msg_payload)
-
         return msg_id
 
     async def create_consumer_group(
         self, stream_name: str, group_name: str, start_id: str = "$"
     ) -> None:
-        """
-        Idempotently create consumer group on stream using start_id ('$' default to prevent full stream history replay).
-        """
         if not self.client:
             await self.connect()
         if not self.client:
@@ -151,7 +131,6 @@ class EventBus:
         handler: Callable[[CloudEvent[Any]], Coroutine[Any, Any, None]],
         max_retries: int = 3,
     ) -> None:
-        """Process message with delivery counter, idempotency, DLQ routing, and ACK."""
         try:
             pending_info = await self.client.xpending_range(
                 stream_name, group_name, min=message_id, max=message_id, count=1
@@ -159,7 +138,6 @@ class EventBus:
             delivery_count = 1
             if pending_info and len(pending_info) > 0:
                 delivery_count = pending_info[0].get("times_delivered", 1)
-
             if delivery_count > max_retries:
                 logger.error(
                     f"Message {message_id} on stream '{stream_name}' exceeded max retries ({delivery_count} > {max_retries}). "
@@ -180,7 +158,6 @@ class EventBus:
                 )
                 await self.client.xack(stream_name, group_name, message_id)
                 return
-
             raw_event_str = data.get("event", "{}")
             raw_event = (
                 json.loads(raw_event_str)
@@ -206,21 +183,15 @@ class EventBus:
         min_idle_ms: int = 60000,
         stop_event: asyncio.Event | None = None,
     ) -> None:
-        """
-        Runs continuous loop with automatic NOGROUP recovery on Redis eviction.
-        """
         await self.create_consumer_group(stream_name, group_name, start_id="$")
         logger.info(
             f"Consumer '{consumer_name}' listening on stream '{stream_name}' (group: {group_name})"
         )
-
         while stop_event is None or not stop_event.is_set():
             try:
                 if not self.client:
                     await asyncio.sleep(1.0)
                     continue
-
-                # Step 1: Recover stuck PEL entries via XAUTOCLAIM
                 try:
                     autoclaim_res = await self.client.xautoclaim(
                         stream_name,
@@ -244,12 +215,13 @@ class EventBus:
                 except (
                     ResponseError,
                     aioredis.RedisError,
-                    TimeoutError,
                     OSError,
+                    RuntimeError,
+                    TimeoutError,
+                    ValueError,
                 ) as pel_err:
                     logger.debug(f"XAUTOCLAIM info on '{stream_name}': {pel_err}")
 
-                # Step 2: Read new messages via XREADGROUP
                 try:
                     entries = await self.client.xreadgroup(
                         group_name,
@@ -269,11 +241,9 @@ class EventBus:
                         await asyncio.sleep(0.5)
                         continue
                     raise
-
                 if not entries:
                     await asyncio.sleep(0.01)
                     continue
-
                 for _, messages in entries:
                     for message_id, data in messages:
                         await self._process_single_message(
@@ -289,10 +259,11 @@ class EventBus:
             except (
                 ResponseError,
                 aioredis.RedisError,
-                TimeoutError,
                 OSError,
                 RuntimeError,
+                TimeoutError,
                 ValueError,
+                json.JSONDecodeError,
             ) as loop_err:
                 logger.error(f"Error in consumer loop for '{stream_name}': {loop_err}")
                 await asyncio.sleep(1.0)

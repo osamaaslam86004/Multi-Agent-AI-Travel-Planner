@@ -16,6 +16,14 @@ spec:
       labels:
         app: flight-service
     spec:
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: flight-service
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -24,6 +32,25 @@ spec:
         - name: flight-worker
           image: ghcr.io/travelbrain/domain-worker:v2.0.0@sha256:9c00d04c4032a767686cf7de988c01ea96gh159g45c67g6c6d3456789cdefabb
           command: ["python", "-m", "services.flight_service.worker"]
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+          ports:
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: travelbrain-config
@@ -68,6 +95,14 @@ spec:
       labels:
         app: hotel-service
     spec:
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: hotel-service
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -76,6 +111,25 @@ spec:
         - name: hotel-worker
           image: ghcr.io/travelbrain/domain-worker:v2.0.0@sha256:9c00d04c4032a767686cf7de988c01ea96gh159g45c67g6c6d3456789cdefabb
           command: ["python", "-m", "services.hotel_service.worker"]
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+          ports:
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: travelbrain-config
@@ -120,6 +174,14 @@ spec:
       labels:
         app: weather-service
     spec:
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: weather-service
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -128,6 +190,25 @@ spec:
         - name: weather-worker
           image: ghcr.io/travelbrain/domain-worker:v2.0.0@sha256:9c00d04c4032a767686cf7de988c01ea96gh159g45c67g6c6d3456789cdefabb
           command: ["python", "-m", "services.weather_service.worker"]
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+          ports:
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: travelbrain-config
@@ -172,6 +253,14 @@ spec:
       labels:
         app: synthesis-service
     spec:
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: synthesis-service
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -180,6 +269,25 @@ spec:
         - name: synthesis-worker
           image: ghcr.io/travelbrain/domain-worker:v2.0.0@sha256:9c00d04c4032a767686cf7de988c01ea96gh159g45c67g6c6d3456789cdefabb
           command: ["python", "-m", "services.synthesis_service.worker"]
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+          ports:
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: travelbrain-config

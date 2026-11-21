@@ -26,6 +26,7 @@ REDIS_CACHE_URL = os.getenv(
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DUCKDUCKGO_MCP_COMMAND = os.getenv("DUCKDUCKGO_MCP_COMMAND", "duckduckgo-mcp")
+
 tavily_breaker = CircuitBreaker("TavilyHotelBreaker", fail_max=3, reset_timeout=30.0)
 mcp_breaker = CircuitBreaker("DuckDuckGoMCPBreaker", fail_max=3, reset_timeout=20.0)
 APPROVED_HOTEL_TOOLS = {"duckduckgo_search", "ddg_search", "search", "web_search"}
@@ -87,7 +88,7 @@ class HotelProvider:
         if self._redis is not None:
             try:
                 await self._redis.close()
-            except (aioredis.RedisError, OSError, RuntimeError) as exc:
+            except (OSError, RuntimeError) as exc:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
 
@@ -112,11 +113,9 @@ class HotelProvider:
         pax: int = 1,
         tenant_id: str = "default",
     ) -> ProviderResult:
-        """High-level hotel search with structured key, single-flight locking, and non-caching of degraded fallbacks."""
         target_location = destination or query
         r = await self.get_redis()
         cache_key = self._cache_key(target_location, dates, pax, tenant_id)
-
         if r:
             cached_data = await r.get(cache_key)
             if cached_data:
@@ -124,26 +123,19 @@ class HotelProvider:
                     "Hotel cache hit for key '%s' (tenant: %s)", cache_key, tenant_id
                 )
                 return ProviderResult(**json.loads(cached_data))
-
         if cache_key not in self._single_flight_locks:
             self._single_flight_locks[cache_key] = asyncio.Lock()
-
         async with self._single_flight_locks[cache_key]:
             if r:
                 cached_data = await r.get(cache_key)
                 if cached_data:
                     return ProviderResult(**json.loads(cached_data))
-
             results = await self._execute_tiered_search(target_location)
-
-            # Never cache degraded/fallback results (L8 compliance)
             if r and not results.degraded:
                 await r.setex(cache_key, 43200, json.dumps(results.model_dump()))
-
             return results
 
     async def _execute_tiered_search(self, target_location: str) -> ProviderResult:
-        # Tier 1 — Primary Provider (Tavily API)
         try:
             text = await self.tavily_breaker.call(
                 self._fetch_tavily_hotels, target_location
@@ -153,7 +145,7 @@ class HotelProvider:
             logger.warning(
                 f"Tier 1 (Tavily API) failed for '{target_location}': {exc}. Failing over to Tier 2 (DuckDuckGo MCP)..."
             )
-        # Tier 2 — Secondary Fallback (DuckDuckGo MCP Server)
+
         try:
             text = await self.mcp_breaker.call(
                 self._fetch_duckduckgo_mcp, target_location
@@ -163,7 +155,7 @@ class HotelProvider:
             logger.warning(
                 f"Tier 2 (DuckDuckGo MCP) failed for '{target_location}': {exc}. Failing over to Tier 3 (Fallback)..."
             )
-        # Tier 3 — Tertiary Fallback (Static Heuristics)
+
         return self._fallback_hotels(target_location)
 
     async def _fetch_tavily_hotels(self, location: str) -> str:
@@ -190,14 +182,12 @@ class HotelProvider:
         return res_text
 
     async def _fetch_duckduckgo_mcp(self, location: str) -> str:
-        """Connect to DuckDuckGo MCP Server, enforce strict allowlist, and execute search with 10s timeout."""
         search_query = f"Best recommended hotels accommodations in {location}"
         async with asyncio.timeout(10.0):
             client = await self.get_mcp_client()
             tools = await client.get_tools()
             if not tools:
                 raise RuntimeError("No tools discovered from DuckDuckGo MCP server")
-            # Strict allowlist matching — NO arbitrary tools[0] fallback!
             matching_tools = [
                 t
                 for t in tools
