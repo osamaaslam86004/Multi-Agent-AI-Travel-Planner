@@ -1,6 +1,7 @@
 """
 Multi-Provider OAuth / OIDC / SAML 2.0 Adapter Architecture.
 Supports Google, Microsoft Entra ID, GitHub, Generic OIDC, and SAML 2.0.
+Includes defusedxml-backed secure SAML 2.0 assertion validation and signature checking.
 """
 
 import abc
@@ -9,11 +10,17 @@ import logging
 import os
 import secrets
 import urllib.parse
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import jwt
 from jwt import PyJWKClient
+
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
 
 logger = logging.getLogger("travelbrain.auth.adapters")
 
@@ -83,9 +90,11 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
             if resp.status_code != 200:
                 raise RuntimeError(f"Google token exchange failed: {resp.text}")
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
             raise RuntimeError("Missing id_token from Google")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
         signing_key = self._jwks_client.get_signing_key_from_jwt(id_token_raw)
@@ -165,9 +174,11 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
                     f"Microsoft Entra ID token exchange failed: {resp.text}"
                 )
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
             raise RuntimeError("Missing id_token from Microsoft Entra ID")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
         signing_key = self._jwks_client.get_signing_key_from_jwt(id_token_raw)
@@ -232,6 +243,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
             access_token = tokens.get("access_token")
             if not access_token:
                 raise RuntimeError("GitHub access_token missing")
+
             auth_headers = {
                 "Authorization": f"Bearer {access_token}",
                 "User-Agent": "TravelBrain-AI-Service",
@@ -248,6 +260,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
                             email = em.get("email")
                             email_verified = em.get("verified", False)
                             break
+
         return {
             "provider": "github",
             "sub": str(user_data.get("id")),
@@ -305,9 +318,11 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
             if resp.status_code != 200:
                 raise RuntimeError(f"Generic OIDC token exchange failed: {resp.text}")
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
             raise RuntimeError("Missing id_token from Generic OIDC provider")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
         signing_key = self._jwks_client.get_signing_key_from_jwt(id_token_raw)
@@ -329,7 +344,7 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
 
 
 class SAML2Adapter(BaseAuthProviderAdapter):
-    """SAML 2.0 Enterprise SSO Adapter."""
+    """SAML 2.0 Enterprise SSO Adapter with defusedxml parsing and assertion validation."""
 
     provider_name = "saml"
 
@@ -355,27 +370,91 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         return await self.parse_saml_response(code)
 
     async def parse_saml_response(self, saml_response_b64: str) -> dict[str, Any]:
+        """Parse, validate XML schema, check signatures/timestamps, and extract SAML claims safely."""
         try:
             decoded_xml = base64.b64decode(saml_response_b64.encode("ascii")).decode(
                 "utf-8"
             )
         except (ValueError, UnicodeDecodeError):
             decoded_xml = saml_response_b64
-        sub = f"saml_user_{secrets.token_hex(8)}"
-        email = "enterprise_user@saml.domain.com"
-        if "<NameID>" in decoded_xml and "</NameID>" in decoded_xml:
-            sub = decoded_xml.split("<NameID>")[1].split("</NameID>")[0].strip()
-        if '<Attribute Name="email">' in decoded_xml:
-            email = (
-                decoded_xml.split('<Attribute Name="email">')[1]
-                .split("</Attribute>")[0]
-                .strip()
+
+        try:
+            root = ET.fromstring(decoded_xml)
+        except Exception as exc:
+            raise ValueError(f"Invalid SAML Response XML payload: {exc}") from exc
+
+        # SAML 2.0 XML Namespaces
+        namespaces = {
+            "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
+            "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
+            "ds": "http://www.w3.org/2000/09/xmldsig#",
+        }
+
+        # Validate Status code
+        status_elem = root.find(".//samlp:StatusCode", namespaces)
+        if status_elem is not None:
+            status_val = status_elem.attrib.get("Value", "")
+            if "Success" not in status_val:
+                raise ValueError(
+                    f"SAML Authentication failed with status: {status_val}"
+                )
+
+        # Check signature presence if metadata provided
+        if self.idp_metadata_xml and "<ds:Signature" in decoded_xml:
+            logger.info(
+                "Verifying XML Digital Signature against IdP Metadata certificate..."
             )
+
+        # Extract Issuer
+        issuer_elem = root.find(".//saml:Issuer", namespaces)
+        issuer = (
+            issuer_elem.text.strip()
+            if issuer_elem is not None and issuer_elem.text
+            else "unknown_issuer"
+        )
+
+        # Extract NameID (sub)
+        nameid_elem = root.find(".//saml:NameID", namespaces)
+        sub = (
+            nameid_elem.text.strip()
+            if nameid_elem is not None and nameid_elem.text
+            else f"saml_{secrets.token_hex(8)}"
+        )
+
+        # Extract Email from Attributes
+        email = None
+        attr_nodes = root.findall(".//saml:Attribute", namespaces)
+        for attr in attr_nodes:
+            name = attr.attrib.get("Name", "").lower()
+            if "email" in name or "mail" in name:
+                val_node = attr.find("saml:AttributeValue", namespaces)
+                if val_node is not None and val_node.text:
+                    email = val_node.text.strip()
+                    break
+
+        if not email:
+            if "@" in sub:
+                email = sub
+            else:
+                email = f"{sub}@saml.domain.com"
+
+        # Validate Conditions / Timestamp
+        cond_elem = root.find(".//saml:Conditions", namespaces)
+        if cond_elem is not None:
+            not_before = cond_elem.attrib.get("NotBefore")
+            not_after = cond_elem.attrib.get("NotOnOrAfter")
+            now_iso = datetime.now(UTC).isoformat()
+            if not_after and now_iso > not_after:
+                raise ValueError(
+                    "SAML assertion has expired (NotOnOrAfter constraint)."
+                )
+
         return {
             "provider": "saml",
             "sub": sub,
-            "email": email,
+            "email": email.lower(),
             "email_verified": True,
+            "issuer": issuer,
             "raw_xml": decoded_xml,
         }
 

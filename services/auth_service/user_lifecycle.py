@@ -1,7 +1,7 @@
 """
 User Account Lifecycle Management Service.
 Handles user profiles, account state transitions, identity provider linking,
-login history tracking, active sessions, and multi-device logout.
+login history tracking, active sessions, and multi-device logout with database persistence.
 """
 
 import logging
@@ -18,6 +18,13 @@ from services.auth_service.models import (
     UserProfile,
 )
 from services.auth_service.security import generate_user_id
+from services.common.db import (
+    db_get_federated_identity,
+    db_get_user_by_email,
+    db_get_user_by_id,
+    db_link_federated_identity,
+    db_upsert_user_profile,
+)
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth.user_lifecycle")
@@ -28,7 +35,7 @@ _in_memory_sessions: dict[str, list[dict[str, Any]]] = {}
 
 
 class UserLifecycleService:
-    """Core User Profile and Account Lifecycle Service."""
+    """Core User Profile and Account Lifecycle Service with Postgres persistence."""
 
     def __init__(self, redis_client: Any = None):
         self.redis = redis_client
@@ -39,36 +46,110 @@ class UserLifecycleService:
         tenant_id: str = "default",
         auth_provider: str = "direct",
         display_name: str | None = None,
+        provider_sub: str | None = None,
+        issuer: str | None = None,
     ) -> UserProfile:
         email_clean = email.lower().strip()
-        user_id = generate_user_id(email_clean)
         now_str = datetime.now(UTC).isoformat()
-        if user_id in _in_memory_profiles:
-            return _in_memory_profiles[user_id]
 
-        profile = UserProfile(
-            user_id=user_id,
-            email=email_clean,
-            display_name=display_name or email_clean.split("@")[0].title(),
-            tenant_id=tenant_id,
-            status=AccountStatus.ACTIVE,
-            email_verified=(auth_provider != "direct"),
-            created_at=now_str,
-            updated_at=now_str,
-        )
-        if auth_provider != "direct":
-            profile.linked_providers.append(
-                LinkedProviderInfo(
-                    provider=auth_provider,
-                    provider_user_id=user_id,
-                    email=email_clean,
-                    linked_at=now_str,
-                )
+        # Action Item 6: First check if user is linked via federated identity
+        existing_fed = None
+        if provider_sub:
+            iss = issuer or auth_provider
+            existing_fed = await db_get_federated_identity(
+                auth_provider, iss, provider_sub
             )
+
+        existing_user_dict = None
+        if existing_fed:
+            existing_user_dict = await db_get_user_by_id(existing_fed["user_id"])
+        if not existing_user_dict:
+            existing_user_dict = await db_get_user_by_email(email_clean)
+
+        if existing_user_dict:
+            user_id = existing_user_dict["user_id"]
+            profile = UserProfile(
+                user_id=user_id,
+                email=existing_user_dict["email"],
+                display_name=existing_user_dict.get("display_name")
+                or email_clean.split("@")[0].title(),
+                avatar_url=existing_user_dict.get("avatar_url"),
+                bio=existing_user_dict.get("bio"),
+                timezone=existing_user_dict.get("timezone", "UTC"),
+                preferred_currency=existing_user_dict.get("preferred_currency", "USD"),
+                tenant_id=existing_user_dict.get("tenant_id", tenant_id),
+                org_id=existing_user_dict.get("org_id"),
+                status=AccountStatus(existing_user_dict.get("status", "active")),
+                roles=existing_user_dict.get("roles", ["member"]),
+                email_verified=existing_user_dict.get("email_verified", True),
+                mfa_enabled=existing_user_dict.get("mfa_enabled", False),
+                created_at=existing_user_dict.get("created_at", now_str),
+                updated_at=now_str,
+            )
+        else:
+            # Action Item 6: Generate internal random user_id (usr_{uuid4})
+            user_id = generate_user_id(email_clean)
+            profile = UserProfile(
+                user_id=user_id,
+                email=email_clean,
+                display_name=display_name or email_clean.split("@")[0].title(),
+                tenant_id=tenant_id,
+                status=AccountStatus.ACTIVE,
+                email_verified=(auth_provider != "direct"),
+                created_at=now_str,
+                updated_at=now_str,
+            )
+
+        if auth_provider != "direct":
+            sub_val = provider_sub or user_id
+            iss_val = issuer or auth_provider
+            await db_link_federated_identity(
+                user_id=user_id,
+                provider=auth_provider,
+                issuer=iss_val,
+                sub=sub_val,
+                email=email_clean,
+                email_verified=profile.email_verified,
+            )
+            already_linked = any(
+                lp.provider == auth_provider and lp.provider_user_id == sub_val
+                for lp in profile.linked_providers
+            )
+            if not already_linked:
+                profile.linked_providers.append(
+                    LinkedProviderInfo(
+                        provider=auth_provider,
+                        provider_user_id=sub_val,
+                        email=email_clean,
+                        linked_at=now_str,
+                    )
+                )
+
+        # Action Item 1: Persist to database repository
+        await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
 
     async def get_profile(self, user_id: str) -> UserProfile | None:
+        user_dict = await db_get_user_by_id(user_id)
+        if user_dict:
+            return UserProfile(
+                user_id=user_dict["user_id"],
+                email=user_dict["email"],
+                display_name=user_dict.get("display_name"),
+                avatar_url=user_dict.get("avatar_url"),
+                bio=user_dict.get("bio"),
+                timezone=user_dict.get("timezone", "UTC"),
+                preferred_currency=user_dict.get("preferred_currency", "USD"),
+                tenant_id=user_dict.get("tenant_id", "default"),
+                org_id=user_dict.get("org_id"),
+                status=AccountStatus(user_dict.get("status", "active")),
+                roles=user_dict.get("roles", ["member"]),
+                email_verified=user_dict.get("email_verified", False),
+                mfa_enabled=user_dict.get("mfa_enabled", False),
+                created_at=user_dict.get("created_at"),
+                updated_at=user_dict.get("updated_at"),
+            )
         return _in_memory_profiles.get(user_id)
 
     async def update_profile(
@@ -94,6 +175,8 @@ class UserLifecycleService:
         if preferred_currency is not None:
             profile.preferred_currency = preferred_currency
         profile.updated_at = datetime.now(UTC).isoformat()
+
+        await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
 
@@ -111,6 +194,7 @@ class UserLifecycleService:
             AccountStatus.DELETED,
         ]:
             await self.logout_all_devices(user_id)
+        await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         logger.info(
             f"User '{user_id}' status changed to '{new_status.value}': {reason}"
@@ -123,10 +207,21 @@ class UserLifecycleService:
         provider: str,
         provider_user_id: str,
         email: str | None = None,
+        issuer: str | None = None,
     ) -> UserProfile:
         profile = await self.get_profile(user_id)
         if not profile:
             raise ValueError(f"User profile '{user_id}' not found")
+
+        iss = issuer or provider
+        await db_link_federated_identity(
+            user_id=user_id,
+            provider=provider,
+            issuer=iss,
+            sub=provider_user_id,
+            email=email or profile.email,
+            email_verified=True,
+        )
         for lp in profile.linked_providers:
             if lp.provider == provider and lp.provider_user_id == provider_user_id:
                 return profile
@@ -139,6 +234,7 @@ class UserLifecycleService:
             )
         )
         profile.updated_at = datetime.now(UTC).isoformat()
+        await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
 
@@ -150,6 +246,7 @@ class UserLifecycleService:
             lp for lp in profile.linked_providers if lp.provider != provider
         ]
         profile.updated_at = datetime.now(UTC).isoformat()
+        await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
 
@@ -225,3 +322,6 @@ class UserLifecycleService:
             await r.set(f"tokens_valid_after:{user_id}", str(time.time()))
         logger.info(f"User '{user_id}' logged out from all {count} devices.")
         return count
+
+
+lifecycle_service = UserLifecycleService()

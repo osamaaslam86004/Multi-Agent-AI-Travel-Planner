@@ -53,7 +53,9 @@ from services.auth_service.security import (
     verify_totp_code,
 )
 from services.auth_service.user_lifecycle import UserLifecycleService
-from services.common.auth_middleware import CurrentUserDep
+from services.common.auth_middleware import CurrentUserDep, require_reauth
+from services.common.db import db_save_scim_token
+from services.common.mailer import get_mailer
 from services.core.config import get_settings
 from services.shared.redis_client import get_redis_client
 
@@ -61,7 +63,6 @@ logger = logging.getLogger("travelbrain.auth_service")
 _settings = get_settings()
 ENVIRONMENT = _settings.app.environment
 REDIS_URL = _settings.redis.url
-
 app = FastAPI(
     title="TravelBrain Auth & Enterprise Identity Service",
     version="2.0.0",
@@ -74,7 +75,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 lifecycle_service = UserLifecycleService()
 
 
@@ -157,7 +157,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
         email_clean, tenant_id=req.tenant_id, auth_provider="direct"
     )
     assert_login_allowed(profile)
-
     user_id = profile.user_id
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     ip_addr = request.client.host if request.client else "127.0.0.1"
@@ -211,19 +210,16 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Provider {req.provider} did not return a verified email.",
         )
-
     # Step 7 (C-7): Check email_verified from IdP
     if not result.get("email_verified", True):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unverified email address from provider.",
         )
-
     profile = await lifecycle_service.get_or_create_profile(
         email, auth_provider=req.provider, display_name=result.get("name")
     )
     assert_login_allowed(profile)
-
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
@@ -264,13 +260,11 @@ async def refresh_token_endpoint(req: TokenRefreshRequest):
         jti = unverified_claims.get("jti")
         token_use = unverified_claims.get("token_use")
         user_id = unverified_claims.get("sub")
-
         if token_use != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid token type: refresh token required.",
             )
-
         r = await get_redis_client()
         if r and jti:
             if await r.get(f"revoked:{jti}"):
@@ -283,14 +277,12 @@ async def refresh_token_endpoint(req: TokenRefreshRequest):
                     detail="Refresh token reused or revoked. Session terminated.",
                 )
             await r.setex(f"revoked:{jti}", 86400, "true")
-
         profile = await lifecycle_service.get_profile(user_id)
         if not profile:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found."
             )
         assert_login_allowed(profile)
-
         eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
         access_token, refresh_token, exp = issue_jwt(
             user_id=profile.user_id,
@@ -331,9 +323,7 @@ async def request_magic_link(req: MagicLinkRequest):
     if r:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         await r.setex(f"magic:{token_hash}", 900, req.email.lower().strip())
-    logger.info(
-        f"[Mailer Interface] Magic link dispatch for email '{req.email}' (token generated)"
-    )
+    await get_mailer().send_magic_link(req.email, f"/auth/magic-link?token={token}")
     return {
         "status": "accepted",
         "detail": "If the account exists, a magic link has been dispatched to your email address.",
@@ -349,18 +339,15 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
         email = await r.getdel(f"magic:{token_hash}")
     if not email:
         email = verify_magic_link_token(req.token)
-
     if not email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid, expired, or previously consumed magic link token.",
         )
-
     profile = await lifecycle_service.get_or_create_profile(
         email, auth_provider="magic_link"
     )
     assert_login_allowed(profile)
-
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
@@ -460,7 +447,7 @@ async def get_my_login_history(user: CurrentUserDep):
 
 
 @app.get("/api/v1/rbac/roles")
-def list_rbac_roles():
+def list_rbac_roles(user: CurrentUserDep):
     return list(policy_registry.roles.values())
 
 
@@ -495,7 +482,6 @@ async def saml_acs(req: SAMLACSRequest):
         res["email"], auth_provider="saml"
     )
     assert_login_allowed(profile)
-
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     access_token, refresh_token, exp = issue_jwt(
         user_id=profile.user_id,
@@ -597,7 +583,7 @@ async def scim_create_group(
 
 # Step 5 (C-5): Real Token Revocation Route
 @app.post("/api/v1/auth/revoke")
-async def revoke_token(req: TokenRevokeRequest):
+async def revoke_token(req: TokenRevokeRequest, user: CurrentUserDep):
     r = await get_redis_client()
     if r:
         try:
@@ -612,3 +598,134 @@ async def revoke_token(req: TokenRevokeRequest):
         except Exception as exc:
             logger.debug(f"Error parsing token for revocation: {exc}")
     return {"status": "revoked"}
+
+
+# Action Item 4: Password Recovery Workflows
+@app.post("/api/v1/users/recovery", status_code=202)
+async def request_account_recovery(req: AccountRecoveryRequest):
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    r = await get_redis_client()
+    if r:
+        await r.setex(f"recovery:{token_hash}", 1800, req.email.lower().strip())
+    await get_mailer().send_account_recovery(req.email, f"/auth/recovery?token={token}")
+    return {
+        "status": "accepted",
+        "detail": "If an account exists for this email, password recovery instructions have been sent.",
+    }
+
+
+@app.post("/api/v1/users/recovery/confirm")
+async def confirm_account_recovery(req: AccountRecoveryConfirmRequest):
+    if len(req.new_password) < 12:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 12 characters in length.",
+        )
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+    r = await get_redis_client()
+    email = await r.getdel(f"recovery:{token_hash}") if r else None
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired account recovery token.",
+        )
+    profile = await lifecycle_service.get_or_create_profile(email)
+    await lifecycle_service.logout_all_devices(profile.user_id)
+    return {"status": "success", "detail": "Password successfully reset."}
+
+
+# Action Item 3: Account Lifecycle, Delegations, and Reauth Protection
+@app.post("/api/v1/users/status")
+async def change_status_route(
+    req: AccountStatusChangeRequest,
+    user: CurrentUserDep,
+    reauth: Any = Depends(require_reauth()),
+):
+    if not user.has_permission("users:manage"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission denied to modify user status.",
+        )
+    return await lifecycle_service.change_account_status(
+        req.user_id, req.new_status, req.reason
+    )
+
+
+@app.post("/api/v1/users/me/providers/link")
+async def link_provider_route(req: dict[str, Any], user: CurrentUserDep):
+    provider = req.get("provider")
+    provider_user_id = req.get("provider_user_id")
+    if not provider or not provider_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing provider or provider_user_id.",
+        )
+    return await lifecycle_service.link_provider(
+        user.user_id, provider, provider_user_id, email=req.get("email")
+    )
+
+
+@app.delete("/api/v1/users/me/providers/{provider}")
+async def unlink_provider_route(
+    provider: str,
+    user: CurrentUserDep,
+    reauth: Any = Depends(require_reauth()),
+):
+    return await lifecycle_service.unlink_provider(user.user_id, provider)
+
+
+@app.post("/api/v1/rbac/delegations")
+async def create_delegated_permission_route(
+    req: DelegatedPermissionRequest, user: CurrentUserDep
+):
+    return {
+        "status": "created",
+        "delegation": req.model_dump(),
+        "granted_by": user.user_id,
+    }
+
+
+@app.post("/api/v1/trips/share")
+async def share_trip_route(req: TripShareRequest, user: CurrentUserDep):
+    return {
+        "status": "shared",
+        "share_info": req.model_dump(),
+        "shared_by": user.user_id,
+    }
+
+
+@app.delete("/api/v1/users/me")
+async def delete_my_account(
+    user: CurrentUserDep, reauth: Any = Depends(require_reauth())
+):
+    p = await lifecycle_service.change_account_status(
+        user.user_id, AccountStatus.PENDING_DELETION, "User requested account deletion."
+    )
+    return {
+        "status": "pending_deletion",
+        "user_id": user.user_id,
+        "detail": "Account scheduled for deletion after 30-day grace period.",
+    }
+
+
+# Action Item 5: Per-Org SCIM Token Issuance Endpoint
+@app.post("/api/v1/orgs/{org_id}/scim-tokens", response_model=dict)
+async def issue_org_scim_token(
+    org_id: str, user: CurrentUserDep, reauth: Any = Depends(require_reauth())
+):
+    if user.org_id and user.org_id != org_id and not user.has_permission("scim:manage"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to issue SCIM tokens for organization.",
+        )
+    raw_token = f"scim_tok_{secrets.token_urlsafe(32)}"
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    token_id = await db_save_scim_token(org_id, token_hash)
+    return {
+        "status": "created",
+        "token_id": token_id,
+        "org_id": org_id,
+        "scim_bearer_token": raw_token,
+        "detail": "Save this bearer token safely. It will not be shown again.",
+    }

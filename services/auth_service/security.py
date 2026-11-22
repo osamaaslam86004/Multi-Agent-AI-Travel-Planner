@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from services.core.config import get_settings
 
 _settings = get_settings()
+
 ISSUER = _settings.auth.jwt_issuer
 AUDIENCE = _settings.auth.jwt_audience
 ACCESS_TOKEN_EXPIRE_SECONDS = _settings.auth.access_token_expire_seconds
@@ -54,10 +55,9 @@ def compute_rfc7638_kid(pub_key: rsa.RSAPublicKey) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def generate_user_id(email: str) -> str:
-    """Generate stable, deterministic user_id from email using UUIDv5."""
-    target = f"mailto:{email.lower().strip()}"
-    return f"usr_{uuid.uuid5(uuid.NAMESPACE_URL, target).hex}"
+def generate_user_id(email: str | None = None) -> str:
+    """Action Item 6: Generate random internal user_id (usr_{uuid4}) replacing email-derived UUIDv5."""
+    return f"usr_{uuid.uuid4().hex[:16]}"
 
 
 # Argon2id Password Hashing
@@ -95,14 +95,12 @@ def verify_password(password: str, password_hash: str) -> bool:
 # Step 3 (C-6): Deterministic RSA Keypair Loading
 def _initialize_rsa_keys() -> None:
     global _primary_private_key, _previous_private_key
-
     pem_env = _settings.auth.jwt_previous_private_key_pem or os.getenv(
         "JWT_PRIVATE_KEY_PEM"
     )
     path_env = _settings.auth.jwt_previous_private_key_path or os.getenv(
         "JWT_PRIVATE_KEY_PATH"
     )
-
     if _primary_private_key is None:
         if pem_env:
             try:
@@ -119,7 +117,6 @@ def _initialize_rsa_keys() -> None:
                     )
             except Exception:
                 _primary_private_key = None
-
         if _primary_private_key is None:
             if _settings.app.environment.lower() in ("production", "staging"):
                 raise RuntimeError(
@@ -128,7 +125,6 @@ def _initialize_rsa_keys() -> None:
             _primary_private_key = rsa.generate_private_key(
                 public_exponent=65537, key_size=2048, backend=default_backend()
             )
-
     prev_pem = os.getenv("JWT_PREVIOUS_PRIVATE_KEY_PEM")
     if prev_pem and _previous_private_key is None:
         try:

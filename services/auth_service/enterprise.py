@@ -18,7 +18,6 @@ from services.auth_service.models import (
 from services.auth_service.security import generate_user_id
 
 logger = logging.getLogger("travelbrain.auth.enterprise")
-
 _in_memory_idp_configs: dict[str, IdPConfigResponse] = {}
 _in_memory_scim_users: dict[str, SCIMUserSchema] = {}
 _in_memory_scim_groups: dict[str, SCIMGroupSchema] = {}
@@ -27,7 +26,9 @@ _in_memory_scim_groups: dict[str, SCIMGroupSchema] = {}
 class EnterpriseIdentityService:
     """Enterprise SSO and Domain Discovery Service."""
 
-    def discover_sso_by_domain(self, email: str) -> OrgSSODiscoveryResponse | None:
+    async def discover_sso_by_domain(
+        self, email: str
+    ) -> OrgSSODiscoveryResponse | None:
         domain = email.split("@")[-1].lower().strip() if "@" in email else ""
         for org_id, config in _in_memory_idp_configs.items():
             if domain in config.allowed_domains:
@@ -40,10 +41,10 @@ class EnterpriseIdentityService:
                 )
         return None
 
-    def get_idp_config(self, org_id: str) -> IdPConfigResponse | None:
+    async def get_idp_config(self, org_id: str) -> IdPConfigResponse | None:
         return _in_memory_idp_configs.get(org_id)
 
-    def set_idp_config(self, req: IdPConfigRequest) -> IdPConfigResponse:
+    async def set_idp_config(self, req: IdPConfigRequest) -> IdPConfigResponse:
         cfg = IdPConfigResponse(
             org_id=req.org_id,
             idp_name=req.idp_name,
@@ -58,8 +59,10 @@ class EnterpriseIdentityService:
         logger.info(f"Updated IdP config for org '{req.org_id}'")
         return cfg
 
-    def map_idp_groups_to_roles(self, org_id: str, idp_groups: list[str]) -> list[str]:
-        config = self.get_idp_config(org_id)
+    async def map_idp_groups_to_roles(
+        self, org_id: str, idp_groups: list[str]
+    ) -> list[str]:
+        config = await self.get_idp_config(org_id)
         if not config or not config.group_role_mappings:
             return ["member"]
         assigned_roles = set()
