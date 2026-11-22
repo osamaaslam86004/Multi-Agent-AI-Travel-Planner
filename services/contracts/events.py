@@ -2,11 +2,9 @@
 Versioned Event and Stream Payload Contracts for Event-Driven Architecture.
 Supports CloudEvents v1.0 specification with explicit event_versioning.
 """
-
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
-
 from pydantic import BaseModel, Field
 
 T = TypeVar("T")

@@ -371,9 +371,9 @@ async def proxy_logout_all(request: Request, response: Response):
     return {"status": "logged_out_all"}
 
 
-# Step 1 (A-1): Trip Planning & Outbox Fix
-@app.post("/api/v1/plan")
+# Step 1 (A-1): Trip Planning & Outbox Fix (with route alias for frontend)
 @app.post("/api/v1/trips/plan")
+@app.post("/api/v1/plan")
 async def initiate_trip_plan(
     plan_req: TripPlanRequest, request: Request, response: Response
 ):
@@ -405,7 +405,6 @@ async def initiate_trip_plan(
         data=event_payload.model_dump(),
     )
 
-    # Step 1 (A-1): Fix write_outbox positional/keyword parameters
     await write_outbox(
         tenant_id=tenant_id,
         correlation_id=correlation_id,
@@ -422,9 +421,9 @@ async def initiate_trip_plan(
     }
 
 
-# Step 1 (A-3): SSE Streaming Route with Frame Termination
-@app.get("/api/v1/events/stream/{correlation_id}")
+# Step 1 (A-3): SSE Streaming Route with Frame Termination (with route alias for frontend)
 @app.get("/api/v1/trips/{correlation_id}/stream")
+@app.get("/api/v1/events/stream/{correlation_id}")
 async def stream_planning_events(correlation_id: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
     _ = session["user_id"]

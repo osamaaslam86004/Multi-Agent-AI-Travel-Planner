@@ -1,18 +1,18 @@
-from services.core.config import get_settings
-
 """
 Weather Agent background worker subscribing to Redis Streams with OpenTelemetry tracing,
 Structured Logging, Signal-based Graceful Shutdown, and HTTP Health Probes.
 """
+
 import asyncio
 import logging
 import os
-import signal
 
-import redis.asyncio as aioredis
 from aiohttp import web
-from opentelemetry import trace
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+try:
+    import redis.asyncio as aioredis
+except ImportError:
+    aioredis = None
 
 from services.common.event_bus import EventBus
 from services.common.schemas import (
@@ -26,6 +26,7 @@ from services.common.telemetry import (
     set_log_context,
     setup_telemetry,
 )
+from services.core.config import get_settings
 from services.weather_service.provider import WeatherProvider
 
 configure_structured_logging()
@@ -36,6 +37,7 @@ STREAM_OUT = "stream:travel:weather:completed"
 CONSUMER_GROUP = "cg-weather-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"weather-worker-{HOSTNAME}-{os.getpid()}"
+
 setup_telemetry(service_name="weather-service")
 tracer = get_tracer("travelbrain.weather_worker")
 event_bus = EventBus(redis_url=REDIS_URL)
@@ -95,9 +97,7 @@ async def handle_planning_initiated(
     logger.info(
         f"Processing weather search for trip {correlation_id} (query: '{query}', dest: '{destination}')"
     )
-    carrier = {"traceparent": event.traceparent} if event.traceparent else {}
-    otel_ctx = TraceContextTextMapPropagator().extract(carrier)
-    token = trace.use_span(tracer.start_span("weather_worker.search", context=otel_ctx))
+
     try:
         await event_bus.publish_progress(
             correlation_id,
@@ -108,7 +108,8 @@ async def handle_planning_initiated(
             },
         )
         try:
-            provider_res = await provider.search_weather(
+            # Step 1 (A-6): Call provider.get_weather(...) instead of search_weather
+            provider_res = await provider.get_weather(
                 query=query, destination=destination, dates=dates
             )
             out_event = CloudEvent[WeatherResultPayload](
@@ -139,13 +140,7 @@ async def handle_planning_initiated(
                 },
             )
             logger.info(f"Published weather results for trip {correlation_id}")
-        except (
-            aioredis.RedisError,
-            TimeoutError,
-            OSError,
-            RuntimeError,
-            ValueError,
-        ) as exc:
+        except Exception as exc:
             logger.error(f"Weather search failed for trip {correlation_id}: {exc}")
             out_event = CloudEvent[WeatherResultPayload](
                 source="/services/weather-agent",
@@ -164,37 +159,5 @@ async def handle_planning_initiated(
                 ),
             )
             await event_bus.publish(STREAM_OUT, out_event)
-    finally:
-        token.__exit__(None, None, None)
-
-
-async def main():
-    await event_bus.connect()
-    loop = asyncio.get_running_loop()
-
-    def handle_shutdown():
-        logger.info("SIGTERM/SIGINT received. Initiating weather worker drain...")
-        stop_event.set()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, handle_shutdown)
-        except NotImplementedError:
-            pass
-    asyncio.create_task(start_health_server())
-    try:
-        await event_bus.consume(
-            stream_name=STREAM_IN,
-            group_name=CONSUMER_GROUP,
-            consumer_name=CONSUMER_NAME,
-            handler=handle_planning_initiated,
-            stop_event=stop_event,
-        )
-    finally:
-        await provider.close()
-        await event_bus.close()
-        logger.info("Weather worker shutdown complete.")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    except Exception as outer_exc:
+        logger.error(f"Error handling weather event: {outer_exc}")

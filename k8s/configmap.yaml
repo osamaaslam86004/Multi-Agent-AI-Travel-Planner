@@ -14,5 +14,3 @@ data:
   JWT_ISSUER: "https://auth.travelbrain.ai"
   JWT_AUDIENCE: "https://api.travelbrain.ai"
   ENVIRONMENT: "production"
-````
-

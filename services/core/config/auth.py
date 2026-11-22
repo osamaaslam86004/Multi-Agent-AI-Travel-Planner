@@ -19,18 +19,11 @@ class AuthSettings(BaseDomainSettings):
     refresh_token_expire_seconds: int = 604800
     sudo_token_expire_seconds: int = 900
 
-    # Key Management
-    jwt_private_key_pem: str | None = None
-    jwt_private_key_path: str | None = None
-    jwt_previous_private_key_path: str | None = None
-    jwt_previous_private_key_pem: str | None = None
-
-    # Dev / Policy Flags
-    enable_dev_login: bool = True
-
     # Core Auth Service URLs
     auth_service_url: str = "http://auth-service:8001"
     auth_service_jwks_url: str = "http://auth-service:8001/.well-known/jwks.json"
+    jwt_previous_private_key_path: str | None = None
+    jwt_previous_private_key_pem: str | None = None
 
     # OAuth / OIDC Providers Config
     google_client_id: str | None = None
@@ -59,6 +52,7 @@ class AuthSettings(BaseDomainSettings):
     lockout_duration_seconds: int = 900
     enforce_device_trust: bool = False
     enable_suspicious_login_detection: bool = True
+    enable_dev_login: bool = True
 
     @classmethod
     def load(cls) -> "AuthSettings":
@@ -70,11 +64,6 @@ class AuthSettings(BaseDomainSettings):
             "access_token_expire_seconds": "ACCESS_TOKEN_EXPIRE_SECONDS",
             "refresh_token_expire_seconds": "REFRESH_TOKEN_EXPIRE_SECONDS",
             "sudo_token_expire_seconds": "SUDO_TOKEN_EXPIRE_SECONDS",
-            "jwt_private_key_pem": "JWT_PRIVATE_KEY_PEM",
-            "jwt_private_key_path": "JWT_PRIVATE_KEY_PATH",
-            "jwt_previous_private_key_path": "JWT_PREVIOUS_PRIVATE_KEY_PATH",
-            "jwt_previous_private_key_pem": "JWT_PREVIOUS_PRIVATE_KEY_PEM",
-            "enable_dev_login": "ENABLE_DEV_LOGIN",
             "google_client_id": "GOOGLE_CLIENT_ID",
             "google_client_secret": "GOOGLE_CLIENT_SECRET",
             "entra_client_id": "ENTRA_CLIENT_ID",
@@ -94,7 +83,10 @@ class AuthSettings(BaseDomainSettings):
             "lockout_duration_seconds": "LOCKOUT_DURATION_SECONDS",
             "enforce_device_trust": "ENFORCE_DEVICE_TRUST",
             "enable_suspicious_login_detection": "ENABLE_SUSPICIOUS_LOGIN_DETECTION",
+            "enable_dev_login": "ENABLE_DEV_LOGIN",
             "auth_service_url": "AUTH_SERVICE_URL",
             "auth_service_jwks_url": "AUTH_SERVICE_JWKS_URL",
+            "jwt_previous_private_key_path": "JWT_PREVIOUS_PRIVATE_KEY_PATH",
+            "jwt_previous_private_key_pem": "JWT_PREVIOUS_PRIVATE_KEY_PEM",
         }
         return cls.load_from_env(prefix="AUTH", aliases=aliases)

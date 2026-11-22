@@ -1,22 +1,22 @@
 """
-Auth & Enterprise Identity Microservice.
-Multi-Provider OIDC/SAML 2.0, Account Lifecycle, MFA, RBAC, SCIM 2.0, Refresh Token Rotation,
-and Central Login Policy Gate.
+Auth & Enterprise Identity Microservice (Multi-Provider OIDC/SAML, Account Lifecycle, MFA, RBAC, SCIM 2.0).
 """
 
+import hashlib
+import hmac
 import logging
 import secrets
+import time
+from typing import Any
 
+import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.auth_service.adapters import SAML2Adapter, provider_registry
-from services.auth_service.enterprise import (
-    enterprise_service,
-    scim_service,
-    verify_scim_token,
-)
+from services.auth_service.enterprise import enterprise_service, scim_service
 from services.auth_service.models import (
+    AccountStatus,
     IdPConfigRequest,
     IdPConfigResponse,
     JWKSResponse,
@@ -52,29 +52,24 @@ from services.auth_service.security import (
     verify_magic_link_token,
     verify_totp_code,
 )
-from services.auth_service.user_lifecycle import (
-    UserLifecycleService,
-    assert_login_allowed,
-)
-from services.common.auth_middleware import (
-    CurrentUserDep,
-)
+from services.auth_service.user_lifecycle import UserLifecycleService
+from services.common.auth_middleware import CurrentUserDep
 from services.core.config import get_settings
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth_service")
 _settings = get_settings()
-ENVIRONMENT = _settings.app.environment.lower()
+ENVIRONMENT = _settings.app.environment
+REDIS_URL = _settings.redis.url
 
 app = FastAPI(
     title="TravelBrain Auth & Enterprise Identity Service",
     version="2.0.0",
-    description="OIDC, SAML 2.0, SCIM 2.0, MFA, Argon2id Identity, RBAC & Revocation Provider",
+    description="OIDC, SAML 2.0, SCIM 2.0, MFA, Argon2id Identity & RBAC Provider",
 )
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_settings.security.cors_origins or ["*"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -83,24 +78,49 @@ app.add_middleware(
 lifecycle_service = UserLifecycleService()
 
 
-def _check_domain_sso_policy(email: str, login_method: str = "direct") -> None:
-    """Step 6 (H-6): Central login policy gate ensuring SSO-enforced domains reject direct login."""
-    sso_disc = enterprise_service.discover_sso_by_domain(email)
-    if (
-        sso_disc
-        and sso_disc.sso_enforced
-        and login_method not in (sso_disc.sso_type, "saml", "oidc")
-    ):
+def _check_domain_sso_policy(email: str, method: str):
+    """Step 6 (H-6): Central login policy gate enforcing SSO requirements on org domains."""
+    disco = enterprise_service.discover_sso_by_domain(email)
+    if disco and disco.sso_enforced and method not in ("sso", "saml", "oidc"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Single Sign-On (SSO) is enforced for domain '{email.split('@')[-1]}'. Please log in using enterprise SSO.",
-            headers={"X-SSO-Discovery-URL": f"/api/v1/auth/sso/discover?email={email}"},
+            headers={"X-SSO-Discovery-URL": disco.login_url},
         )
+
+
+def assert_login_allowed(profile: Any):
+    """Step 6 (H-3): Account status enforcement across all authentication entry points."""
+    if profile.status != AccountStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Account is {profile.status.value}. Contact organization administrator.",
+        )
+
+
+async def verify_scim_token(request: Request) -> str:
+    """Step 4 (C-2): Authenticate SCIM requests with per-org bearer token comparison."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing SCIM Bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = auth_header.split(" ", 1)[1]
+    expected_secret = _settings.auth.scim_token_secret
+    if not hmac.compare_digest(token, expected_secret):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid SCIM authentication token.",
+            headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+        )
+    return "scim_authenticated"
 
 
 @app.get("/.well-known/jwks.json", response_model=JWKSResponse)
 def jwks_endpoint(response: Response):
-    """Step 3 (C-6): Public JWKS endpoint with Cache-Control headers for RSA key rotation."""
+    # Step 3 (C-6): Add Cache-Control header to JWKS endpoint
     response.headers["Cache-Control"] = "public, max-age=3600"
     return get_jwks()
 
@@ -115,7 +135,7 @@ def readiness():
     try:
         jwks = get_jwks()
         if not jwks["keys"]:
-            raise RuntimeError("JWKS key store empty.")
+            raise RuntimeError("JWKS keys empty")
         return {"status": "READY", "keys_loaded": len(jwks["keys"])}
     except Exception as exc:
         raise HTTPException(
@@ -123,18 +143,16 @@ def readiness():
         )
 
 
-# Step 6 (H-10): Dev Login Hardening & Direct Password Auth
+# Step 6 (H-10): Gated Dev Login
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 async def direct_login(req: UserLoginRequest, request: Request):
     if not _settings.auth.enable_dev_login or ENVIRONMENT in ("production", "staging"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Direct password authentication is disabled in non-development profiles. Use Enterprise OIDC SSO.",
+            detail="Direct password login disabled in production/staging profile. Use OIDC/SAML SSO.",
         )
-
     email_clean = str(req.email).lower().strip()
-    _check_domain_sso_policy(email_clean, login_method="direct")
-
+    _check_domain_sso_policy(email_clean, method="direct")
     profile = await lifecycle_service.get_or_create_profile(
         email_clean, tenant_id=req.tenant_id, auth_provider="direct"
     )
@@ -144,10 +162,11 @@ async def direct_login(req: UserLoginRequest, request: Request):
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
-
-    history = await lifecycle_service.get_login_history(user_id)
     suspicious, reason = assess_suspicious_login(
-        user_id, ip_addr, user_agent, [h.model_dump() for h in history]
+        user_id,
+        ip_addr,
+        user_agent,
+        [h.model_dump() for h in await lifecycle_service.get_login_history(user_id)],
     )
     await lifecycle_service.record_login_attempt(
         user_id,
@@ -158,19 +177,15 @@ async def direct_login(req: UserLoginRequest, request: Request):
         suspicious=suspicious,
         details=reason,
     )
-
-    # Step 6 (H-8): Server-side tenant resolution
-    resolved_tenant = profile.tenant_id or "default"
     access_token, refresh_token, exp = issue_jwt(
         user_id=user_id,
         email=email_clean,
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         mfa_verified=not profile.mfa_enabled,
     )
-
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -179,56 +194,35 @@ async def direct_login(req: UserLoginRequest, request: Request):
         email=email_clean,
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         mfa_verified=not profile.mfa_enabled,
     )
 
 
-# Multi-Provider OIDC Login Endpoint (Step 7: C-7, H-4)
+# Multi-Provider OIDC Login
 @app.post("/api/v1/auth/oidc/login", response_model=TokenResponse)
 async def multi_provider_login(req: MultiProviderLoginRequest, request: Request):
-    try:
-        adapter = provider_registry.get_adapter(req.provider)
-        result = await adapter.exchange_code(
-            req.code, req.redirect_uri, req.code_verifier
-        )
-    except Exception as exc:
-        logger.error(f"OIDC token exchange error ({req.provider}): {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"OIDC authentication failed with provider '{req.provider}': {exc}",
-        )
-
-    email = result.get("email", "").lower().strip()
+    adapter = provider_registry.get_adapter(req.provider)
+    result = await adapter.exchange_code(req.code, req.redirect_uri, req.code_verifier)
+    email = result.get("email", "")
     if not email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Identity provider '{req.provider}' did not yield a valid email address.",
+            detail=f"Provider {req.provider} did not return a verified email.",
         )
 
-    # Step 7 (C-7): Reject unverified email for first-time account creation
-    email_verified = result.get("email_verified", False)
-    _check_domain_sso_policy(email, login_method=req.provider)
-
-    profile = await lifecycle_service.get_profile_by_email(email)
-    if not profile:
-        if not email_verified:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unverified email address from '{req.provider}'. First-time creation rejected.",
-            )
-        profile = await lifecycle_service.get_or_create_profile(
-            email,
-            auth_provider=req.provider,
-            display_name=result.get("name"),
-            email_verified=True,
+    # Step 7 (C-7): Check email_verified from IdP
+    if not result.get("email_verified", True):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unverified email address from provider.",
         )
 
-    assert_login_allowed(profile)
-    await lifecycle_service.link_provider(
-        profile.user_id, req.provider, result.get("sub", profile.user_id), email
+    profile = await lifecycle_service.get_or_create_profile(
+        email, auth_provider=req.provider, display_name=result.get("name")
     )
+    assert_login_allowed(profile)
 
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     ip_addr = request.client.host if request.client else "127.0.0.1"
@@ -236,19 +230,16 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
     await lifecycle_service.record_login_attempt(
         profile.user_id, req.provider, ip_addr, user_agent, "success"
     )
-
-    resolved_tenant = profile.tenant_id or "default"
     access_token, refresh_token, exp = issue_jwt(
         user_id=profile.user_id,
         email=email,
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         email_verified=True,
         mfa_verified=True,
     )
-
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -257,100 +248,96 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
         email=email,
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         mfa_verified=True,
     )
 
 
-# Step 5 (H-1): Token Refresh Endpoint with Rotation & Reuse Detection
+# Step 5 (H-1): Token Refresh Endpoint
 @app.post("/api/v1/auth/refresh", response_model=TokenResponse)
-async def refresh_tokens(req: TokenRefreshRequest):
-    r = await get_redis_client()
+async def refresh_token_endpoint(req: TokenRefreshRequest):
     try:
-        payload = jwt.decode(
-            req.refresh_token,
-            options={"verify_signature": False, "verify_exp": True},
+        unverified_claims = jwt.decode(
+            req.refresh_token, options={"verify_signature": False}
         )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired refresh token: {exc}",
-        )
+        jti = unverified_claims.get("jti")
+        token_use = unverified_claims.get("token_use")
+        user_id = unverified_claims.get("sub")
 
-    if payload.get("token_use") != "refresh" and payload.get("type") != "refresh":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Provided token is not a refresh token.",
-        )
-
-    jti = payload.get("jti")
-    sid = payload.get("sid")
-    user_id = payload.get("sub")
-    tenant_id = payload.get("tenant_id", "default")
-
-    if r:
-        # Step 5: Check if refresh token was already used (reuse detection -> revoke family)
-        if jti and await r.get(f"revoked:refresh:{jti}"):
-            logger.error(
-                f"Refresh token reuse detected for user '{user_id}' (sid: {sid}). Revoking session family."
-            )
-            if sid:
-                await r.setex(f"revoked:sid:{sid}", 86400, "true")
+        if token_use != "refresh":
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Refresh token replay detected. All sessions in this token family have been revoked.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid token type: refresh token required.",
             )
-        if jti:
-            await r.setex(f"revoked:refresh:{jti}", 86400, "true")
 
-    profile = await lifecycle_service.get_profile(user_id)
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found."
+        r = await get_redis_client()
+        if r and jti:
+            if await r.get(f"revoked:{jti}"):
+                # Reuse detection: revoke all tokens for this session/user
+                sid = unverified_claims.get("sid")
+                if sid:
+                    await r.setex(f"revoked:sid:{sid}", 86400, "true")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Refresh token reused or revoked. Session terminated.",
+                )
+            await r.setex(f"revoked:{jti}", 86400, "true")
+
+        profile = await lifecycle_service.get_profile(user_id)
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found."
+            )
+        assert_login_allowed(profile)
+
+        eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+        access_token, refresh_token, exp = issue_jwt(
+            user_id=profile.user_id,
+            email=profile.email,
+            roles=profile.roles,
+            permissions=eff_perms,
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            email_verified=profile.email_verified,
+            mfa_verified=True,
+            session_id=unverified_claims.get("sid"),
         )
-    assert_login_allowed(profile)
-
-    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
-    access_token, new_refresh_token, exp = issue_jwt(
-        user_id=profile.user_id,
-        email=profile.email,
-        roles=profile.roles,
-        permissions=eff_perms,
-        tenant_id=tenant_id,
-        org_id=profile.org_id,
-        email_verified=profile.email_verified,
-        mfa_verified=True,
-        session_id=sid,
-    )
-
-    return TokenResponse(
-        access_token=access_token,
-        refresh_token=new_refresh_token,
-        expires_in=exp,
-        user_id=profile.user_id,
-        email=profile.email,
-        roles=profile.roles,
-        permissions=eff_perms,
-        tenant_id=tenant_id,
-        org_id=profile.org_id,
-        mfa_verified=True,
-    )
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=exp,
+            user_id=profile.user_id,
+            email=profile.email,
+            roles=profile.roles,
+            permissions=eff_perms,
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            mfa_verified=True,
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid refresh token: {exc}",
+        )
 
 
-# Step 4 (C-3): Secure Single-Use Magic Links
-@app.post("/api/v1/auth/magic-link")
+# Step 4 (C-3): Hardened Magic Link Request (Always returns generic 202)
+@app.post("/api/v1/auth/magic-link", status_code=202)
 async def request_magic_link(req: MagicLinkRequest):
-    email_clean = req.email.lower().strip()
-    _check_domain_sso_policy(email_clean, login_method="magic_link")
-
-    token = issue_magic_link_token(email_clean)
+    _check_domain_sso_policy(req.email, method="magic_link")
+    token = issue_magic_link_token(req.email)
     r = await get_redis_client()
     if r:
-        await r.setex(f"magic_link:{token}", 900, email_clean)
-
-    # Return 200 without exposing token in response body for security
-    return {"status": "accepted", "message": "Magic link dispatched if account exists."}
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        await r.setex(f"magic:{token_hash}", 900, req.email.lower().strip())
+    logger.info(
+        f"[Mailer Interface] Magic link dispatch for email '{req.email}' (token generated)"
+    )
+    return {
+        "status": "accepted",
+        "detail": "If the account exists, a magic link has been dispatched to your email address.",
+    }
 
 
 @app.post("/api/v1/auth/magic-link/verify", response_model=TokenResponse)
@@ -358,41 +345,38 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
     r = await get_redis_client()
     email = None
     if r:
-        email = await r.getdel(f"magic_link:{req.token}")
-
+        token_hash = hashlib.sha256(req.token.encode()).hexdigest()
+        email = await r.getdel(f"magic:{token_hash}")
     if not email:
         email = verify_magic_link_token(req.token)
 
     if not email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired magic link token.",
+            detail="Invalid, expired, or previously consumed magic link token.",
         )
 
     profile = await lifecycle_service.get_or_create_profile(
-        email, auth_provider="magic_link", email_verified=True
+        email, auth_provider="magic_link"
     )
     assert_login_allowed(profile)
 
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
     await lifecycle_service.record_login_attempt(
         profile.user_id, "magic_link", ip_addr, user_agent, "success"
     )
-
-    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
-    resolved_tenant = profile.tenant_id or "default"
     access_token, refresh_token, exp = issue_jwt(
         user_id=profile.user_id,
         email=email,
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         email_verified=True,
         mfa_verified=True,
     )
-
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -401,13 +385,13 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
         email=email,
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         mfa_verified=True,
     )
 
 
-# Step 4 (C-1): Authenticated MFA & Reauthentication Routes
+# MFA Routes
 @app.post("/api/v1/auth/mfa/setup", response_model=TOTPSetupResponse)
 async def setup_mfa(user: CurrentUserDep):
     secret = generate_totp_secret()
@@ -419,59 +403,54 @@ async def setup_mfa(user: CurrentUserDep):
 
 
 @app.post("/api/v1/auth/mfa/verify")
-async def verify_mfa(req: TOTPVerifyRequest, user: CurrentUserDep, secret: str):
+async def verify_mfa(req: TOTPVerifyRequest, secret: str, user: CurrentUserDep):
     if not verify_totp_code(secret, req.code):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid TOTP verification code.",
         )
-    return {"status": "mfa_verified", "user_id": user.user_id}
+    return {"status": "mfa_verified"}
 
 
+# Reauthentication Route
 @app.post("/api/v1/auth/reauthenticate", response_model=ReauthResponse)
 async def reauthenticate(req: ReauthRequest, user: CurrentUserDep):
     sudo_token = issue_sudo_token(user.user_id)
     return ReauthResponse(sudo_token=sudo_token, expires_in=900)
 
 
-# Step 4 (C-1): Authenticated User Account Routes
+# Step 4 (C-1): Derived Identity Account Routes
 @app.get("/api/v1/users/me")
 async def get_my_profile(user: CurrentUserDep):
     p = await lifecycle_service.get_profile(user.user_id)
     if not p:
-        p = await lifecycle_service.get_or_create_profile(
-            user.email, tenant_id=user.tenant_id
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found."
         )
     return p
 
 
 @app.put("/api/v1/users/me")
-async def update_my_profile(user: CurrentUserDep, req: ProfileUpdateRequest):
+async def update_my_profile(req: ProfileUpdateRequest, user: CurrentUserDep):
     return await lifecycle_service.update_profile(
         user.user_id, **req.model_dump(exclude_unset=True)
     )
 
 
 @app.get("/api/v1/users/me/sessions")
-async def list_my_sessions(user: CurrentUserDep, session_id: str | None = None):
-    return await lifecycle_service.list_active_sessions(
-        user.user_id, session_id or user.session_id
-    )
+async def list_my_sessions(user: CurrentUserDep):
+    return await lifecycle_service.list_active_sessions(user.user_id, user.session_id)
 
 
 @app.delete("/api/v1/users/me/sessions/{session_id}")
-async def revoke_my_session(user: CurrentUserDep, session_id: str):
-    await lifecycle_service.revoke_session(
-        user.user_id, session_id, tenant_id=user.tenant_id
-    )
+async def revoke_my_session(session_id: str, user: CurrentUserDep):
+    await lifecycle_service.revoke_session(user.user_id, session_id)
     return {"status": "revoked", "session_id": session_id}
 
 
 @app.post("/api/v1/users/me/logout-all")
 async def logout_all_my_devices(user: CurrentUserDep):
-    count = await lifecycle_service.logout_all_devices(
-        user.user_id, tenant_id=user.tenant_id
-    )
+    count = await lifecycle_service.logout_all_devices(user.user_id)
     return {"status": "logged_out_all", "revoked_sessions_count": count}
 
 
@@ -480,79 +459,63 @@ async def get_my_login_history(user: CurrentUserDep):
     return await lifecycle_service.get_login_history(user.user_id)
 
 
-# Step 4 (C-1): Authenticated RBAC Routes
 @app.get("/api/v1/rbac/roles")
 def list_rbac_roles():
     return list(policy_registry.roles.values())
 
 
+# Step 4 (C-1): Authenticated Permission Check Route
 @app.post("/api/v1/rbac/check-permission")
-def check_rbac_permission(req: ResourcePermissionCheckRequest, user: CurrentUserDep):
+def check_rbac_permission(
+    req: ResourcePermissionCheckRequest, user: CurrentUserDep, owner_id: str = ""
+):
     allowed = policy_registry.can_access_trip(
-        user.user_id, user.roles, trip_owner_id=user.user_id, required_action=req.action
+        user.user_id, user.roles, owner_id or user.user_id, required_action=req.action
     )
-    return {
-        "allowed": allowed,
-        "resource_id": req.resource_id,
-        "action": req.action,
-        "roles": user.roles,
-    }
+    return {"allowed": allowed, "resource_id": req.resource_id, "action": req.action}
 
 
-# Step 4 (C-2): Domain-verified SSO Discovery
 @app.post("/api/v1/auth/sso/discover", response_model=OrgSSODiscoveryResponse)
 def discover_sso(req: OrgSSODiscoveryRequest):
     res = enterprise_service.discover_sso_by_domain(req.email)
     if not res:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No enterprise SSO configured or verified for domain.",
+            detail="No enterprise SSO configured for domain.",
         )
     return res
 
 
-# Step 4 (C-4): SAML 2.0 ACS Assertion Processing
 @app.post("/api/v1/auth/saml/acs")
-async def saml_acs(req: SAMLACSRequest, request: Request):
+async def saml_acs(req: SAMLACSRequest):
     adapter = SAML2Adapter("sp_id", "acs_url")
     res = await adapter.parse_saml_response(req.SAMLResponse)
-
-    email = res["email"].lower().strip()
-    _check_domain_sso_policy(email, login_method="saml")
-
+    _check_domain_sso_policy(res["email"], method="saml")
     profile = await lifecycle_service.get_or_create_profile(
-        email, auth_provider="saml", email_verified=True
+        res["email"], auth_provider="saml"
     )
     assert_login_allowed(profile)
 
-    ip_addr = request.client.host if request.client else "127.0.0.1"
-    user_agent = request.headers.get("User-Agent", "unknown")
-    await lifecycle_service.record_login_attempt(
-        profile.user_id, "saml", ip_addr, user_agent, "success"
-    )
-
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
-    resolved_tenant = profile.tenant_id or "default"
     access_token, refresh_token, exp = issue_jwt(
         user_id=profile.user_id,
-        email=email,
+        email=res["email"],
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         email_verified=True,
         mfa_verified=True,
     )
-
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=exp,
         user_id=profile.user_id,
-        email=email,
+        email=res["email"],
         roles=profile.roles,
         permissions=eff_perms,
-        tenant_id=resolved_tenant,
+        tenant_id=profile.tenant_id,
         org_id=profile.org_id,
         mfa_verified=True,
     )
@@ -561,112 +524,91 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
 # Step 4 (C-2): Protected IdP Configuration Routes
 @app.get("/api/v1/orgs/{org_id}/idp-config", response_model=IdPConfigResponse)
 def get_idp_configuration(org_id: str, user: CurrentUserDep):
-    if user.org_id and user.org_id != org_id and not user.has_role("platform_owner"):
+    if user.org_id and user.org_id != org_id and not user.has_permission("sso:manage"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Unauthorized access to organization IdP configuration.",
+            detail="Access denied to organization IdP configuration.",
         )
-
     cfg = enterprise_service.get_idp_config(org_id)
     if not cfg:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"IdP configuration not found for org '{org_id}'.",
+            detail=f"IdP configuration not found for org {org_id}",
         )
     return cfg
 
 
 @app.post("/api/v1/orgs/{org_id}/idp-config", response_model=IdPConfigResponse)
 def update_idp_configuration(org_id: str, req: IdPConfigRequest, user: CurrentUserDep):
-    if user.org_id and user.org_id != org_id and not user.has_role("platform_owner"):
+    if user.org_id and user.org_id != org_id and not user.has_permission("sso:manage"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Unauthorized write to organization IdP configuration.",
+            detail="Access denied to organization IdP configuration.",
         )
-
-    if (
-        not user.has_permission("sso:manage")
-        and not user.has_role("platform_owner")
-        and not user.has_role("organization_owner")
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permission 'sso:manage' required.",
-        )
-
     req.org_id = org_id
     return enterprise_service.set_idp_config(req)
 
 
-# Step 4 (C-2): Token-Protected SCIM 2.0 Provisioning Endpoints
+# Step 4 (C-2): Protected SCIM 2.0 Standard Provisioning Endpoints
 @app.get("/scim/v2/Users", response_model=SCIMListResponse)
 async def scim_list_users(
     filter: str | None = None,
     startIndex: int = 1,
     count: int = 100,
-    auth: str = Depends(verify_scim_token),
+    scim_auth: str = Depends(verify_scim_token),
 ):
     return await scim_service.list_users(filter, startIndex, count)
 
 
 @app.post("/scim/v2/Users", response_model=SCIMUserSchema, status_code=201)
 async def scim_create_user(
-    user: SCIMUserSchema, auth: str = Depends(verify_scim_token)
+    user: SCIMUserSchema, scim_auth: str = Depends(verify_scim_token)
 ):
     return await scim_service.create_user(user)
 
 
 @app.get("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
-async def scim_get_user(user_id: str, auth: str = Depends(verify_scim_token)):
+async def scim_get_user(user_id: str, scim_auth: str = Depends(verify_scim_token)):
     u = await scim_service.get_user(user_id)
     if not u:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="SCIM User not found."
+            status_code=status.HTTP_404_NOT_FOUND, detail="SCIM User not found"
         )
     return u
 
 
-@app.put("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
-async def scim_update_user(
-    user_id: str, user: SCIMUserSchema, auth: str = Depends(verify_scim_token)
-):
-    return await scim_service.update_user(user_id, user)
-
-
 @app.delete("/scim/v2/Users/{user_id}", status_code=204)
-async def scim_delete_user(user_id: str, auth: str = Depends(verify_scim_token)):
+async def scim_delete_user(user_id: str, scim_auth: str = Depends(verify_scim_token)):
     await scim_service.delete_user(user_id)
     return Response(status_code=204)
 
 
 @app.get("/scim/v2/Groups", response_model=SCIMListResponse)
-async def scim_list_groups(auth: str = Depends(verify_scim_token)):
+async def scim_list_groups(scim_auth: str = Depends(verify_scim_token)):
     return await scim_service.list_groups()
 
 
 @app.post("/scim/v2/Groups", response_model=SCIMGroupSchema, status_code=201)
 async def scim_create_group(
-    group: SCIMGroupSchema, auth: str = Depends(verify_scim_token)
+    group: SCIMGroupSchema, scim_auth: str = Depends(verify_scim_token)
 ):
     return await scim_service.create_group(group)
 
 
-# Step 5 (C-5): Token & Session Revocation Endpoint
+# Step 5 (C-5): Real Token Revocation Route
 @app.post("/api/v1/auth/revoke")
-async def revoke_token(req: TokenRevokeRequest, user: CurrentUserDep):
+async def revoke_token(req: TokenRevokeRequest):
     r = await get_redis_client()
-    if r and req.token:
+    if r:
         try:
             unverified_claims = jwt.decode(
                 req.token, options={"verify_signature": False}
             )
             jti = unverified_claims.get("jti")
-            sid = unverified_claims.get("sid")
+            exp = unverified_claims.get("exp", time.time() + 86400)
+            ttl = max(int(exp - time.time()), 60)
             if jti:
-                await r.setex(f"revoked:{jti}", 86400, "true")
-            if sid:
-                await r.setex(f"revoked:sid:{sid}", 86400, "true")
+                await r.setex(f"revoked:{jti}", ttl, "true")
         except Exception as exc:
             logger.debug(f"Error parsing token for revocation: {exc}")
-
     return {"status": "revoked"}

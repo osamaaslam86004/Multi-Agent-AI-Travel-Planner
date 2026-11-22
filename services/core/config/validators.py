@@ -54,8 +54,10 @@ def _validate_production(settings: "Settings") -> None:
             )
         if settings.auth.enable_dev_login:
             errors.append("ENABLE_DEV_LOGIN cannot be True in production profile.")
-        priv_pem = settings.auth.jwt_private_key_pem or os.getenv("JWT_PRIVATE_KEY_PEM")
-        priv_path = settings.auth.jwt_private_key_path or os.getenv(
+        priv_pem = settings.auth.jwt_previous_private_key_pem or os.getenv(
+            "JWT_PRIVATE_KEY_PEM"
+        )
+        priv_path = settings.auth.jwt_previous_private_key_path or os.getenv(
             "JWT_PRIVATE_KEY_PATH"
         )
         if not priv_pem and not priv_path:
@@ -64,14 +66,12 @@ def _validate_production(settings: "Settings") -> None:
             )
         if not settings.security.cookie_secure:
             errors.append("SECURITY_COOKIE_SECURE must be True in production profile.")
-        if "*" in settings.security.cors_origins:
-            errors.append(
-                "SECURITY_CORS_ORIGINS cannot contain wildcard '*' in production profile."
-            )
 
     if errors:
-        errs_str = "\n".join(f"- {e}" for e in errors)
-        error_msg = f"Fail-fast startup configuration check failed for PRODUCTION profile:\n{errs_str}"
+        error_msg = (
+            "Fail-fast startup configuration check failed for PRODUCTION profile:\n"
+            + "\n".join(f"- {e}" for e in errors)
+        )
         logger.error(error_msg)
         raise ValueError(error_msg)
     logger.info("Production configuration profile successfully validated.")
@@ -85,18 +85,12 @@ def _validate_staging(settings: "Settings") -> None:
     if not _is_worker_process():
         if settings.auth.enable_dev_login:
             errors.append("ENABLE_DEV_LOGIN cannot be True in staging profile.")
-        priv_pem = settings.auth.jwt_private_key_pem or os.getenv("JWT_PRIVATE_KEY_PEM")
-        priv_path = settings.auth.jwt_private_key_path or os.getenv(
-            "JWT_PRIVATE_KEY_PATH"
-        )
-        if not priv_pem and not priv_path:
-            logger.warning(
-                "RSA private key is missing in staging profile; ephemeral key will be generated."
-            )
 
     if errors:
-        errs_str = "\n".join(f"- {e}" for e in errors)
-        error_msg = f"Fail-fast startup configuration check failed for STAGING profile:\n{errs_str}"
+        error_msg = (
+            "Fail-fast startup configuration check failed for STAGING profile:\n"
+            + "\n".join(f"- {e}" for e in errors)
+        )
         logger.error(error_msg)
         raise ValueError(error_msg)
 

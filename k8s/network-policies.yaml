@@ -1,4 +1,4 @@
-# Kubernetes NetworkPolicies enforcing Default-Deny and Least-Privilege Inter-Service Isolation
+# Step 8 (A-5): Kubernetes NetworkPolicies with exact Pod Selectors & CoreDNS Egress
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,7 +20,9 @@ spec:
   policyTypes:
     - Egress
   egress:
-    - ports:
+    - to:
+        - namespaceSelector: {}
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
@@ -52,22 +54,11 @@ spec:
           port: 8001
     - to:
         - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - redis-broker-service
-                  - redis-cache-service
-                  - redis-service
-                  - redis
+            matchLabels:
+              app: redis-broker-service
       ports:
         - protocol: TCP
           port: 6379
-    - ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -92,152 +83,15 @@ spec:
   egress:
     - to:
         - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - redis-broker-service
-                  - redis-cache-service
-                  - redis-service
-                  - redis
+            matchLabels:
+              app: redis-broker-service
       ports:
         - protocol: TCP
           port: 6379
     - to:
         - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - postgres-service
-                  - postgres
-      ports:
-        - protocol: TCP
-          port: 5432
-    - ports:
-        - protocol: TCP
-          port: 443
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-domain-workers
-  namespace: travelbrain
-spec:
-  podSelector:
-    matchExpressions:
-      - key: app
-        operator: In
-        values:
-          - flight-service
-          - hotel-service
-          - weather-service
-          - synthesis-service
-          - trip-store-service
-  policyTypes:
-    - Ingress
-    - Egress
-  egress:
-    - to:
-        - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - redis-broker-service
-                  - redis-cache-service
-                  - redis-service
-                  - redis
-      ports:
-        - protocol: TCP
-          port: 6379
-    - to:
-        - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - postgres-service
-                  - postgres
-      ports:
-        - protocol: TCP
-          port: 5432
-    - ports:
-        - protocol: TCP
-          port: 443
-        - protocol: TCP
-          port: 80
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-redis-services
-  namespace: travelbrain
-spec:
-  podSelector:
-    matchExpressions:
-      - key: app
-        operator: In
-        values:
-          - redis-broker-service
-          - redis-cache-service
-          - redis-service
-          - redis
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
             matchLabels:
-              app: bff-gateway
-        - podSelector:
-            matchLabels:
-              app: auth-service
-        - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - flight-service
-                  - hotel-service
-                  - weather-service
-                  - synthesis-service
-                  - trip-store-service
-      ports:
-        - protocol: TCP
-          port: 6379
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-postgres-service
-  namespace: travelbrain
-spec:
-  podSelector:
-    matchExpressions:
-      - key: app
-        operator: In
-        values:
-          - postgres-service
-          - postgres
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app: auth-service
-        - podSelector:
-            matchLabels:
-              app: trip-store-service
+              app: postgres-service
       ports:
         - protocol: TCP
           port: 5432

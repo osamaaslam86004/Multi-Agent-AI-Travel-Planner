@@ -9,7 +9,7 @@ import logging
 from services.auth_service.models import RoleDefinition
 
 logger = logging.getLogger("travelbrain.auth.rbac")
-# Standard Roles definition (Section 2.3)
+
 ROLES_CATALOG: dict[str, RoleDefinition] = {
     "platform_owner": RoleDefinition(
         name="Platform Owner",
@@ -86,7 +86,6 @@ ROLES_CATALOG: dict[str, RoleDefinition] = {
         description="Read-only access to shared resources",
         permissions=["trips:read_shared"],
     ),
-    # Backward compatibility aliases
     "traveler": RoleDefinition(
         name="Traveler",
         scope="tenant",

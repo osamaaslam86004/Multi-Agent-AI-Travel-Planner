@@ -27,7 +27,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: auth-service
-          image: ghcr.io/travelbrain/auth-service:v2.0.0@sha256:7a89b02a2810f545464ad5bcf76a89c894ef937e23a45e4a4b123456789abcde
+          image: ghcr.io/travelbrain/auth-service:v2.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8001
@@ -46,16 +46,16 @@ spec:
                 secretKeyRef:
                   name: travelbrain-secrets
                   key: POSTGRES_PASSWORD
-            - name: GOOGLE_CLIENT_ID
+            - name: JWT_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: travelbrain-secrets
-                  key: GOOGLE_CLIENT_ID
-            - name: GOOGLE_CLIENT_SECRET
+                  key: JWT_SECRET_KEY
+            - name: SCIM_TOKEN_SECRET
               valueFrom:
                 secretKeyRef:
                   name: travelbrain-secrets
-                  key: GOOGLE_CLIENT_SECRET
+                  key: SCIM_TOKEN_SECRET
             - name: JWT_PRIVATE_KEY_PEM
               valueFrom:
                 secretKeyRef:
@@ -100,5 +100,3 @@ spec:
     - name: http
       port: 8001
       targetPort: 8001
-````
-

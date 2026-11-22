@@ -21,19 +21,6 @@ spec:
         app: bff-gateway
     spec:
       terminationGracePeriodSeconds: 30
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app: bff-gateway
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app: bff-gateway
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -41,15 +28,11 @@ spec:
         fsGroup: 10001
       containers:
         - name: gateway
-          image: ghcr.io/travelbrain/bff-gateway:v2.0.0@sha256:8b99c03b3921f656575be6cdf87b90d985fg048f34b56f5b5c23456789bcdefa
+          image: ghcr.io/travelbrain/bff-gateway:v2.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
               name: http
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sleep", "10"]
           envFrom:
             - configMapRef:
                 name: travelbrain-config
@@ -59,6 +42,11 @@ spec:
                 secretKeyRef:
                   name: travelbrain-secrets
                   key: REDIS_PASSWORD
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: JWT_SECRET_KEY
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
@@ -98,32 +86,3 @@ spec:
     - name: http
       port: 80
       targetPort: 8000
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: bff-gateway-hpa
-  namespace: travelbrain
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: bff-gateway
-  minReplicas: 3
-  maxReplicas: 20
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: External
-      external:
-        metric:
-          name: travelbrain_active_sse_connections
-        target:
-          type: Value
-          averageValue: "50"
-````
-
