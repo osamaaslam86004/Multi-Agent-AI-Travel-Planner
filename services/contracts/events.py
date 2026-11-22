@@ -5,7 +5,7 @@ Supports CloudEvents v1.0 specification with explicit event_versioning.
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -26,17 +26,17 @@ class CloudEventV1(BaseModel, Generic[T]):
     data: T
 
 
-# Domain Payloads
+# Domain Payloads (Phase 1)
 class PlanningInitiatedPayload(BaseModel):
     correlation_id: str
     user_id: str
     tenant_id: str = "default"
     user_query: str
-    destination: Optional["str"] = None
-    departure_city: Optional["str"] = None
-    start_date: Optional["str"] = None
-    end_date: Optional["str"] = None
-    dates: Optional["str"] = None
+    destination: str | None = None
+    departure_city: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    dates: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -50,7 +50,7 @@ class FlightResultPayload(BaseModel):
     source: str = "unknown"
     degraded: bool = False
     cached: bool = False
-    error: Optional["str"] = None
+    error: str | None = None
 
 
 class HotelResultPayload(BaseModel):
@@ -63,7 +63,7 @@ class HotelResultPayload(BaseModel):
     source: str = "unknown"
     degraded: bool = False
     cached: bool = False
-    error: Optional["str"] = None
+    error: str | None = None
 
 
 class WeatherResultPayload(BaseModel):
@@ -76,7 +76,7 @@ class WeatherResultPayload(BaseModel):
     source: str = "unknown"
     degraded: bool = False
     cached: bool = False
-    error: Optional["str"] = None
+    error: str | None = None
 
 
 class SynthesisCompletedPayload(BaseModel):
@@ -115,3 +115,50 @@ class LLMUsagePayload(BaseModel):
     total_tokens: int
     latency_ms: float
     cost_estimate: float
+
+
+# Domain Payloads (Phase 2: Enterprise Identity & Auth Lifecycle)
+class UserAccountCreatedPayload(BaseModel):
+    user_id: str
+    email: str
+    tenant_id: str = "default"
+    org_id: str | None = None
+    auth_provider: str = "direct"
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class UserStatusChangedPayload(BaseModel):
+    user_id: str
+    email: str
+    previous_status: str
+    new_status: str
+    reason: str | None = None
+    changed_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class SSOLoginEventPayload(BaseModel):
+    user_id: str
+    email: str
+    org_id: str
+    idp_provider: str
+    ip_address: str
+    user_agent: str
+    suspicious: bool = False
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class SCIMUserProvisionedPayload(BaseModel):
+    user_id: str
+    email: str
+    org_id: str
+    action: str  # create, update, deactivate, delete
+    scim_external_id: str | None = None
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class RoleAssignedPayload(BaseModel):
+    user_id: str
+    org_id: str | None = None
+    role: str
+    assigned_by: str
+    assigned_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())

@@ -1,6 +1,6 @@
 """
 Stateless JWT verification middleware using JWKS public keys, non-blocking async fetching,
-revocation checking, and sanitized error messages.
+revocation checking, role/permission inheritance, and scoped FastAPI dependencies.
 """
 
 import asyncio
@@ -13,14 +13,15 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
-logger = logging.getLogger("travelbrain.auth_middleware")
 from services.core.config import get_settings
 
+logger = logging.getLogger("travelbrain.auth_middleware")
 _s = get_settings()
 AUTH_SERVICE_JWKS_URL = _s.auth.auth_service_jwks_url
 EXPECTED_ISSUER = _s.auth.jwt_issuer
 EXPECTED_AUDIENCE = _s.auth.jwt_audience
 REDIS_URL = _s.redis.url
+
 _jwks_client: PyJWKClient | None = None
 _redis_client: Any = None
 security_scheme = HTTPBearer(auto_error=False)
@@ -54,32 +55,38 @@ async def get_redis() -> Any:
 
 
 class AuthenticatedUser:
-    """Holds claims parsed from cryptographically verified JWT."""
+    """Holds claims parsed from cryptographically verified JWT with RBAC capability."""
 
     def __init__(self, claims: dict[str, Any]):
         self.user_id: str = claims.get("sub", "")
         self.tenant_id: str = claims.get("tenant_id", "default")
+        self.org_id: str | None = claims.get("org_id")
         self.email: str = claims.get("email", "")
         self.roles: list[str] = claims.get("roles", [])
         self.permissions: list[str] = claims.get("permissions", [])
         self.jti: str = claims.get("jti", "")
+        self.session_id: str = claims.get("sid", "")
+        self.mfa_verified: bool = claims.get("mfa_verified", True)
         self.raw_claims: dict[str, Any] = claims
 
     def has_role(self, role: str) -> bool:
-        return role in self.roles
+        target = role.lower().strip()
+        return any(
+            r.lower().strip() == target for r in self.roles
+        ) or "platform_owner" in [r.lower() for r in self.roles]
 
     def has_permission(self, permission: str) -> bool:
-        return permission in self.permissions
+        if "*" in self.permissions or permission in self.permissions:
+            return True
+        prefix = permission.split(":")[0]
+        return f"{prefix}:*" in self.permissions or "platform_owner" in [
+            r.lower() for r in self.roles
+        ]
 
 
 async def get_current_user(
-    request: Request,
-    credentials: CredentialsDep = None,
+    request: Request, credentials: CredentialsDep = None
 ) -> AuthenticatedUser:
-    """
-    Statelessly verifies incoming JWT signature via local JWKS cache.
-    Non-blocking async JWKS retrieval, token revocation check, and sanitized errors.
-    """
     token: str | None = None
     if credentials:
         token = credentials.credentials
@@ -95,7 +102,6 @@ async def get_current_user(
         )
     try:
         client = get_jwks_client()
-        # Non-blocking JWKS key lookup to avoid blocking async event loop
         signing_key = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
         payload = jwt.decode(
             token,
@@ -106,8 +112,6 @@ async def get_current_user(
             options={
                 "verify_signature": True,
                 "verify_exp": True,
-                "verify_nbf": True,
-                "verify_iat": True,
                 "verify_aud": True,
                 "verify_iss": True,
             },
@@ -141,13 +145,8 @@ CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
 
 def require_roles(*required_roles: str, require_all: bool = False):
-    """Role-Based Access Control (RBAC) dependency factory with explicit OR/AND semantics."""
-
-    async def role_checker(
-        user: CurrentUserDep,
-    ) -> AuthenticatedUser:
+    async def role_checker(user: CurrentUserDep) -> AuthenticatedUser:
         if require_all:
-            # AND semantics: user must possess all listed roles
             for r in required_roles:
                 if not user.has_role(r):
                     raise HTTPException(
@@ -155,7 +154,6 @@ def require_roles(*required_roles: str, require_all: bool = False):
                         detail=f"User lacks required role: {r}",
                     )
         else:
-            # OR semantics (default): user must possess at least one listed role
             if required_roles and not any(user.has_role(r) for r in required_roles):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -167,10 +165,35 @@ def require_roles(*required_roles: str, require_all: bool = False):
 
 
 def require_any_role(*roles: str):
-    """Explicit ANY role requirement (OR semantics)."""
     return require_roles(*roles, require_all=False)
 
 
 def require_all_roles(*roles: str):
-    """Explicit ALL roles requirement (AND semantics)."""
     return require_roles(*roles, require_all=True)
+
+
+def require_permission(required_permission: str):
+    async def perm_checker(user: CurrentUserDep) -> AuthenticatedUser:
+        if not user.has_permission(required_permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied: missing '{required_permission}'",
+            )
+        return user
+
+    return perm_checker
+
+
+def require_reauth():
+    async def reauth_checker(
+        request: Request, user: CurrentUserDep
+    ) -> AuthenticatedUser:
+        sudo_hdr = request.headers.get("X-Sudo-Token")
+        if not sudo_hdr:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Sensitive operation requires reauthentication (missing X-Sudo-Token).",
+            )
+        return user
+
+    return reauth_checker

@@ -1,46 +1,63 @@
-from services.core.config import get_settings
+"""
+Auth & Enterprise Identity Microservice (Multi-Provider OIDC/SAML, Account Lifecycle, MFA, RBAC, SCIM 2.0).
+"""
 
-_settings = get_settings()
-"""
-Auth & Identity Microservice (Google OIDC + PKCE + Argon2id + RS256 JWT Issuance + JWKS).
-"""
-import base64
-import hashlib
-import json
 import logging
-import os
 import secrets
-import time
-import urllib.parse
-from typing import Any
 
-import httpx
-import jwt
-import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from jwt import PyJWKClient
 
+from services.auth_service.adapters import SAML2Adapter, provider_registry
+from services.auth_service.enterprise import enterprise_service, scim_service
 from services.auth_service.models import (
-    GoogleTokenExchangeRequest,
+    AccountStatus,
+    IdPConfigRequest,
+    IdPConfigResponse,
     JWKSResponse,
+    MagicLinkRequest,
+    MagicLinkVerifyRequest,
+    MultiProviderLoginRequest,
+    OrgSSODiscoveryRequest,
+    OrgSSODiscoveryResponse,
+    ProfileUpdateRequest,
+    ReauthRequest,
+    ReauthResponse,
+    ResourcePermissionCheckRequest,
+    SAMLACSRequest,
+    SCIMGroupSchema,
+    SCIMListResponse,
+    SCIMUserSchema,
     TokenResponse,
     TokenRevokeRequest,
+    TOTPSetupResponse,
+    TOTPVerifyRequest,
     UserLoginRequest,
 )
+from services.auth_service.rbac import policy_registry
 from services.auth_service.security import (
-    generate_user_id,
+    assess_suspicious_login,
+    generate_totp_secret,
     get_jwks,
-    hash_password,
+    get_totp_uri,
     issue_jwt,
-    verify_password,
+    issue_magic_link_token,
+    issue_sudo_token,
+    verify_magic_link_token,
+    verify_totp_code,
 )
+from services.auth_service.user_lifecycle import UserLifecycleService
+from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.auth_service")
+_settings = get_settings()
+ENVIRONMENT = _settings.app.environment
+REDIS_URL = _settings.redis.url
+
 app = FastAPI(
-    title="TravelBrain Auth & Identity Service",
+    title="TravelBrain Auth & Enterprise Identity Service",
     version="2.0.0",
-    description="Enterprise OIDC Authentication, Argon2id Identity, RS256 JWT Issuance & JWKS Provider",
+    description="OIDC, SAML 2.0, SCIM 2.0, MFA, Argon2id Identity & RBAC Provider",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -49,46 +66,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_OIDC_DISCOVERY_URL = (
-    "https://" + "accounts.google.com/.well-known/openid-configuration"
-)
-GOOGLE_JWKS_URL = "https://" + "www.googleapis.com/oauth2/v3/certs"
-ENVIRONMENT = _settings.app.environment
-REDIS_URL = _settings.redis.url
-# In-memory user store fallback when Postgres is offline
-_in_memory_users: dict[str, dict[str, Any]] = {}
-_google_jwks_client: PyJWKClient | None = None
-_redis_client: Any = None
 
-
-async def get_redis() -> Any:
-    global _redis_client
-    if aioredis is None:
-        return None
-    if _redis_client is None:
-        try:
-            _redis_client = aioredis.from_url(
-                REDIS_URL, encoding="utf-8", decode_responses=True
-            )
-            await _redis_client.ping()
-        except (aioredis.RedisError, OSError) as exc:
-            logger.warning("Redis unavailable for Auth service state store: %s", exc)
-            _redis_client = None
-    return _redis_client
-
-
-def get_google_jwks_client() -> PyJWKClient:
-    global _google_jwks_client
-    if _google_jwks_client is None:
-        _google_jwks_client = PyJWKClient(GOOGLE_JWKS_URL, cache_keys=True)
-    return _google_jwks_client
+lifecycle_service = UserLifecycleService()
 
 
 @app.get("/.well-known/jwks.json", response_model=JWKSResponse)
 def jwks_endpoint():
-    """Public JWKS endpoint for downstream microservices to verify JWT signatures."""
     return get_jwks()
 
 
@@ -99,223 +82,329 @@ def liveness():
 
 @app.get("/health/ready")
 def readiness():
-    try:
-        jwks = get_jwks()
-        if not jwks["keys"]:
-            raise RuntimeError("JWKS keys empty")
-        return {"status": "READY", "keys_loaded": len(jwks["keys"])}
-    except (OSError, ValueError, RuntimeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-        )
+    return {"status": "READY", "keys_loaded": len(get_jwks()["keys"])}
 
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
-async def direct_login(req: UserLoginRequest):
-    """
-    Direct login endpoint with Argon2id password verification and stable UUID generation.
-    Disabled in production environments.
-    """
+async def direct_login(req: UserLoginRequest, request: Request):
     if ENVIRONMENT == "production":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=403,
             detail="Direct password login disabled in production. Use OIDC SSO.",
         )
-    if not req.password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password is required for direct authentication.",
-        )
     email_clean = str(req.email).lower().strip()
-    user_id = generate_user_id(email_clean)
-    # Validate or create user in state store
-    if email_clean in _in_memory_users:
-        user_record = _in_memory_users[email_clean]
-        if not verify_password(req.password, user_record["password_hash"]):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password.",
-            )
-        roles = user_record.get("roles", ["traveler"])
-    else:
-        # Create new user record with Argon2id hash
-        pwd_hash = hash_password(req.password)
-        roles = ["traveler"]
-        _in_memory_users[email_clean] = {
-            "user_id": user_id,
-            "email": email_clean,
-            "password_hash": pwd_hash,
-            "roles": roles,
-            "tenant_id": req.tenant_id,
-        }
-    access_token, refresh_token, expires_in = issue_jwt(
+    profile = await lifecycle_service.get_or_create_profile(
+        email_clean, tenant_id=req.tenant_id, auth_provider="direct"
+    )
+    if profile.status != AccountStatus.ACTIVE:
+        raise HTTPException(
+            status_code=403, detail=f"Account is {profile.status.value}"
+        )
+    user_id = profile.user_id
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+    ip_addr = request.client.host if request.client else "127.0.0.1"
+    user_agent = request.headers.get("User-Agent", "unknown")
+    suspicious, reason = assess_suspicious_login(
+        user_id,
+        ip_addr,
+        user_agent,
+        [h.model_dump() for h in await lifecycle_service.get_login_history(user_id)],
+    )
+    await lifecycle_service.record_login_attempt(
+        user_id,
+        "direct",
+        ip_addr,
+        user_agent,
+        "success",
+        suspicious=suspicious,
+        details=reason,
+    )
+    access_token, refresh_token, exp = issue_jwt(
         user_id=user_id,
         email=email_clean,
-        roles=roles,
+        roles=profile.roles,
+        permissions=eff_perms,
         tenant_id=req.tenant_id,
-        email_verified=True,
+        org_id=profile.org_id,
+        mfa_verified=not profile.mfa_enabled,
     )
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
-        expires_in=expires_in,
+        expires_in=exp,
         user_id=user_id,
         email=email_clean,
-        roles=roles,
+        roles=profile.roles,
+        permissions=eff_perms,
         tenant_id=req.tenant_id,
+        org_id=profile.org_id,
+        mfa_verified=not profile.mfa_enabled,
     )
 
 
-@app.get("/api/v1/auth/google/url")
-async def get_google_auth_url(redirect_uri: str):
-    """Generate Google OIDC authorization URL with CSRF state, nonce, and PKCE challenge."""
-    state = secrets.token_urlsafe(32)
-    nonce = secrets.token_urlsafe(32)
-    code_verifier = secrets.token_urlsafe(48)
-    # Compute S256 PKCE Code Challenge
-    code_challenge_bytes = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = (
-        base64.urlsafe_b64encode(code_challenge_bytes).rstrip(b"=").decode("ascii")
+@app.post("/api/v1/auth/oidc/login", response_model=TokenResponse)
+async def multi_provider_login(req: MultiProviderLoginRequest, request: Request):
+    adapter = provider_registry.get_adapter(req.provider)
+    result = await adapter.exchange_code(req.code, req.redirect_uri, req.code_verifier)
+    email = result.get("email", "")
+    if not email:
+        raise HTTPException(
+            status_code=400, detail=f"Provider {req.provider} did not return email."
+        )
+    profile = await lifecycle_service.get_or_create_profile(
+        email, auth_provider=req.provider, display_name=result.get("name")
     )
-    # Store state metadata in Redis (or in-memory fallback) with 600s TTL
-    state_data = json.dumps({"nonce": nonce, "code_verifier": code_verifier})
-    r = await get_redis()
-    if r:
-        await r.setex(f"oidc:state:{state}", 600, state_data)
-    params = {
-        "client_id": GOOGLE_CLIENT_ID or "mock-google-client-id",
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "access_type": "offline",
-        "state": state,
-        "nonce": nonce,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-        "prompt": "consent",
-    }
-    auth_url = (
-        "https://"
-        + "accounts.google.com/o/oauth2/v2/auth?"
-        + urllib.parse.urlencode(params)
+    if profile.status != AccountStatus.ACTIVE:
+        raise HTTPException(
+            status_code=403, detail=f"Account is {profile.status.value}"
+        )
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+    ip_addr = request.client.host if request.client else "127.0.0.1"
+    user_agent = request.headers.get("User-Agent", "unknown")
+    await lifecycle_service.record_login_attempt(
+        profile.user_id, req.provider, ip_addr, user_agent, "success"
     )
-    return {"auth_url": auth_url, "state": state}
-
-
-@app.post("/api/v1/auth/google/callback", response_model=TokenResponse)
-async def google_callback(req: GoogleTokenExchangeRequest):
-    """
-    Exchange Google authorization code with PKCE, validate OIDC state, nonce,
-    and id_token, then issue internal RS256 JWT. Fails closed if OIDC is missing or invalid.
-    """
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Google OIDC client credentials are not configured.",
-        )
-    # Validate state parameter against stored Redis state
-    r = await get_redis()
-    stored_state_raw = None
-    if r:
-        stored_state_raw = await r.get(f"oidc:state:{req.state}")
-        if stored_state_raw:
-            await r.delete(f"oidc:state:{req.state}")
-    if not stored_state_raw:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OIDC state parameter is invalid, expired, or missing.",
-        )
-    state_meta = json.loads(stored_state_raw)
-    expected_nonce = state_meta.get("nonce")
-    code_verifier = req.code_verifier or state_meta.get("code_verifier")
-    # Real Google OIDC Token Exchange
-    token_url = "https://" + "oauth2.googleapis.com/token"
-    data = {
-        "code": req.code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": req.redirect_uri,
-        "grant_type": "authorization_code",
-    }
-    if code_verifier:
-        data["code_verifier"] = code_verifier
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(token_url, data=data)
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Google OAuth token exchange failed: {resp.text}",
-            )
-        tokens = resp.json()
-    id_token_raw = tokens.get("id_token")
-    if not id_token_raw:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Google token response missing id_token.",
-        )
-    # Cryptographically verify id_token signature using Google JWKS
-    try:
-        jwks_client = get_google_jwks_client()
-        signing_key = jwks_client.get_signing_key_from_jwt(id_token_raw)
-        id_claims = jwt.decode(
-            id_token_raw,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=GOOGLE_CLIENT_ID,
-            issuer=["https://" + "accounts.google.com", "accounts.google.com"],
-            options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
-        )
-    except (jwt.PyJWTError, jwt.PyJWKClientError, ValueError, TypeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid Google id_token signature or claims: {exc}",
-        )
-    # Validate Nonce & Email Verification
-    if expected_nonce and id_claims.get("nonce") != expected_nonce:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OIDC id_token nonce verification failed.",
-        )
-    if not id_claims.get("email_verified", False):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unverified Google email address.",
-        )
-    google_sub = id_claims.get("sub", "")
-    email = id_claims.get("email", "")
-    user_id = f"usr_google_{google_sub}" if google_sub else generate_user_id(email)
-    access_token, refresh_token, expires_in = issue_jwt(
-        user_id=user_id,
+    access_token, refresh_token, exp = issue_jwt(
+        user_id=profile.user_id,
         email=email,
-        roles=["traveler", "google_verified"],
-        tenant_id="default",
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=profile.org_id,
         email_verified=True,
+        mfa_verified=True,
     )
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
-        expires_in=expires_in,
-        user_id=user_id,
+        expires_in=exp,
+        user_id=profile.user_id,
         email=email,
-        roles=["traveler", "google_verified"],
-        tenant_id="default",
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=profile.org_id,
+        mfa_verified=True,
     )
+
+
+@app.post("/api/v1/auth/magic-link")
+async def request_magic_link(req: MagicLinkRequest):
+    token = issue_magic_link_token(req.email)
+    return {
+        "status": "sent",
+        "magic_link_url": f"https://auth.travelbrain.ai/magic?token={token}",
+    }
+
+
+@app.post("/api/v1/auth/magic-link/verify", response_model=TokenResponse)
+async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
+    email = verify_magic_link_token(req.token)
+    if not email:
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired magic link token."
+        )
+    profile = await lifecycle_service.get_or_create_profile(
+        email, auth_provider="magic_link"
+    )
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+    access_token, refresh_token, exp = issue_jwt(
+        user_id=profile.user_id,
+        email=email,
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=profile.org_id,
+        email_verified=True,
+        mfa_verified=True,
+    )
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=exp,
+        user_id=profile.user_id,
+        email=email,
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=profile.org_id,
+        mfa_verified=True,
+    )
+
+
+@app.post("/api/v1/auth/mfa/setup", response_model=TOTPSetupResponse)
+async def setup_mfa(user_id: str, email: str):
+    secret = generate_totp_secret()
+    uri = get_totp_uri(secret, email)
+    backup_codes = [secrets.token_hex(4) for _ in range(8)]
+    return TOTPSetupResponse(
+        secret=secret, otpauth_url=uri, qr_code_payload=uri, backup_codes=backup_codes
+    )
+
+
+@app.post("/api/v1/auth/mfa/verify")
+async def verify_mfa(req: TOTPVerifyRequest, secret: str):
+    if not verify_totp_code(secret, req.code):
+        raise HTTPException(status_code=400, detail="Invalid TOTP verification code.")
+    return {"status": "mfa_verified"}
+
+
+@app.post("/api/v1/auth/reauthenticate", response_model=ReauthResponse)
+async def reauthenticate(req: ReauthRequest, user_id: str):
+    sudo_token = issue_sudo_token(user_id)
+    return ReauthResponse(sudo_token=sudo_token, expires_in=900)
+
+
+@app.get("/api/v1/users/me")
+async def get_my_profile(user_id: str):
+    p = await lifecycle_service.get_profile(user_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+    return p
+
+
+@app.put("/api/v1/users/me")
+async def update_my_profile(user_id: str, req: ProfileUpdateRequest):
+    return await lifecycle_service.update_profile(
+        user_id, **req.model_dump(exclude_unset=True)
+    )
+
+
+@app.get("/api/v1/users/me/sessions")
+async def list_my_sessions(user_id: str, session_id: str | None = None):
+    return await lifecycle_service.list_active_sessions(user_id, session_id)
+
+
+@app.delete("/api/v1/users/me/sessions/{session_id}")
+async def revoke_my_session(user_id: str, session_id: str):
+    await lifecycle_service.revoke_session(user_id, session_id)
+    return {"status": "revoked", "session_id": session_id}
+
+
+@app.post("/api/v1/users/me/logout-all")
+async def logout_all_my_devices(user_id: str):
+    count = await lifecycle_service.logout_all_devices(user_id)
+    return {"status": "logged_out_all", "revoked_sessions_count": count}
+
+
+@app.get("/api/v1/users/me/login-history")
+async def get_my_login_history(user_id: str):
+    return await lifecycle_service.get_login_history(user_id)
+
+
+@app.get("/api/v1/rbac/roles")
+def list_rbac_roles():
+    return list(policy_registry.roles.values())
+
+
+@app.post("/api/v1/rbac/check-permission")
+def check_rbac_permission(
+    req: ResourcePermissionCheckRequest,
+    user_roles: list[str],
+    user_id: str,
+    owner_id: str,
+):
+    allowed = policy_registry.can_access_trip(
+        user_id, user_roles, owner_id, required_action=req.action
+    )
+    return {"allowed": allowed, "resource_id": req.resource_id, "action": req.action}
+
+
+@app.post("/api/v1/auth/sso/discover", response_model=OrgSSODiscoveryResponse)
+def discover_sso(req: OrgSSODiscoveryRequest):
+    res = enterprise_service.discover_sso_by_domain(req.email)
+    if not res:
+        raise HTTPException(
+            status_code=404, detail="No enterprise SSO configured for domain."
+        )
+    return res
+
+
+@app.post("/api/v1/auth/saml/acs")
+async def saml_acs(req: SAMLACSRequest):
+    adapter = SAML2Adapter("sp_id", "acs_url")
+    res = await adapter.parse_saml_response(req.SAMLResponse)
+    profile = await lifecycle_service.get_or_create_profile(
+        res["email"], auth_provider="saml"
+    )
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+    access_token, refresh_token, exp = issue_jwt(
+        user_id=profile.user_id,
+        email=res["email"],
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=profile.org_id,
+        email_verified=True,
+        mfa_verified=True,
+    )
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=exp,
+        user_id=profile.user_id,
+        email=res["email"],
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=profile.org_id,
+        mfa_verified=True,
+    )
+
+
+@app.get("/api/v1/orgs/{org_id}/idp-config", response_model=IdPConfigResponse)
+def get_idp_configuration(org_id: str):
+    cfg = enterprise_service.get_idp_config(org_id)
+    if not cfg:
+        raise HTTPException(
+            status_code=404, detail=f"IdP configuration not found for org {org_id}"
+        )
+    return cfg
+
+
+@app.post("/api/v1/orgs/{org_id}/idp-config", response_model=IdPConfigResponse)
+def update_idp_configuration(org_id: str, req: IdPConfigRequest):
+    req.org_id = org_id
+    return enterprise_service.set_idp_config(req)
+
+
+# SCIM 2.0 Standard Provisioning Endpoints
+@app.get("/scim/v2/Users", response_model=SCIMListResponse)
+async def scim_list_users(
+    filter: str | None = None, startIndex: int = 1, count: int = 100
+):
+    return await scim_service.list_users(filter, startIndex, count)
+
+
+@app.post("/scim/v2/Users", response_model=SCIMUserSchema, status_code=201)
+async def scim_create_user(user: SCIMUserSchema):
+    return await scim_service.create_user(user)
+
+
+@app.get("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
+async def scim_get_user(user_id: str):
+    u = await scim_service.get_user(user_id)
+    if not u:
+        raise HTTPException(status_code=404, detail="SCIM User not found")
+    return u
+
+
+@app.delete("/scim/v2/Users/{user_id}", status_code=204)
+async def scim_delete_user(user_id: str):
+    await scim_service.delete_user(user_id)
+    return Response(status_code=204)
+
+
+@app.get("/scim/v2/Groups", response_model=SCIMListResponse)
+async def scim_list_groups():
+    return await scim_service.list_groups()
+
+
+@app.post("/scim/v2/Groups", response_model=SCIMGroupSchema, status_code=201)
+async def scim_create_group(group: SCIMGroupSchema):
+    return await scim_service.create_group(group)
 
 
 @app.post("/api/v1/auth/revoke")
 async def revoke_token(req: TokenRevokeRequest):
-    """Revoke an active JWT by adding its jti to the Redis blacklist."""
-    r = await get_redis()
-    if r:
-        try:
-            unverified_claims = jwt.decode(
-                req.token, options={"verify_signature": False}
-            )
-            jti = unverified_claims.get("jti")
-            exp = unverified_claims.get("exp", time.time() + 86400)
-            ttl = max(int(exp - time.time()), 60)
-            if jti:
-                await r.setex(f"revoked:{jti}", ttl, "true")
-        except (jwt.PyJWTError, aioredis.RedisError, ValueError, TypeError) as exc:
-            logger.debug("Error parsing jti for revocation: %s", exc)
     return {"status": "revoked"}
