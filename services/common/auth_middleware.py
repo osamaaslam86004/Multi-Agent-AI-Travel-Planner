@@ -5,7 +5,6 @@ revocation checking, and sanitized error messages.
 
 import asyncio
 import logging
-import os
 from typing import Annotated, Any
 
 import jwt
@@ -15,12 +14,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
 logger = logging.getLogger("travelbrain.auth_middleware")
-AUTH_SERVICE_JWKS_URL = os.getenv(
-    "AUTH_SERVICE_JWKS_URL", "http://" + "auth-service:8001/.well-known/jwks.json"
-)
-EXPECTED_ISSUER = os.getenv("JWT_ISSUER", "https://" + "auth.travelbrain.ai")
-EXPECTED_AUDIENCE = os.getenv("JWT_AUDIENCE", "https://" + "api.travelbrain.ai")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+from services.core.config import get_settings
+
+_s = get_settings()
+AUTH_SERVICE_JWKS_URL = _s.auth.auth_service_jwks_url
+EXPECTED_ISSUER = _s.auth.jwt_issuer
+EXPECTED_AUDIENCE = _s.auth.jwt_audience
+REDIS_URL = _s.redis.url
 _jwks_client: PyJWKClient | None = None
 _redis_client: Any = None
 security_scheme = HTTPBearer(auto_error=False)

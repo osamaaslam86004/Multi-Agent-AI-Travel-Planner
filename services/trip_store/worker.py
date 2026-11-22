@@ -1,8 +1,9 @@
+from services.core.config import get_settings
+
 """
 Trip Store Persistence Worker subscribing to synthesis completion events
 and maintaining read models and audit logs.
 """
-
 import asyncio
 import logging
 import os
@@ -21,15 +22,12 @@ from services.common.telemetry import (
 
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.trip_store_worker")
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_settings().redis.url
 STREAM_IN = "stream:travel:synthesis:completed"
 CONSUMER_GROUP = "cg-trip-store"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"trip-store-{HOSTNAME}-{os.getpid()}"
-
 setup_telemetry(service_name="trip-store-service")
-
 event_bus = EventBus(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
 is_healthy = True
@@ -70,10 +68,8 @@ async def handle_synthesis_completed(event: CloudEvent) -> None:
     flight_degraded = data.get("flight_degraded", False)
     hotel_degraded = data.get("hotel_degraded", False)
     weather_degraded = data.get("weather_degraded", False)
-
     set_log_context(correlation_id=cid, tenant_id=tenant_id)
     logger.info(f"Trip store worker persisting completed trip '{cid}'")
-
     await upsert_trip_result(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -88,7 +84,6 @@ async def handle_synthesis_completed(event: CloudEvent) -> None:
         hotel_degraded=hotel_degraded,
         weather_degraded=weather_degraded,
     )
-
     await record_trip_event(
         tenant_id=tenant_id,
         correlation_id=cid,
@@ -98,7 +93,6 @@ async def handle_synthesis_completed(event: CloudEvent) -> None:
 
 
 async def main():
-
     await event_bus.connect()
     loop = asyncio.get_running_loop()
 
@@ -111,9 +105,7 @@ async def main():
             loop.add_signal_handler(sig, handle_shutdown)
         except NotImplementedError:
             pass
-
     asyncio.create_task(start_health_server())
-
     try:
         await event_bus.consume(
             stream_name=STREAM_IN,

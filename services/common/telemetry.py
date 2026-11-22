@@ -1,8 +1,9 @@
+from services.core.config import get_settings
+
 """
 OpenTelemetry Tracing, W3C Context Propagation, Structured JSON Logging,
 and Bounded Prometheus Metrics for Multi-Agent Infrastructure.
 """
-
 import contextvars
 import json
 import logging
@@ -18,7 +19,6 @@ from opentelemetry import trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 OPENTELEMETRY_AVAILABLE = True
-
 # Context Variables for Log Correlation across Threads / Async Tasks
 correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "correlation_id", default="none"
@@ -26,7 +26,6 @@ correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tenant_id", default="default"
 )
-
 # W3C traceparent regex: 00-{32 hex trace_id}-{16 hex parent_id}-{2 hex flags}
 TRACEPARENT_REGEX = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$")
 
@@ -88,11 +87,10 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
         resource = Resource.create(
             {
                 "service.name": service_name,
-                "environment": os.getenv("ENVIRONMENT", "development"),
+                "environment": get_settings().app.environment,
             }
         )
         provider = TracerProvider(resource=resource)
-
         try:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                 OTLPSpanExporter,
@@ -100,12 +98,10 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
 
             exporter = OTLPSpanExporter(endpoint=endpoint)
             provider.add_span_processor(BatchSpanProcessor(exporter))
-
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             logging.getLogger("travelbrain.telemetry").debug(
                 "OTLP exporter unavailable, falling back to console exporter: %s", exc
             )
-
             try:
                 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
@@ -114,10 +110,8 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
                 logging.getLogger("travelbrain.telemetry").debug(
                     "Console exporter unavailable: %s", console_exc
                 )
-
         trace.set_tracer_provider(provider)
         _tracer_provider = provider
-
         if app is not None:
             try:
                 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -127,7 +121,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
                 logging.getLogger("travelbrain.telemetry").debug(
                     "FastAPI instrumentation skipped: %s", e
                 )
-
         try:
             from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
@@ -136,7 +129,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
             logging.getLogger("travelbrain.telemetry").debug(
                 "HTTPX instrumentation skipped: %s", exc
             )
-
         try:
             from opentelemetry.instrumentation.redis import RedisInstrumentor
 
@@ -145,7 +137,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
             logging.getLogger("travelbrain.telemetry").debug(
                 "Redis instrumentation skipped: %s", exc
             )
-
         return provider
     except (ImportError, OSError, RuntimeError, ValueError) as e:
         logging.getLogger("travelbrain.telemetry").warning(
@@ -173,14 +164,12 @@ class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         trace_id = "0" * 32
         span_id = "0" * 16
-
         if OPENTELEMETRY_AVAILABLE and trace:
             current_span = trace.get_current_span()
             span_ctx = current_span.get_span_context() if current_span else None
             if span_ctx and span_ctx.is_valid:
                 trace_id = f"{span_ctx.trace_id:032x}"
                 span_id = f"{span_ctx.span_id:016x}"
-
         log_data = {
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
@@ -191,10 +180,8 @@ class JSONFormatter(logging.Formatter):
             "correlation_id": correlation_id_var.get(),
             "tenant_id": tenant_id_var.get(),
         }
-
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
-
         return json.dumps(log_data)
 
 
@@ -202,10 +189,8 @@ def configure_structured_logging(level: int = logging.INFO) -> None:
     """Applies structured JSON logging to the root logger."""
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
-
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(console_handler)
@@ -235,7 +220,6 @@ try:
         labelnames=("service", "operation", "status"),
         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
     )
-
     STREAM_LAG_GAUGE = Gauge(
         "travelbrain_stream_lag_messages",
         "Stream lag count per stream and group",
@@ -366,25 +350,21 @@ def record_llm_metrics(
     clean_tenant = tenant_id[:50] if tenant_id else "default"
     clean_provider = provider[:30] if provider else "unknown"
     clean_model = model[:50] if model else "unknown"
-
     LLM_TOKENS_COUNTER.labels(
         tenant_id=clean_tenant,
         provider=clean_provider,
         model=clean_model,
         type="prompt",
     ).inc(prompt_tokens)
-
     LLM_TOKENS_COUNTER.labels(
         tenant_id=clean_tenant,
         provider=clean_provider,
         model=clean_model,
         type="completion",
     ).inc(completion_tokens)
-
     LLM_TOKENS_COUNTER.labels(
         tenant_id=clean_tenant, provider=clean_provider, model=clean_model, type="total"
     ).inc(total_tokens)
-
     LLM_COST_COUNTER.labels(
         tenant_id=clean_tenant, provider=clean_provider, model=clean_model
     ).inc(cost_estimate)

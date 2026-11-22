@@ -1,10 +1,11 @@
+from services.core.config import get_settings
+
 """
 Synthesis & Itinerary Worker: Scatter-Gather Barrier Aggregator and LLM Orchestrator.
 Uses State Machine Barrier (GATHERING -> SYNTHESIZING -> DONE), Deadline ZSET with Janitor,
 Off-consume-loop bounded semaphore execution, single-call LLM synthesis, PII Redaction,
 Traceparent Context Propagation, Structured Logging, and Health Probes.
 """
-
 import asyncio
 import logging
 import os
@@ -32,8 +33,7 @@ from services.synthesis_service.synthesizer import SynthesisEngine
 
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.synthesis_worker")
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_settings().redis.url
 STREAM_FLIGHTS = "stream:travel:flights:completed"
 STREAM_HOTELS = "stream:travel:hotels:completed"
 STREAM_WEATHER = "stream:travel:weather:completed"
@@ -41,10 +41,8 @@ STREAM_OUT = "stream:travel:synthesis:completed"
 CONSUMER_GROUP = "cg-synthesis-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"synthesis-worker-{HOSTNAME}-{os.getpid()}"
-
 setup_telemetry(service_name="synthesis-service")
 tracer = get_tracer("travelbrain.synthesis_worker")
-
 event_bus = EventBus(redis_url=REDIS_URL)
 engine = SynthesisEngine()
 barrier_sm: BarrierStateMachine | None = None
@@ -83,11 +81,9 @@ async def execute_synthesis(
         data = await barrier_sm.get_barrier_data(correlation_id)
         if not data:
             return
-
         tenant_id = data.get("tenant_id", "default")
         set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
         logger.info(f"Executing off-loop synthesis for trip '{correlation_id}'")
-
         await event_bus.publish_progress(
             correlation_id,
             {
@@ -104,16 +100,13 @@ async def execute_synthesis(
         flight_degraded = data.get("flight_degraded", "false").lower() == "true"
         hotel_degraded = data.get("hotel_degraded", "false").lower() == "true"
         weather_degraded = data.get("weather_degraded", "false").lower() == "true"
-
         clean_query = redact_pii(raw_query)
         clean_flights = sanitize_tool_output(raw_flights, max_length=3000)
         clean_hotels = sanitize_tool_output(raw_hotels, max_length=3000)
         clean_weather = sanitize_tool_output(raw_weather, max_length=3000)
-
         # Context propagation for OTel
         carrier = {"traceparent": traceparent} if traceparent else {}
         otel_ctx = TraceContextTextMapPropagator().extract(carrier)
-
         token = trace.use_span(tracer.start_span("synthesis.execute", context=otel_ctx))
         try:
             itinerary, final_response = await engine.synthesize_plan(
@@ -125,7 +118,6 @@ async def execute_synthesis(
             )
         finally:
             token.__exit__(None, None, None)
-
         out_payload = SynthesisCompletedPayload(
             correlation_id=correlation_id,
             user_id=user_id,
@@ -149,7 +141,6 @@ async def execute_synthesis(
             data=out_payload,
         )
         await event_bus.publish(STREAM_OUT, out_event)
-
         await event_bus.publish_progress(
             correlation_id,
             {
@@ -161,7 +152,6 @@ async def execute_synthesis(
                 "degraded": flight_degraded or hotel_degraded or weather_degraded,
             },
         )
-
         await upsert_trip_result(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -182,7 +172,6 @@ async def execute_synthesis(
             event_type="com.travelbrain.synthesis.completed.v1",
             payload=out_payload.model_dump(),
         )
-
         last_llm = engine.last_result
         if last_llm:
             await record_llm_usage(
@@ -206,7 +195,6 @@ async def handle_planning_initiated(event: CloudEvent) -> None:
     cid = data["correlation_id"]
     tenant_id = data.get("tenant_id", "default")
     set_log_context(correlation_id=cid, tenant_id=tenant_id)
-
     if barrier_sm:
         await barrier_sm.init_barrier(
             correlation_id=cid,
@@ -224,7 +212,6 @@ async def handle_agent_completed(event: CloudEvent, domain: str) -> None:
     cid = data["correlation_id"]
     tenant_id = data.get("tenant_id", "default")
     set_log_context(correlation_id=cid, tenant_id=tenant_id)
-
     if barrier_sm:
         await barrier_sm.record_agent_result(
             correlation_id=cid,
@@ -239,7 +226,6 @@ async def handle_agent_completed(event: CloudEvent, domain: str) -> None:
 
 
 async def janitor_loop() -> None:
-
     while not stop_event.is_set():
         try:
             if barrier_sm:
@@ -252,12 +238,9 @@ async def janitor_loop() -> None:
 
 
 async def main():
-
     global barrier_sm
-
     await event_bus.connect()
     barrier_sm = BarrierStateMachine(event_bus.client, default_deadline_seconds=15.0)
-
     loop = asyncio.get_running_loop()
 
     def handle_shutdown():
@@ -269,10 +252,8 @@ async def main():
             loop.add_signal_handler(sig, handle_shutdown)
         except NotImplementedError:
             pass
-
     asyncio.create_task(start_health_server())
     janitor_task = asyncio.create_task(janitor_loop())
-
     try:
         await asyncio.gather(
             event_bus.consume(

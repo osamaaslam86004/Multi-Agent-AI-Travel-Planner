@@ -1,8 +1,9 @@
+from services.core.config import get_settings
+
 """
 Weather Agent background worker subscribing to Redis Streams with OpenTelemetry tracing,
 Structured Logging, Signal-based Graceful Shutdown, and HTTP Health Probes.
 """
-
 import asyncio
 import logging
 import os
@@ -29,17 +30,14 @@ from services.weather_service.provider import WeatherProvider
 
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.weather_worker")
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_settings().redis.url
 STREAM_IN = "stream:travel:planning:initiated"
 STREAM_OUT = "stream:travel:weather:completed"
 CONSUMER_GROUP = "cg-weather-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"weather-worker-{HOSTNAME}-{os.getpid()}"
-
 setup_telemetry(service_name="weather-service")
 tracer = get_tracer("travelbrain.weather_worker")
-
 event_bus = EventBus(redis_url=REDIS_URL)
 provider = WeatherProvider(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
@@ -84,9 +82,7 @@ async def handle_planning_initiated(
         if isinstance(data, dict)
         else getattr(data, "user_id", "unknown")
     )
-
     set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
-
     query = data.get("user_query") if isinstance(data, dict) else data.user_query
     destination = (
         data.get("destination")
@@ -96,14 +92,11 @@ async def handle_planning_initiated(
     dates = (
         data.get("dates") if isinstance(data, dict) else getattr(data, "dates", None)
     )
-
     logger.info(
         f"Processing weather search for trip {correlation_id} (query: '{query}', dest: '{destination}')"
     )
-
     carrier = {"traceparent": event.traceparent} if event.traceparent else {}
     otel_ctx = TraceContextTextMapPropagator().extract(carrier)
-
     token = trace.use_span(tracer.start_span("weather_worker.search", context=otel_ctx))
     try:
         await event_bus.publish_progress(
@@ -176,7 +169,6 @@ async def handle_planning_initiated(
 
 
 async def main():
-
     await event_bus.connect()
     loop = asyncio.get_running_loop()
 
@@ -189,9 +181,7 @@ async def main():
             loop.add_signal_handler(sig, handle_shutdown)
         except NotImplementedError:
             pass
-
     asyncio.create_task(start_health_server())
-
     try:
         await event_bus.consume(
             stream_name=STREAM_IN,

@@ -1,7 +1,9 @@
+from services.core.config import get_settings
+
+_settings = get_settings()
 """
 Auth & Identity Microservice (Google OIDC + PKCE + Argon2id + RS256 JWT Issuance + JWKS).
 """
-
 import base64
 import hashlib
 import json
@@ -53,8 +55,8 @@ GOOGLE_OIDC_DISCOVERY_URL = (
     "https://" + "accounts.google.com/.well-known/openid-configuration"
 )
 GOOGLE_JWKS_URL = "https://" + "www.googleapis.com/oauth2/v3/certs"
-ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ENVIRONMENT = _settings.app.environment
+REDIS_URL = _settings.redis.url
 # In-memory user store fallback when Postgres is offline
 _in_memory_users: dict[str, dict[str, Any]] = {}
 _google_jwks_client: PyJWKClient | None = None

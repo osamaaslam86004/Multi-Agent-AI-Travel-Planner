@@ -1,8 +1,9 @@
+from services.core.config import get_settings
+
 """
 Modular Multi-Provider LLM Abstraction with Token Tracking, Latency Measurement,
 Structured Output Enforcement, and Fixed Local Tier Mechanics.
 """
-
 import asyncio
 import json
 import logging
@@ -53,9 +54,9 @@ class BaseLLMProvider(ABC):
     def _extract_json_from_text(self, text: str) -> dict[str, Any]:
         """Utility to safely extract and parse JSON object from markdown or freeform text."""
         cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\n?", "", cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r"\n?```$", "", cleaned)
+        if cleaned.startswith(""):
+            cleaned = re.sub(r"^(?:json)?\n?", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\n?$", "", cleaned)
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
@@ -78,9 +79,9 @@ class GroqLLMProvider(BaseLLMProvider):
         api_key: str | None = None,
         model_name: str | None = None,
     ):
-        self.api_key = api_key or os.getenv("GROQ_API_KEY", "")
+        self.api_key = api_key or get_settings().llm.groq_api_key or ""
         selected_model = (
-            model_name or os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile"
+            model_name or get_settings().llm.groq_model or "llama-3.3-70b-versatile"
         )
         super().__init__(provider_name="groq", model_name=selected_model)
         self._llm = None
@@ -110,7 +111,6 @@ class GroqLLMProvider(BaseLLMProvider):
         start_time = time.perf_counter()
         response = await client.ainvoke(messages)
         latency_ms = (time.perf_counter() - start_time) * 1000.0
-
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if hasattr(response, "response_metadata") and response.response_metadata:
             raw_usage = response.response_metadata.get("token_usage", {})
@@ -125,7 +125,6 @@ class GroqLLMProvider(BaseLLMProvider):
                 "output_tokens", 0
             )
             token_usage["total_tokens"] = response.usage_metadata.get("total_tokens", 0)
-
         return LLMResult(
             content=str(response.content),
             provider_name=self.provider_name,
@@ -161,14 +160,12 @@ class GroqLLMProvider(BaseLLMProvider):
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         content = str(response.content)
         parsed_data = self._extract_json_from_text(content)
-
         token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if hasattr(response, "response_metadata") and response.response_metadata:
             raw_usage = response.response_metadata.get("token_usage", {})
             token_usage["prompt_tokens"] = raw_usage.get("prompt_tokens", 0)
             token_usage["completion_tokens"] = raw_usage.get("completion_tokens", 0)
             token_usage["total_tokens"] = raw_usage.get("total_tokens", 0)
-
         return LLMResult(
             content=content,
             provider_name=self.provider_name,
@@ -190,10 +187,10 @@ class GeminiLLMProvider(BaseLLMProvider):
         api_key: str | None = None,
         model_name: str | None = None,
     ):
-        self.api_key = (
-            api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+        self.api_key = api_key or get_settings().llm.gemini_api_key or ""
+        selected_model = (
+            model_name or get_settings().llm.gemini_model or "gemini-2.5-flash"
         )
-        selected_model = model_name or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
         super().__init__(provider_name="gemini", model_name=selected_model)
 
     def is_available(self) -> bool:
@@ -326,7 +323,9 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         local_endpoint_url: str | None = None,
         device: str = "auto",
     ):
-        selected_model = model_name or os.getenv("LOCAL_LLM_MODEL") or "qwen2.5:7b"
+        selected_model = (
+            model_name or get_settings().llm.local_llm_model or "qwen2.5:7b"
+        )
         super().__init__(provider_name="local_huggingface", model_name=selected_model)
         self.endpoint_url = local_endpoint_url or os.getenv(
             "LOCAL_LLM_URL", "http://localhost:11434/v1"
@@ -341,7 +340,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             return True
         if self._pipeline is not None:
             return True
-
         try:
             resp = httpx.get(f"{self.endpoint_url.rstrip('/')}/models", timeout=1.0)
             if resp.status_code == 200:
@@ -349,7 +347,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 return True
         except (httpx.HTTPError, OSError, ValueError) as exc:
             logger.debug("Local LLM endpoint check failed: %s", exc)
-
         pipe = self._load_transformers_pipeline()
         return pipe is not None
 
@@ -443,7 +440,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> LLMResult:
         start_time = time.perf_counter()
-
         endpoint_res = await self._try_local_endpoint(messages, temperature)
         if endpoint_res:
             content, token_usage = endpoint_res
@@ -455,7 +451,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 token_usage=token_usage,
                 latency_ms=round(latency_ms, 2),
             )
-
         pipe = await asyncio.to_thread(self._load_transformers_pipeline)
         if pipe:
             prompt = "\n".join(
@@ -479,7 +474,6 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
                 token_usage=token_usage,
                 latency_ms=round(latency_ms, 2),
             )
-
         raise RuntimeError(
             f"LocalHuggingFaceProvider ({self.model_name}) is unavailable at {self.endpoint_url}."
         )

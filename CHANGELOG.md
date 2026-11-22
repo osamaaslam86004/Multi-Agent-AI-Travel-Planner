@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.7.1] - 2026-11-22
+
+### Added
+- **Centralized `pydantic-settings` Configuration & Fail-Fast Validation (`services/core/config/`, `services/*/`)**:
+  - Implemented centralized settings management using `pydantic-settings` with dedicated sub-configuration models for application, authentication, database, Redis, LLM providers, MCP integrations, observability, security, rate limits, and deployment.
+  - Added environment profile awareness (`development`, `staging`, `production`) with startup validation, fail-fast enforcement for invalid production configurations, configurable timeout/retry/concurrency settings, standardized naming conventions, and safe configuration reload support where applicable[cite: 6].
+- **Standardized Service & Worker Lifecycles (`services/core/lifecycle/`, `services/*/main.py`, `services/*/worker.py`)**:
+  - Standardized FastAPI application lifespan handling and worker startup/shutdown lifecycles while preventing resource initialization at module import time[cite: 6].
+  - Centralized initialization and graceful teardown—with configurable shutdown deadlines and pending-work release—for Redis clients, PostgreSQL pools, HTTP clients, MCP sessions, OpenTelemetry, and provider clients[cite: 6].
+- **Versioned Internal Service Contracts & Schemas (`services/contracts/`, `services/common/schemas.py`)**:
+  - Standardized API response and error response envelopes, defined internal service API contracts with explicit ownership and responsibility boundaries, and separated domain schemas from transport schemas[cite: 6].
+  - Added API and event payload contract versioning along with shared schema compatibility rules[cite: 6].
+- **Shared Architecture Cleanup & Centralized Feature Flags (`services/core/feature_flags.py`, `services/shared/redis_client.py`, `services/shared/http_client.py`, `services/common/`)**:
+  - Eliminated duplicated Redis and HTTP client initialization across modules, standardized dependency injection and logging/exception handling, and added centralized feature flag infrastructure alongside service-specific settings and architectural conventions for new services[cite: 6].
+
+### Changed
+- **Environment Variable & Client Consolidation (`services/`)**:
+  - Removed scattered `os.getenv()` calls across service modules in favor of typed centralized settings and shared client/lifecycle utilities[cite: 6].
+
+
+
 ## [1.7.0] - 2026-11-21
 
 ### Added
@@ -224,6 +245,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docker-compose.yml` supporting optional local PostgreSQL (`local-db` profile) and Redis cache services.
   - Vercel deployment configuration (`vercel.json`) and frontend asset build script (`scripts/build-frontend.sh`).
 
+[1.7.1]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/osamaaslam86004/Multi-Agent-AI-Travel-Planner/compare/v1.4.0...v1.5.0

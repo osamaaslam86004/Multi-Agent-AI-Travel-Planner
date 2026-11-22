@@ -7,7 +7,6 @@ per-trip event streams (trip:events:{id}) with TTLs, and resilient consumer grou
 import asyncio
 import json
 import logging
-import os
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -17,15 +16,20 @@ from redis.exceptions import ResponseError
 from services.common.schemas import CloudEvent
 
 logger = logging.getLogger("travelbrain.event_bus")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+from services.core.config import get_settings
+
+# Centralized settings fallback
+# REDIS_PASSWORD initialized via get_settings()
 DLQ_STREAM = "stream:travel:dlq"
 
 
 class EventBus:
     """Production Redis Streams Event Bus supporting Consumer Groups & CloudEvents."""
 
-    def __init__(self, redis_url: str = REDIS_URL, password: str = REDIS_PASSWORD):
+    def __init__(self, redis_url: str | None = None, password: str | None = None):
+        settings = get_settings()
+        self.redis_url = redis_url or settings.redis.url
+        self.password = password if password is not None else settings.redis.password
         self.redis_url = redis_url
         self.password = password or None
         self.client: Any = None
@@ -90,7 +94,6 @@ class EventBus:
         update["percentage"] = mono_pct
         update["correlation_id"] = cid
         msg_payload = json.dumps(update)
-
         msg_id = await self.client.xadd(
             stream_name,
             {"data": msg_payload},
@@ -98,7 +101,6 @@ class EventBus:
             approximate=True,
         )
         await self.client.expire(stream_name, 86400)
-
         pubsub_channel = f"trip:stream:{cid}"
         await self.client.publish(pubsub_channel, msg_payload)
         return msg_id
@@ -221,7 +223,6 @@ class EventBus:
                     ValueError,
                 ) as pel_err:
                     logger.debug(f"XAUTOCLAIM info on '{stream_name}': {pel_err}")
-
                 try:
                     entries = await self.client.xreadgroup(
                         group_name,

@@ -1,10 +1,14 @@
+from services.core.config import get_settings
+from services.core.lifecycle import lifespan_manager
+from services.shared.exceptions import register_exception_handlers
+
+_settings = get_settings()
 """
 API Gateway / Backend For Frontend (BFF) Service.
 Handles OpenTelemetry distributed tracing, structured JSON logging, pre-flight FinOps budgets,
 rate limiting per user/tenant, secure HTTP-only cookie sessions with rotation, anti-CSRF enforcement,
 Idempotency-Key verification, trip ownership, Prometheus /metrics endpoint, and resilient SSE streaming.
 """
-
 import asyncio
 import json
 import logging
@@ -47,24 +51,21 @@ from services.common.telemetry import (
 # Configure structured JSON logging
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.gateway")
-
-AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://localhost:8001")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-
+AUTH_SERVICE_URL = _settings.auth.auth_service_url
+REDIS_URL = _settings.redis.url
+REDIS_PASSWORD = _settings.redis.password or ""
 app = FastAPI(
+    lifespan=lifespan_manager,
     title="TravelBrain API Gateway & BFF",
     version="2.0.0",
     description="Edge Gateway, Multi-Tenant Session Barrier, OpenTelemetry Tracing, and Authenticated SSE Streaming",
 )
-
 # Initialize OpenTelemetry instrumentation
 setup_telemetry(service_name="bff-gateway", app=app)
+register_exception_handlers(app)
 tracer = get_tracer("travelbrain.gateway")
-
 session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
-
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 if FRONTEND_DIR.exists():
@@ -255,7 +256,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
     session_data = await session_manager.validate_request(request)
     user_id = session_data["user_id"]
     tenant_id = session_data.get("tenant_id", "default")
-
     client_ip = request.client.host if request.client else "unknown"
     rate_limit_target = f"{tenant_id}:{user_id}:{client_ip}"
     if not await session_manager.check_rate_limit(
@@ -265,7 +265,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Please wait a moment before trying again.",
         )
-
     # FinOps Pre-Flight Budget / Quota Verification
     budget_allowed, current_usage = await session_manager.check_tenant_budget(
         tenant_id=tenant_id, estimated_tokens=5000
@@ -275,7 +274,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Tenant '{tenant_id}' daily token quota limit reached ({current_usage} tokens consumed today).",
         )
-
     # Idempotency-Key Check
     idempotency_key = request.headers.get("Idempotency-Key") or request.headers.get(
         "x-idempotency-key"
@@ -289,23 +287,18 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
                 "Idempotency key hit for user %s (%s)", user_id, idempotency_key
             )
             return JSONResponse(content=json.loads(cached_resp))
-
     correlation_id = f"trip_{uuid.uuid4().hex}"
     set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
-
     with tracer.start_as_current_span("gateway.plan_trip") as span:
         span.set_attribute("tenant_id", tenant_id)
         span.set_attribute("user_id", user_id)
         span.set_attribute("correlation_id", correlation_id)
-
         if r:
             await r.setex(
                 f"trip:ownership:{tenant_id}:{correlation_id}", 86400, user_id
             )
-
         clean_message = redact_pii(req.message)
         traceparent = extract_traceparent(dict(request.headers))
-
         payload_data = PlanningInitiatedPayload(
             correlation_id=correlation_id,
             user_id=user_id,
@@ -317,7 +310,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             end_date=req.end_date,
             dates=req.dates,
         )
-
         event = CloudEvent[PlanningInitiatedPayload](
             source="/services/bff-gateway",
             type="com.travelbrain.planning.initiated.v1",
@@ -325,7 +317,6 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             traceparent=traceparent,
             data=payload_data,
         )
-
         await write_outbox(
             tenant_id=tenant_id,
             correlation_id=correlation_id,
@@ -333,9 +324,7 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             event_type="com.travelbrain.planning.initiated.v1",
             payload=payload_data.model_dump(),
         )
-
         await event_bus.publish("stream:travel:planning:initiated", event)
-
         plan_response = {
             "correlation_id": correlation_id,
             "status": "initiated",
@@ -343,11 +332,9 @@ async def plan_trip(req: TripPlanRequest, request: Request, response: Response):
             "tenant_id": tenant_id,
             "traceparent": traceparent,
         }
-
         if idempotency_key and r:
             idem_redis_key = f"idempotency:{tenant_id}:{user_id}:{idempotency_key}"
             await r.setex(idem_redis_key, 3600, json.dumps(plan_response))
-
         return plan_response
 
 
@@ -365,7 +352,6 @@ async def stream_trip_progress(
     user_id = session_data["user_id"]
     tenant_id = session_data.get("tenant_id", "default")
     set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
-
     r = await session_manager.get_redis()
     if r:
         trip_owner = await r.get(f"trip:ownership:{tenant_id}:{correlation_id}")
@@ -374,7 +360,6 @@ async def stream_trip_progress(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied. Trip belongs to another user.",
             )
-
     header_last_id = request.headers.get("Last-Event-ID") or last_event_id or "0-0"
     stream_name = f"trip:events:{correlation_id}"
 
@@ -385,9 +370,7 @@ async def stream_trip_progress(
             if not r:
                 yield f"id: 0-0\ndata: {json.dumps({'stage': 'initiated', 'message': 'Gateway in offline mode.'})}\n\n"
                 return
-
             last_delivered_id = header_last_id if header_last_id != "0-0" else "0-0"
-
             # 1. Replay existing stream events (Snapshot on connect)
             try:
                 range_events = await r.xrange(
@@ -401,7 +384,6 @@ async def stream_trip_progress(
                     last_delivered_id = msg_id
             except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
                 logger.debug("Error replaying stream events: %s", exc)
-
             # 2. Live stream reading with 15s keepalives
             keepalive_counter = 0
             while True:

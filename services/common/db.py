@@ -7,23 +7,22 @@ FinOps persistence for token usage, cost estimates, model, and provider.
 import contextlib
 import json
 import logging
-import os
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import psycopg
+from psycopg_pool import AsyncConnectionPool
 
 _PSYCOPG_ERRORS = (psycopg.Error,)
-
 from services.common.telemetry import record_llm_metrics
 
 logger = logging.getLogger("travelbrain.db")
+from services.core.config import get_settings
 
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
-POSTGRES_DB = os.getenv("POSTGRES_DB", "travelbrain")
-POSTGRES_USER = os.getenv("POSTGRES_USER", "travelbrain")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "travelbrain_pg_pass_2026")
+
+def _get_db_settings():
+    return get_settings().db
+
 
 _DB_ERRORS: tuple[type[Exception], ...] = _PSYCOPG_ERRORS + (
     ImportError,
@@ -32,7 +31,6 @@ _DB_ERRORS: tuple[type[Exception], ...] = _PSYCOPG_ERRORS + (
     ValueError,
     json.JSONDecodeError,
 )
-
 _pool: Any = None
 _in_memory_db: dict[str, Any] = {
     "trips": {},
@@ -64,11 +62,10 @@ async def init_db_pool() -> Any:
     if _pool is not None:
         return _pool
     try:
-        from psycopg_pool import AsyncConnectionPool
-
+        db_cfg = _get_db_settings()
         conn_str = (
-            f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@"
-            f"{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+            f"postgresql://{db_cfg.user}:{db_cfg.password}@"
+            f"{db_cfg.host}:{db_cfg.port}/{db_cfg.db_name}"
         )
         _pool = AsyncConnectionPool(
             conninfo=conn_str, min_size=1, max_size=10, open=False
@@ -161,7 +158,6 @@ async def write_outbox(
                 )
             except _DB_ERRORS as exc:
                 logger.error(f"Failed writing outbox entry: {exc}")
-
     _in_memory_db["outbox"].append(
         {
             "tenant_id": tenant_id,
@@ -218,7 +214,6 @@ async def relay_outbox(event_bus: Any) -> int:
                 await conn.commit()
         except _DB_ERRORS as exc:
             logger.debug(f"Outbox relay DB poll exception: {exc}")
-
     for item in _in_memory_db["outbox"]:
         if not item["processed"]:
             from services.common.schemas import CloudEvent
@@ -304,7 +299,6 @@ async def upsert_trip_result(
                 )
             except _DB_ERRORS as exc:
                 logger.error(f"Failed upserting trip result to DB: {exc}")
-
     _in_memory_db["trips"][correlation_id] = {
         "correlation_id": correlation_id,
         "tenant_id": tenant_id,
@@ -375,7 +369,6 @@ async def record_llm_usage(
         if cost_estimate > 0.0
         else calculate_cost(provider, model, prompt_tokens, completion_tokens)
     )
-
     async with get_tenant_conn(tenant_id) as conn:
         if conn:
             try:
@@ -406,7 +399,6 @@ async def record_llm_usage(
                 await conn.commit()
             except _DB_ERRORS as exc:
                 logger.debug(f"Failed recording LLM usage ledger: {exc}")
-
     _in_memory_db["llm_usage"].append(
         {
             "tenant_id": tenant_id,
@@ -421,7 +413,6 @@ async def record_llm_usage(
             "cost_estimate": final_cost,
         }
     )
-
     record_llm_metrics(
         tenant_id=tenant_id,
         provider=provider,
@@ -449,7 +440,6 @@ async def get_tenant_total_tokens_today(tenant_id: str) -> int:
                     return int(row[0])
         except _DB_ERRORS:
             pass
-
     total = sum(
         item["total_tokens"]
         for item in _in_memory_db["llm_usage"]
@@ -498,7 +488,6 @@ async def get_trip_by_id(
                         }
             except _DB_ERRORS as exc:
                 logger.debug(f"Error fetching trip from DB: {exc}")
-
     mem_trip = _in_memory_db["trips"].get(correlation_id)
     if mem_trip and mem_trip.get("tenant_id") == tenant_id:
         return mem_trip
