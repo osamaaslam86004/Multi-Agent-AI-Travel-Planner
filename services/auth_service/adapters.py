@@ -1,9 +1,11 @@
 """
 Multi-Provider OAuth / OIDC / SAML 2.0 Adapter Architecture.
 Supports Google, Microsoft Entra ID, GitHub, Generic OIDC, and SAML 2.0.
+Non-blocking async JWKS fetching, PKCE verification, and ID token validation.
 """
 
 import abc
+import asyncio
 import base64
 import logging
 import os
@@ -78,25 +80,34 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
         }
         if code_verifier:
             data["code_verifier"] = code_verifier
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, data=data)
             if resp.status_code != 200:
-                raise RuntimeError(f"Google token exchange failed: {resp.text}")
+                raise ValueError(
+                    f"Google OAuth token exchange failed with status {resp.status_code}."
+                )
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
-            raise RuntimeError("Missing id_token from Google")
+            raise ValueError("Google token response missing id_token.")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
-        signing_key = self._jwks_client.get_signing_key_from_jwt(id_token_raw)
+
+        signing_key = await asyncio.to_thread(
+            self._jwks_client.get_signing_key_from_jwt, id_token_raw
+        )
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
             algorithms=["RS256"],
             audience=self.client_id,
             issuer=["https://accounts.google.com", "accounts.google.com"],
-            options={"verify_exp": True, "verify_aud": True},
+            options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
+
         return {
             "provider": "google",
             "sub": id_claims.get("sub"),
@@ -158,33 +169,44 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
         }
         if code_verifier:
             data["code_verifier"] = code_verifier
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, data=data)
             if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Microsoft Entra ID token exchange failed: {resp.text}"
+                raise ValueError(
+                    f"Microsoft Entra ID token exchange failed with status {resp.status_code}."
                 )
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
-            raise RuntimeError("Missing id_token from Microsoft Entra ID")
+            raise ValueError("Microsoft Entra ID response missing id_token.")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
-        signing_key = self._jwks_client.get_signing_key_from_jwt(id_token_raw)
+
+        signing_key = await asyncio.to_thread(
+            self._jwks_client.get_signing_key_from_jwt, id_token_raw
+        )
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
             algorithms=["RS256"],
-            options={"verify_exp": True, "verify_aud": False},
+            audience=self.client_id,
+            options={"verify_exp": True, "verify_aud": True},
         )
-        email = id_claims.get("preferred_username") or id_claims.get("email") or ""
+
+        email = id_claims.get("email") or id_claims.get("preferred_username") or ""
+        oid = id_claims.get("oid") or id_claims.get("sub") or ""
+        tid = id_claims.get("tid") or ""
+
         return {
             "provider": "entra",
-            "sub": id_claims.get("sub") or id_claims.get("oid"),
+            "sub": f"{tid}:{oid}" if tid and oid else oid,
             "email": email,
-            "email_verified": True,
+            "email_verified": bool(email),
             "name": id_claims.get("name"),
-            "tenant_id": id_claims.get("tid"),
+            "tenant_id": tid,
             "groups": id_claims.get("groups", []),
             "raw_claims": id_claims,
         }
@@ -227,11 +249,14 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, json=data, headers=headers)
             if resp.status_code != 200:
-                raise RuntimeError(f"GitHub token exchange failed: {resp.text}")
+                raise ValueError(
+                    f"GitHub token exchange failed with status {resp.status_code}."
+                )
             tokens = resp.json()
             access_token = tokens.get("access_token")
             if not access_token:
-                raise RuntimeError("GitHub access_token missing")
+                raise ValueError("GitHub access_token missing in response.")
+
             auth_headers = {
                 "Authorization": f"Bearer {access_token}",
                 "User-Agent": "TravelBrain-AI-Service",
@@ -240,6 +265,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
             user_data = user_resp.json()
             email = user_data.get("email")
             email_verified = False
+
             if not email:
                 emails_resp = await client.get(self.emails_url, headers=auth_headers)
                 if emails_resp.status_code == 200:
@@ -248,6 +274,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
                             email = em.get("email")
                             email_verified = em.get("verified", False)
                             break
+
         return {
             "provider": "github",
             "sub": str(user_data.get("id")),
@@ -300,28 +327,39 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
         }
         if code_verifier:
             data["code_verifier"] = code_verifier
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, data=data)
             if resp.status_code != 200:
-                raise RuntimeError(f"Generic OIDC token exchange failed: {resp.text}")
+                raise ValueError(
+                    f"Generic OIDC token exchange failed with status {resp.status_code}."
+                )
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
-            raise RuntimeError("Missing id_token from Generic OIDC provider")
+            raise ValueError("Missing id_token from Generic OIDC provider.")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
-        signing_key = self._jwks_client.get_signing_key_from_jwt(id_token_raw)
+
+        signing_key = await asyncio.to_thread(
+            self._jwks_client.get_signing_key_from_jwt, id_token_raw
+        )
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
             algorithms=["RS256"],
-            options={"verify_exp": True, "verify_aud": False},
+            audience=self.client_id,
+            issuer=self.issuer,
+            options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
+
         return {
             "provider": "generic_oidc",
             "sub": id_claims.get("sub"),
             "email": id_claims.get("email"),
-            "email_verified": id_claims.get("email_verified", True),
+            "email_verified": id_claims.get("email_verified", False),
             "name": id_claims.get("name"),
             "groups": id_claims.get("groups", []),
             "raw_claims": id_claims,
@@ -361,16 +399,23 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             )
         except (ValueError, UnicodeDecodeError):
             decoded_xml = saml_response_b64
+
         sub = f"saml_user_{secrets.token_hex(8)}"
         email = "enterprise_user@saml.domain.com"
         if "<NameID>" in decoded_xml and "</NameID>" in decoded_xml:
             sub = decoded_xml.split("<NameID>")[1].split("</NameID>")[0].strip()
-        if '<Attribute Name="email">' in decoded_xml:
-            email = (
-                decoded_xml.split('<Attribute Name="email">')[1]
-                .split("</Attribute>")[0]
-                .strip()
+        if (
+            'Attribute Name="email"' in decoded_xml
+            or 'Attribute Name="Email"' in decoded_xml
+        ):
+            parts = (
+                decoded_xml.split('Attribute Name="email"')
+                if 'Attribute Name="email"' in decoded_xml
+                else decoded_xml.split('Attribute Name="Email"')
             )
+            if len(parts) > 1 and "</Attribute>" in parts[1]:
+                email = parts[1].split("</Attribute>")[0].split(">")[-1].strip()
+
         return {
             "provider": "saml",
             "sub": sub,

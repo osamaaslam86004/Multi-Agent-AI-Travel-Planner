@@ -1,13 +1,14 @@
 """
 Cryptographic key management, RFC 7638 KID generation, RS256 signing,
-Argon2id password hashing, RFC 6238 TOTP MFA, Sudo Reauth tokens, Magic Links,
-Device Fingerprinting, and suspicious login detection.
+Argon2id password hashing, RFC 6238 TOTP MFA, Sudo Reauth tokens, Single-Use Magic Links,
+Device Fingerprinting, Revocation Checkers, and Central Login Policy evaluation.
 """
 
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import struct
@@ -21,6 +22,10 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+
+from services.core.config import get_settings
+
+logger = logging.getLogger("travelbrain.auth.security")
 
 ISSUER = os.getenv("JWT_ISSUER", "https://auth.travelbrain.ai")
 AUDIENCE = os.getenv("JWT_AUDIENCE", "https://api.travelbrain.ai")
@@ -89,21 +94,65 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-# RSA Keypair Management & RS256 JWT Issuance
+# RSA Keypair Management (Step 3: Key Management - C-6)
+def _load_rsa_key_from_pem(pem_str: str) -> rsa.RSAPrivateKey | None:
+    try:
+        key = serialization.load_pem_private_key(
+            pem_str.encode("utf-8") if isinstance(pem_str, str) else pem_str,
+            password=None,
+            backend=default_backend(),
+        )
+        if isinstance(key, rsa.RSAPrivateKey):
+            return key
+    except Exception as exc:
+        logger.error(f"Failed to parse RSA private key PEM: {exc}")
+    return None
+
+
 def _initialize_rsa_keys() -> None:
     global _primary_private_key, _previous_private_key
+    if _primary_private_key is not None:
+        return
+
+    settings = get_settings()
+    env = settings.app.environment.lower()
+
+    # 1. Try loading primary key from settings / env / path
+    pem_env = settings.auth.jwt_private_key_pem or os.getenv("JWT_PRIVATE_KEY_PEM")
+    path_env = settings.auth.jwt_private_key_path or os.getenv("JWT_PRIVATE_KEY_PATH")
+
+    if pem_env:
+        _primary_private_key = _load_rsa_key_from_pem(pem_env)
+    elif path_env and os.path.exists(path_env):
+        with open(path_env, "r") as f:
+            _primary_private_key = _load_rsa_key_from_pem(f.read())
+
+    # 2. In staging and production, primary RSA key MUST be present
     if _primary_private_key is None:
-        _primary_private_key = rsa.generate_private_key(
-            public_exponent=65537, key_size=2048, backend=default_backend()
-        )
-    prev_pem = os.getenv("JWT_PREVIOUS_PRIVATE_KEY_PEM")
-    if prev_pem and _previous_private_key is None:
-        try:
-            _previous_private_key = serialization.load_pem_private_key(
-                prev_pem.encode("utf-8"), password=None, backend=default_backend()
+        if env in ("production", "staging"):
+            raise RuntimeError(
+                f"Fail-fast: Primary RSA signing key (JWT_PRIVATE_KEY_PEM / JWT_PRIVATE_KEY_PATH) "
+                f"is required in {env.upper()} profile."
             )
-        except (ValueError, TypeError):
-            _previous_private_key = None
+        else:
+            logger.info("Generating ephemeral RSA private key for development profile.")
+            _primary_private_key = rsa.generate_private_key(
+                public_exponent=65537, key_size=2048, backend=default_backend()
+            )
+
+    # 3. Load previous key for rotation overlap if available
+    prev_pem = settings.auth.jwt_previous_private_key_pem or os.getenv(
+        "JWT_PREVIOUS_PRIVATE_KEY_PEM"
+    )
+    prev_path = settings.auth.jwt_previous_private_key_path or os.getenv(
+        "JWT_PREVIOUS_PRIVATE_KEY_PATH"
+    )
+
+    if prev_pem:
+        _previous_private_key = _load_rsa_key_from_pem(prev_pem)
+    elif prev_path and os.path.exists(prev_path):
+        with open(prev_path, "r") as f:
+            _previous_private_key = _load_rsa_key_from_pem(f.read())
 
 
 def get_jwks() -> dict[str, Any]:
@@ -138,6 +187,7 @@ def get_jwks() -> dict[str, Any]:
     return {"keys": keys}
 
 
+# RS256 JWT Issuance with Token Typing & Session ID (Step 5: H-1, H-7)
 def issue_jwt(
     user_id: str,
     email: str,
@@ -152,12 +202,14 @@ def issue_jwt(
     _initialize_rsa_keys()
     if _primary_private_key is None:
         raise RuntimeError("RSA Key not initialized")
+
     now = int(time.time())
     access_exp = now + ACCESS_TOKEN_EXPIRE_SECONDS
     pub_key = _primary_private_key.public_key()
     kid = compute_rfc7638_kid(pub_key)
     jti = f"jti_{uuid.uuid4().hex}"
     sid = session_id or f"sid_{uuid.uuid4().hex}"
+
     claims = {
         "iss": ISSUER,
         "sub": user_id,
@@ -167,6 +219,7 @@ def issue_jwt(
         "exp": access_exp,
         "jti": jti,
         "sid": sid,
+        "token_use": "access",
         "tenant_id": tenant_id,
         "org_id": org_id,
         "email": email,
@@ -175,14 +228,17 @@ def issue_jwt(
         "roles": roles or ["member"],
         "permissions": permissions or [],
     }
+
     private_pem = _primary_private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
+
     access_token = jwt.encode(
         claims, private_pem, algorithm="RS256", headers={"kid": kid}
     )
+
     refresh_exp = now + REFRESH_TOKEN_EXPIRE_SECONDS
     refresh_claims = {
         "iss": ISSUER,
@@ -192,14 +248,18 @@ def issue_jwt(
         "exp": refresh_exp,
         "jti": f"refresh_{uuid.uuid4().hex}",
         "sid": sid,
+        "token_use": "refresh",
         "type": "refresh",
+        "tenant_id": tenant_id,
     }
+
     refresh_token = jwt.encode(
         refresh_claims, private_pem, algorithm="RS256", headers={"kid": kid}
     )
     return access_token, refresh_token, ACCESS_TOKEN_EXPIRE_SECONDS
 
 
+# TOTP MFA Implementation (RFC 6238)
 def generate_totp_secret() -> str:
     return base64.b32encode(os.urandom(20)).decode("ascii").rstrip("=")
 
@@ -240,6 +300,7 @@ def get_totp_uri(secret: str, email: str, issuer: str = "TravelBrain") -> str:
     return f"otpauth://totp/{label}?secret={secret}&issuer={issuer_q}&algorithm=SHA1&digits=6&period=30"
 
 
+# Sudo Reauthentication Tokens
 _SECRET_HMAC_KEY = os.getenv(
     "JWT_SECRET_KEY", "dev-sudo-reauth-key-32chars-min-len"
 ).encode("utf-8")
@@ -271,10 +332,11 @@ def verify_sudo_token(sudo_token: str, expected_user_id: str) -> bool:
             _SECRET_HMAC_KEY, payload.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         return hmac.compare_digest(expected_sig, sig)
-    except (ValueError, TypeError):
+    except Exception:
         return False
 
 
+# Single-Use Magic Link Tokens
 def issue_magic_link_token(email: str) -> str:
     now = int(time.time())
     email_clean = email.lower().strip()
@@ -300,10 +362,11 @@ def verify_magic_link_token(token: str) -> str | None:
             _SECRET_HMAC_KEY, payload.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         return email if hmac.compare_digest(expected_sig, sig) else None
-    except (ValueError, TypeError):
+    except Exception:
         return None
 
 
+# Device Fingerprinting & Suspicious Login Assessment
 def compute_device_fingerprint(user_agent: str, ip_address: str) -> str:
     subnet = ".".join(ip_address.split(".")[:3]) if "." in ip_address else ip_address
     compiled = f"{user_agent.strip().lower()}:{subnet}"

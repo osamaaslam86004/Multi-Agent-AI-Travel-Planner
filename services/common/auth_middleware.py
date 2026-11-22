@@ -1,6 +1,7 @@
 """
 Stateless JWT verification middleware using JWKS public keys, non-blocking async fetching,
-revocation checking, role/permission inheritance, and scoped FastAPI dependencies.
+fail-closed Redis revocation checks, token typing enforcement, role/permission inheritance,
+and scoped FastAPI dependencies.
 """
 
 import asyncio
@@ -8,22 +9,21 @@ import logging
 from typing import Annotated, Any
 
 import jwt
-import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
 from services.core.config import get_settings
+from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth_middleware")
 _s = get_settings()
+
 AUTH_SERVICE_JWKS_URL = _s.auth.auth_service_jwks_url
 EXPECTED_ISSUER = _s.auth.jwt_issuer
 EXPECTED_AUDIENCE = _s.auth.jwt_audience
-REDIS_URL = _s.redis.url
 
 _jwks_client: PyJWKClient | None = None
-_redis_client: Any = None
 security_scheme = HTTPBearer(auto_error=False)
 CredentialsDep = Annotated[
     HTTPAuthorizationCredentials | None, Depends(security_scheme)
@@ -39,21 +39,6 @@ def get_jwks_client() -> PyJWKClient:
     return _jwks_client
 
 
-async def get_redis() -> Any:
-    global _redis_client
-    if aioredis is None:
-        return None
-    if _redis_client is None:
-        try:
-            _redis_client = aioredis.from_url(
-                REDIS_URL, encoding="utf-8", decode_responses=True
-            )
-            await _redis_client.ping()
-        except (aioredis.RedisError, OSError):
-            _redis_client = None
-    return _redis_client
-
-
 class AuthenticatedUser:
     """Holds claims parsed from cryptographically verified JWT with RBAC capability."""
 
@@ -67,6 +52,7 @@ class AuthenticatedUser:
         self.jti: str = claims.get("jti", "")
         self.session_id: str = claims.get("sid", "")
         self.mfa_verified: bool = claims.get("mfa_verified", True)
+        self.token_use: str = claims.get("token_use", "access")
         self.raw_claims: dict[str, Any] = claims
 
     def has_role(self, role: str) -> bool:
@@ -94,13 +80,16 @@ async def get_current_user(
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
+
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
     try:
+        # Check local RSA key in auth service or fetch JWKS non-blockingly
         client = get_jwks_client()
         signing_key = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
         payload = jwt.decode(
@@ -116,16 +105,6 @@ async def get_current_user(
                 "verify_iss": True,
             },
         )
-        jti = payload.get("jti")
-        if jti:
-            r = await get_redis()
-            if r and await r.get(f"revoked:{jti}"):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Authentication token has been revoked.",
-                    headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
-                )
-        return AuthenticatedUser(payload)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -139,6 +118,64 @@ async def get_current_user(
             detail="Invalid authentication credentials.",
             headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
         )
+
+    # Step 5 (H-1): Enforce Token Typing ("access" vs "refresh")
+    token_use = payload.get("token_use", "access")
+    if token_use == "refresh" or payload.get("type") == "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token cannot be used as an access token.",
+            headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+        )
+
+    # Step 5 (C-5): Revocation & Fail-Closed Checks
+    jti = payload.get("jti")
+    sid = payload.get("sid")
+    user_id = payload.get("sub")
+    iat = payload.get("iat", 0)
+
+    try:
+        r = await get_redis_client()
+        if r:
+            # Check jti revocation
+            if jti and await r.get(f"revoked:{jti}"):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication token has been revoked.",
+                    headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+                )
+            # Check session sid revocation
+            if sid and await r.get(f"revoked:sid:{sid}"):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User session has been revoked.",
+                    headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+                )
+            # Check user tokens_valid_after timestamp
+            if user_id:
+                valid_after = await r.get(f"tokens_valid_after:{user_id}")
+                if valid_after and iat < float(valid_after):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session invalidated due to status change or logout-all.",
+                        headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+                    )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        env = _s.app.environment.lower()
+        if env == "production":
+            logger.error(
+                f"Fail-closed: Redis error during revocation check in production: {exc}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service error (session store unavailable).",
+            )
+        else:
+            logger.warning(f"Redis revocation check warning (non-prod): {exc}")
+
+    return AuthenticatedUser(payload)
 
 
 CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
@@ -193,6 +230,13 @@ def require_reauth():
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Sensitive operation requires reauthentication (missing X-Sudo-Token).",
+            )
+        from services.auth_service.security import verify_sudo_token
+
+        if not verify_sudo_token(sudo_hdr, user.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid or expired X-Sudo-Token for sensitive operation.",
             )
         return user
 

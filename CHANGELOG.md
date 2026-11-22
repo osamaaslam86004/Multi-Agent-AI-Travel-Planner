@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.7.2] - 2026-11-22
+## [1.7.2] - 2026-11-22
+
+### Added
+- **Durable Identity Schema, Migrations & Persistence Layer (`migrations/`, `services/auth_service/user_lifecycle.py`, `services/auth_service/enterprise.py`, `services/common/db.py`)**:
+  - Added database migrations and repository persistence for `user_profiles`, `federated_identities`, `login_history`, `orgs`, `org_memberships`, `role_assignments`, `idp_configs`, `scim_tokens`, and `scim_groups` with `tenant_id` scoping and Row-Level Security (RLS), replacing process-local identity state dictionaries[cite: 1].
+  - Replaced placeholder `users` row inserts in `common/db.py` with real profile foreign keys/references[cite: 1].
+- **Refresh Token Rotation, Revocation Registry & Token Typing (`services/auth_service/main.py`, `services/auth_service/security.py`, `services/common/auth_middleware.py`)**:
+  - Added explicit `token_use` claims (`access` vs. `refresh`) and implemented `/auth/refresh` with refresh token rotation, token family tracking, stored `jti` hashes, and reuse detection with family revocation[cite: 1].
+  - Implemented real token and session revocation in Redis (`revoked:{jti}`, `revoked:sid:{sid}`, and per-user `tokens_valid_after:{user_id}`) using the shared password-aware Redis client (`services.shared.redis_client.get_redis_client()`) with fail-closed (`503`) handling in `production` when Redis is unreachable[cite: 1].
+- **Federated Identity Linking & OIDC Protocol Security (`services/auth_service/adapters.py`, `services/auth_service/main.py`, `services/auth_service/enterprise.py`)**:
+  - Added `federated_identities` binding external identities to `(provider, issuer, sub)` (and Entra `tid` + `oid`), requiring verified email for first-time account creation and restricting automatic linking to verified emails from trusted domains/providers[cite: 1].
+  - Added server-side `state`, `nonce`, and PKCE validation bound to short-lived pre-sessions, enforced `aud`/`iss`/`nonce` validation (including Entra issuer/tenant checks), offloaded blocking JWKS lookups via `asyncio.to_thread`, and sanitized upstream/validation error responses[cite: 1].
+- **BFF OIDC Flows, Canonical Sessions & Frontend Identity UI (`services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`, `frontend/static/js/app.js`, `frontend/`)**:
+  - Added BFF OIDC login and callback routes (`GET /api/v1/auth/{provider}/login`, `GET .../callback`), `GET /api/v1/auth/me` with CSRF token delivery, and session management endpoints (`/users/me/sessions`, `DELETE .../sessions/{sid}`, and logout-all) wired to token/session revocation[cite: 1].
+  - Unified session IDs (`sid`) across BFF sessions and JWTs using canonical `session:{tenant}:{sid}` records and `user_sessions:{tenant}:{user}` indexes with sliding idle timeout[cite: 1].
+  - Updated frontend client and views to align with BFF routes and stream fields (`stream_url` / `sse_url`, CSRF headers), removed the false `"Guest Mode"` fallback when unauthenticated, and added login, profile, and session views[cite: 1].
+
+### Changed
+- **Startup Config, Secret Validation & Cross-Service Wiring (`k8s/`, `docker-compose.yml`, `services/bff_gateway/main.py`, `services/common/event_bus.py`, `services/weather_service/worker.py`)**:
+  - Provisioned required secrets (including `JWT_SECRET_KEY`, `SCIM_TOKEN_SECRET`, and `JWT_PRIVATE_KEY_PEM`) in `production` manifests and `docker-compose.yml`, made startup validation role-aware for workers, and enforced fail-fast checks on missing keys or insecure defaults[cite: 1].
+  - Fixed `initiate_trip_plan` `write_outbox` arguments, moved `periodic_outbox_relay` startup into `lifespan` handling, aligned SSE streaming channels/framing and `/health/ready` checks, fixed `EventBus.__init__` credential handling for workers, replaced `search_weather` with `get_weather`, and repaired `docker-compose.yml` structure and volume declarations[cite: 1].
+  - Fixed Kubernetes `NetworkPolicy` selectors (`redis-broker-service`, `redis-cache-service`) and DNS/service/DB/Redis egress rules[cite: 1].
+- **Signing Key Lifecycle & Endpoint Authentication (`services/auth_service/security.py`, `services/auth_service/main.py`)**:
+  - Loaded primary and previous RSA signing keys from settings/secrets at startup, aborted startup when the primary key is missing in `staging` or `production`, retained previous keys in JWKS for at least max token TTL with `Cache-Control` headers, and switched auth service token checks to local public-key verification[cite: 1].
+  - Required authentication and derived acting identity from verified tokens on account, MFA, reauth, and RBAC routes instead of caller-supplied `user_id` or role lists, and enforced SCIM bearer token verification (`hmac.compare_digest`), IdP config authorization, and domain ownership proof[cite: 1].
+- **Central Login Policy Gate, Account Status & Server-Side Tenant Resolution (`services/auth_service/main.py`, `services/auth_service/user_lifecycle.py`, `services/bff_gateway/main.py`)**:
+  - Enforced central login policy evaluation (SSO enforcement and domain-to-org mapping), account status checks across all login paths, server-side tenant resolution instead of client-supplied `tenant_id`, and strict gating of dev login via `enable_dev_login` forbidden in `staging` and `production`[cite: 1].
+  - Removed `O(N)` `redis.keys(...)` session lookups and production in-memory session fallbacks, and aligned session cookie configuration[cite: 1].
+
+
 ## [1.7.1] - 2026-11-22
 
 ### Added

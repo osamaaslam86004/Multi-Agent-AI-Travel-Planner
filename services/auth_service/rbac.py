@@ -9,7 +9,6 @@ import logging
 from services.auth_service.models import RoleDefinition
 
 logger = logging.getLogger("travelbrain.auth.rbac")
-
 # Standard Roles definition (Section 2.3)
 ROLES_CATALOG: dict[str, RoleDefinition] = {
     "platform_owner": RoleDefinition(
@@ -137,12 +136,10 @@ class AuthorizationPolicyRegistry:
 
     def has_permission(self, user_roles: list[str], required_permission: str) -> bool:
         effective = self.resolve_effective_permissions(user_roles)
-
         if "*" in effective:
             return True
         if required_permission in effective:
             return True
-
         domain_prefix = required_permission.split(":")[0]
         return f"{domain_prefix}:*" in effective
 

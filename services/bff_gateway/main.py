@@ -1,25 +1,28 @@
-from services.core.config import get_settings
-from services.core.lifecycle import lifespan_manager
-from services.shared.exceptions import register_exception_handlers
-
-_settings = get_settings()
 """
 API Gateway / Backend For Frontend (BFF) Service.
 Handles OpenTelemetry distributed tracing, structured JSON logging, pre-flight FinOps budgets,
 rate limiting per user/tenant, secure HTTP-only cookie sessions with rotation, anti-CSRF enforcement,
 Idempotency-Key verification, trip ownership, Prometheus /metrics endpoint, and resilient SSE streaming.
-Integrates Phase 2 Enterprise Identity, Account Lifecycle, MFA, RBAC, and SCIM proxying.
+Integrates Phase 2 Enterprise Identity OIDC login/callback, /auth/me, profile/session proxies, and outbox relay.
 """
+
 import asyncio
 import json
 import logging
+import secrets
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -28,10 +31,7 @@ from services.bff_gateway.session_manager import (
     SESSION_COOKIE_NAME,
     SessionManager,
 )
-from services.common.db import (
-    relay_outbox,
-    write_outbox,
-)
+from services.common.db import relay_outbox, write_outbox
 from services.common.event_bus import EventBus
 from services.common.pii_redactor import redact_pii
 from services.common.schemas import CloudEvent, PlanningInitiatedPayload
@@ -44,29 +44,60 @@ from services.common.telemetry import (
     set_log_context,
     setup_telemetry,
 )
+from services.core.config import get_settings
+from services.core.lifecycle import lifespan_manager
+from services.shared.exceptions import register_exception_handlers
+from services.shared.redis_client import get_redis_client
 
-# Configure structured JSON logging
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.gateway")
 
+_settings = get_settings()
 AUTH_SERVICE_URL = _settings.auth.auth_service_url
 REDIS_URL = _settings.redis.url
 REDIS_PASSWORD = _settings.redis.password or ""
+COOKIE_NAME = _settings.security.session_cookie_name or SESSION_COOKIE_NAME
+
+session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
+event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
+
+
+async def periodic_outbox_relay():
+    while True:
+        try:
+            await relay_outbox(event_bus)
+        except Exception as exc:
+            logger.debug(f"Outbox relay background loop iteration trace: {exc}")
+        await asyncio.sleep(1.0)
+
+
+@asynccontextmanager
+async def bff_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Step 1 (A-2): Custom lifespan manager ensuring background relay runs reliably."""
+    async with lifespan_manager(app):
+        try:
+            await event_bus.connect()
+            logger.info("BFF Gateway connected to Redis Event Bus.")
+        except Exception as exc:
+            logger.warning(f"BFF Gateway startup event bus connect fallback: {exc}")
+        relay_task = asyncio.create_task(periodic_outbox_relay())
+        try:
+            yield
+        finally:
+            relay_task.cancel()
+            await event_bus.close()
+
 
 app = FastAPI(
-    lifespan=lifespan_manager,
+    lifespan=bff_lifespan,
     title="TravelBrain API Gateway & BFF",
     version="2.0.0",
     description="Edge Gateway, Multi-Tenant Session Barrier, OpenTelemetry Tracing, and Authenticated SSE Streaming",
 )
 
-# Initialize OpenTelemetry instrumentation
 setup_telemetry(service_name="bff-gateway", app=app)
 register_exception_handlers(app)
 tracer = get_tracer("travelbrain.gateway")
-
-session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
-event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -94,31 +125,6 @@ class LoginRequest(BaseModel):
     email: str
     password: str | None = None
     tenant_id: str = "default"
-
-
-@app.on_event("startup")
-async def startup_event():
-    try:
-        await event_bus.connect()
-        logger.info("BFF Gateway initialized and connected to Redis Event Bus.")
-        asyncio.create_task(periodic_outbox_relay())
-    except (OSError, RuntimeError, ValueError) as exc:
-        logger.warning("BFF Gateway startup event bus connect fallback: %s", exc)
-
-
-async def periodic_outbox_relay():
-    while True:
-        try:
-            await relay_outbox(event_bus)
-        except (
-            OSError,
-            RuntimeError,
-            TimeoutError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            logger.debug("Outbox relay background loop iteration trace: %s", exc)
-        await asyncio.sleep(1.0)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -150,6 +156,27 @@ async def metrics_endpoint():
     return Response(content=payload, media_type=content_type)
 
 
+# Step 8 (C-9, M-8): BFF Auth / User Session Status Endpoint
+@app.get("/api/v1/auth/me")
+async def get_current_session_user(request: Request):
+    try:
+        session = await session_manager.validate_request(request, check_csrf=False)
+        return {
+            "authenticated": True,
+            "user_id": session.get("user_id"),
+            "email": session.get("email"),
+            "tenant_id": session.get("tenant_id", "default"),
+            "roles": session.get("roles", "traveler").split(","),
+            "csrf_token": session.get("csrf_token"),
+        }
+    except HTTPException:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"authenticated": False, "detail": "Unauthenticated"},
+        )
+
+
+# Direct Login Route
 @app.post("/api/v1/auth/login")
 async def bff_login(req: LoginRequest, request: Request, response: Response):
     client_ip = request.client.host if request.client else "127.0.0.1"
@@ -164,6 +191,7 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many authentication requests.",
         )
+
     async with httpx.AsyncClient() as client:
         try:
             auth_resp = await client.post(
@@ -172,73 +200,190 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
                 timeout=5.0,
             )
         except httpx.HTTPError as exc:
-            logger.error("Failed contacting Auth service: %s", exc)
+            logger.error(f"Failed contacting Auth service: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Authentication service unreachable.",
             )
+
     if auth_resp.status_code != 200:
         raise HTTPException(
             status_code=auth_resp.status_code, detail=auth_resp.json().get("detail")
         )
+
     token_data = auth_resp.json()
     jwt_token = token_data["access_token"]
     user_id = token_data["user_id"]
     email = token_data["email"]
     roles = token_data.get("roles", ["traveler"])
-    old_sid = request.cookies.get(SESSION_COOKIE_NAME)
+    resolved_tenant = token_data.get("tenant_id", req.tenant_id)
+
+    old_sid = request.cookies.get(COOKIE_NAME)
     session_id, csrf_token = await session_manager.create_session(
         jwt_token=jwt_token,
         user_id=user_id,
         email=email,
-        tenant_id=req.tenant_id,
+        tenant_id=resolved_tenant,
         roles=roles,
         old_session_id=old_sid,
     )
-    is_secure = request.url.scheme == "https"
+
+    is_secure = request.url.scheme == "https" or _settings.security.cookie_secure
     response.set_cookie(
-        key=SESSION_COOKIE_NAME,
+        key=COOKIE_NAME,
         value=session_id,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=_settings.security.cookie_samesite or "lax",
         max_age=86400,
     )
     return {
         "user_id": user_id,
         "email": email,
         "roles": roles,
-        "tenant_id": req.tenant_id,
+        "tenant_id": resolved_tenant,
         "csrf_token": csrf_token,
         "expires_in": 86400,
     }
 
 
+# Step 8 (C-9): OIDC Login Initiation Route
+@app.get("/api/v1/auth/{provider}/login")
+async def oidc_login_initiate(provider: str, redirect_uri: str | None = None):
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(32)
+
+    r = await get_redis_client()
+    if r:
+        await r.setex(
+            f"oidc:state:{state}",
+            600,
+            json.dumps({"provider": provider, "code_verifier": verifier}),
+        )
+
+    target_redirect = redirect_uri or f"/api/v1/auth/{provider}/callback"
+    auth_url = f"{AUTH_SERVICE_URL}/api/v1/auth/oidc/login?provider={provider}&state={state}&redirect_uri={target_redirect}"
+    return RedirectResponse(url=auth_url)
+
+
+# Step 8 (C-9): OIDC Callback Route
+@app.get("/api/v1/auth/{provider}/callback")
+async def oidc_callback(provider: str, code: str, state: str, request: Request):
+    r = await get_redis_client()
+    verifier = None
+    if r:
+        raw_meta = await r.getdel(f"oidc:state:{state}")
+        if raw_meta:
+            meta = json.loads(raw_meta)
+            verifier = meta.get("code_verifier")
+
+    redirect_uri = str(request.url.remove_query_params(["code", "state"]))
+    exchange_payload = {
+        "provider": provider,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "code_verifier": verifier,
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(
+                f"{AUTH_SERVICE_URL}/api/v1/auth/oidc/login",
+                json=exchange_payload,
+                timeout=8.0,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Auth service error: {exc}",
+            )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.json().get("detail", "OIDC Login failed"),
+        )
+
+    token_data = resp.json()
+    old_sid = request.cookies.get(COOKIE_NAME)
+    session_id, csrf_token = await session_manager.create_session(
+        jwt_token=token_data["access_token"],
+        user_id=token_data["user_id"],
+        email=token_data["email"],
+        tenant_id=token_data.get("tenant_id", "default"),
+        roles=token_data.get("roles", ["traveler"]),
+        old_session_id=old_sid,
+    )
+
+    redirect_resp = RedirectResponse(url="/", status_code=302)
+    is_secure = request.url.scheme == "https" or _settings.security.cookie_secure
+    redirect_resp.set_cookie(
+        key=COOKIE_NAME,
+        value=session_id,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=86400,
+    )
+    return redirect_resp
+
+
 @app.post("/api/v1/auth/logout")
 async def bff_logout(request: Request, response: Response):
-    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    sid = request.cookies.get(COOKIE_NAME)
     if sid:
         await session_manager.destroy_session(sid)
-    response.delete_cookie(key=SESSION_COOKIE_NAME)
+    response.delete_cookie(key=COOKIE_NAME)
     return {"status": "logged_out"}
 
 
+# Step 8 (H-7): Session & User Account Proxy Endpoints
+@app.get("/api/v1/users/me/sessions")
+async def proxy_list_sessions(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    jwt_token = session.get("jwt")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{AUTH_SERVICE_URL}/api/v1/users/me/sessions",
+            headers={"Authorization": f"Bearer {jwt_token}"},
+        )
+    return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+
+@app.delete("/api/v1/users/me/sessions/{sid}")
+async def proxy_revoke_session(sid: str, request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    await session_manager.revoke_session(
+        sid, tenant_id=session.get("tenant_id", "default")
+    )
+    return {"status": "revoked", "session_id": sid}
+
+
+@app.post("/api/v1/users/me/logout-all")
+async def proxy_logout_all(request: Request, response: Response):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    user_id = session.get("user_id")
+    await session_manager.logout_user_all_devices(
+        user_id, tenant_id=session.get("tenant_id", "default")
+    )
+    response.delete_cookie(key=COOKIE_NAME)
+    return {"status": "logged_out_all"}
+
+
+# Step 1 (A-1): Trip Planning & Outbox Fix
 @app.post("/api/v1/plan")
+@app.post("/api/v1/trips/plan")
 async def initiate_trip_plan(
     plan_req: TripPlanRequest, request: Request, response: Response
 ):
     session = await session_manager.validate_request(request, check_csrf=True)
     user_id = session["user_id"]
     tenant_id = session.get("tenant_id", "default")
-    set_log_context(
-        correlation_id=request.headers.get(
-            "X-Correlation-ID", f"cor_{uuid.uuid4().hex[:12]}"
-        ),
-        tenant_id=tenant_id,
-    )
     correlation_id = (
         request.headers.get("X-Correlation-ID") or f"cor_{uuid.uuid4().hex[:12]}"
     )
+    set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
 
     sanitized_query = redact_pii(plan_req.message)
     event_payload = PlanningInitiatedPayload(
@@ -259,19 +404,27 @@ async def initiate_trip_plan(
         traceparent=extract_traceparent(request.headers),
         data=event_payload.model_dump(),
     )
+
+    # Step 1 (A-1): Fix write_outbox positional/keyword parameters
     await write_outbox(
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+        stream_name="stream:travel:planning:initiated",
         event_type="travelbrain.planning.initiated",
         payload=cloud_event.model_dump(),
-        tenant_id=tenant_id,
     )
+
     return {
         "status": "accepted",
         "correlation_id": correlation_id,
         "sse_url": f"/api/v1/events/stream/{correlation_id}",
+        "stream_url": f"/api/v1/events/stream/{correlation_id}",
     }
 
 
+# Step 1 (A-3): SSE Streaming Route with Frame Termination
 @app.get("/api/v1/events/stream/{correlation_id}")
+@app.get("/api/v1/trips/{correlation_id}/stream")
 async def stream_planning_events(correlation_id: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
     _ = session["user_id"]
@@ -281,23 +434,23 @@ async def stream_planning_events(correlation_id: str, request: Request):
         ACTIVE_SSE_CONNECTIONS_GAUGE.inc()
         try:
             pubsub = await event_bus.subscribe(f"events:{correlation_id}")
-            yield f"data: {json.dumps({'stage': 'connected', 'message': 'SSE Stream Established'})}"
+            yield f"data: {json.dumps({'stage': 'connected', 'message': 'SSE Stream Established'})}\n\n"
             async for msg in pubsub.listen():
                 if msg["type"] == "message":
                     raw_data = msg["data"]
-                    yield f"data: {raw_data}"
+                    yield f"data: {raw_data}\n\n"
                     try:
                         parsed = json.loads(raw_data)
                         if (
-                            parsed.get("stage") == "completed"
+                            parsed.get("stage") in ("completed", "synthesis_completed")
                             or parsed.get("percentage") == 100
                         ):
                             break
-                    except (json.JSONDecodeError, TypeError) as exc:
-                        logger.debug(f"Skipping non-JSON SSE payload: {exc}")
-        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
-            logger.error(f"SSE stream error: {exc}")
-            yield f"data: {json.dumps({'stage': 'error', 'message': str(exc)})}"
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"SSE stream error for trip {correlation_id}: {exc}")
+            yield f"data: {json.dumps({'stage': 'error', 'message': str(exc)})}\n\n"
         finally:
             ACTIVE_SSE_CONNECTIONS_GAUGE.dec()
 

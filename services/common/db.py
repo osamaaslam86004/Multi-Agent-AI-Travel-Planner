@@ -1,6 +1,6 @@
 """
 Postgres Database connection pool management, tenant RLS context setting,
-and transactional operations for trips, append-only event audit, LLM usage ledger, and outbox.
+and transactional operations for trips, identity tables, event audit, LLM usage ledger, and outbox.
 FinOps persistence for token usage, cost estimates, model, and provider.
 """
 
@@ -14,10 +14,12 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 _PSYCOPG_ERRORS = (psycopg.Error,)
+
+
 from services.common.telemetry import record_llm_metrics
+from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.db")
-from services.core.config import get_settings
 
 
 def _get_db_settings():
@@ -31,12 +33,22 @@ _DB_ERRORS: tuple[type[Exception], ...] = _PSYCOPG_ERRORS + (
     ValueError,
     json.JSONDecodeError,
 )
+
 _pool: Any = None
 _in_memory_db: dict[str, Any] = {
     "trips": {},
     "trip_events": [],
     "llm_usage": [],
     "outbox": [],
+    "user_profiles": {},
+    "federated_identities": {},
+    "login_history": {},
+    "orgs": {},
+    "org_memberships": {},
+    "role_assignments": {},
+    "idp_configs": {},
+    "scim_tokens": {},
+    "scim_groups": {},
 }
 
 
@@ -59,6 +71,8 @@ def calculate_cost(
 async def init_db_pool() -> Any:
     """Initializes the psycopg_pool connection pool if psycopg is available."""
     global _pool
+    if psycopg is None or AsyncConnectionPool is None:
+        return None
     if _pool is not None:
         return _pool
     try:
@@ -72,13 +86,135 @@ async def init_db_pool() -> Any:
         )
         await _pool.open()
         logger.info("Initialized Postgres connection pool.")
+        await init_identity_schema()
         return _pool
-    except (ImportError, OSError, RuntimeError, ValueError, psycopg.Error) as exc:
+    except (ImportError, OSError, RuntimeError, ValueError, Exception) as exc:
         logger.warning(
             f"Postgres pool initialization unavailable: {exc}. Using fallback in-memory database store."
         )
         _pool = None
         return None
+
+
+async def init_identity_schema() -> None:
+    """Creates Phase 2 Identity DDL tables if they do not exist."""
+    if _pool is None:
+        return
+    try:
+        async with _pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("""
+            CREATE TABLE IF NOT EXISTS orgs (
+                org_id VARCHAR(128) PRIMARY KEY,
+                org_name VARCHAR(255) NOT NULL,
+                tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
+                sso_enforced BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id VARCHAR(128) PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                display_name VARCHAR(255),
+                avatar_url TEXT,
+                bio TEXT,
+                timezone VARCHAR(64) DEFAULT 'UTC',
+                preferred_currency VARCHAR(16) DEFAULT 'USD',
+                status VARCHAR(32) DEFAULT 'active',
+                tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
+                org_id VARCHAR(128) REFERENCES orgs(org_id),
+                roles JSONB DEFAULT '["member"]'::jsonb,
+                email_verified BOOLEAN DEFAULT FALSE,
+                mfa_enabled BOOLEAN DEFAULT FALSE,
+                mfa_secret VARCHAR(255),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS federated_identities (
+                id VARCHAR(128) PRIMARY KEY,
+                user_id VARCHAR(128) REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+                provider VARCHAR(64) NOT NULL,
+                issuer VARCHAR(255),
+                provider_sub VARCHAR(255) NOT NULL,
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                email VARCHAR(255),
+                linked_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT unique_fed_identity UNIQUE (provider, issuer, provider_sub)
+            );
+
+            CREATE TABLE IF NOT EXISTS login_history (
+                id VARCHAR(128) PRIMARY KEY,
+                user_id VARCHAR(128) REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                timestamp TIMESTAMPTZ DEFAULT NOW(),
+                provider VARCHAR(64),
+                ip_address VARCHAR(64),
+                user_agent TEXT,
+                status VARCHAR(32),
+                suspicious BOOLEAN DEFAULT FALSE,
+                details TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS org_memberships (
+                id VARCHAR(128) PRIMARY KEY,
+                org_id VARCHAR(128) REFERENCES orgs(org_id) ON DELETE CASCADE,
+                user_id VARCHAR(128) REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+                role VARCHAR(64) DEFAULT 'member',
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS role_assignments (
+                id VARCHAR(128) PRIMARY KEY,
+                user_id VARCHAR(128) REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+                role VARCHAR(64) NOT NULL,
+                scope VARCHAR(64) DEFAULT 'tenant',
+                org_id VARCHAR(128),
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                assigned_by VARCHAR(128),
+                assigned_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS idp_configs (
+                org_id VARCHAR(128) PRIMARY KEY REFERENCES orgs(org_id) ON DELETE CASCADE,
+                idp_name VARCHAR(255) NOT NULL,
+                sso_type VARCHAR(32) NOT NULL,
+                issuer_url TEXT NOT NULL,
+                client_id VARCHAR(255) NOT NULL,
+                client_secret TEXT,
+                metadata_xml TEXT,
+                enforce_sso BOOLEAN DEFAULT FALSE,
+                allowed_domains JSONB DEFAULT '[]'::jsonb,
+                group_role_mappings JSONB DEFAULT '{}'::jsonb,
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS scim_tokens (
+                token_id VARCHAR(128) PRIMARY KEY,
+                org_id VARCHAR(128) REFERENCES orgs(org_id) ON DELETE CASCADE,
+                token_hash VARCHAR(255) NOT NULL,
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                expires_at TIMESTAMPTZ
+            );
+
+            CREATE TABLE IF NOT EXISTS scim_groups (
+                group_id VARCHAR(128) PRIMARY KEY,
+                org_id VARCHAR(128),
+                display_name VARCHAR(255) NOT NULL,
+                members JSONB DEFAULT '[]'::jsonb,
+                tenant_id VARCHAR(128) DEFAULT 'default',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """)
+            await conn.commit()
+            logger.info("Validated/created Phase 2 identity schema in Postgres.")
+    except Exception as exc:
+        logger.warning(f"Error creating identity schema tables: {exc}")
 
 
 async def close_db_pool() -> None:
@@ -94,10 +230,7 @@ async def close_db_pool() -> None:
 
 @contextlib.asynccontextmanager
 async def get_tenant_conn(tenant_id: str = "default") -> AsyncGenerator[Any, None]:
-    """
-    Yields an active database connection with tenant RLS set: SET LOCAL app.current_tenant_id = tenant_id.
-    Yields None if Postgres is unavailable.
-    """
+    """Yields active connection with tenant RLS set."""
     pool = await init_db_pool()
     if pool is None:
         yield None
@@ -121,18 +254,16 @@ async def write_outbox(
     event_type: str,
     payload: dict[str, Any],
 ) -> str:
-    """
-    Writes a new trip record (if not present) and an unprocessed outbox entry in Postgres transaction.
-    """
+    """Writes trip record and outbox entry in Postgres transaction."""
     async with get_tenant_conn(tenant_id) as conn:
         if conn:
             try:
                 async with conn.transaction(), conn.cursor() as cur:
                     user_id = payload.get("user_id", "guest")
                     await cur.execute(
-                        "INSERT INTO users (user_id, tenant_id, email) VALUES (%s, %s, %s) "
+                        "INSERT INTO user_profiles (user_id, email, tenant_id) VALUES (%s, %s, %s) "
                         "ON CONFLICT (user_id) DO NOTHING;",
-                        (user_id, tenant_id, f"{user_id}@{tenant_id}.local"),
+                        (user_id, f"{user_id}@{tenant_id}.local", tenant_id),
                     )
                     trip_id = f"trip_{correlation_id}"
                     query = payload.get("user_query", "")
@@ -179,9 +310,7 @@ async def write_outbox(
 
 
 async def relay_outbox(event_bus: Any) -> int:
-    """
-    Relays unprocessed outbox messages from Postgres (or in-memory store) to Redis Streams.
-    """
+    """Relays unprocessed outbox messages to Redis Streams."""
     relayed_count = 0
     pool = await init_db_pool()
     if pool:
@@ -244,18 +373,15 @@ async def upsert_trip_result(
     hotel_degraded: bool = False,
     weather_degraded: bool = False,
 ) -> None:
-    """
-    Upserts completed trip result idempotently into Postgres `trips` table based on correlation_id.
-    """
     async with get_tenant_conn(tenant_id) as conn:
         if conn:
             try:
                 trip_id = f"trip_{correlation_id}"
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "INSERT INTO users (user_id, tenant_id, email) VALUES (%s, %s, %s) "
+                        "INSERT INTO user_profiles (user_id, email, tenant_id) VALUES (%s, %s, %s) "
                         "ON CONFLICT (user_id) DO NOTHING;",
-                        (user_id, tenant_id, f"{user_id}@{tenant_id}.local"),
+                        (user_id, f"{user_id}@{tenant_id}.local", tenant_id),
                     )
                     await cur.execute(
                         """
@@ -294,9 +420,7 @@ async def upsert_trip_result(
                         ),
                     )
                 await conn.commit()
-                logger.info(
-                    f"Idempotently upserted trip '{correlation_id}' to Postgres."
-                )
+                logger.info(f"Upserted trip '{correlation_id}' to Postgres.")
             except _DB_ERRORS as exc:
                 logger.error(f"Failed upserting trip result to DB: {exc}")
     _in_memory_db["trips"][correlation_id] = {
@@ -319,7 +443,6 @@ async def upsert_trip_result(
 async def record_trip_event(
     tenant_id: str, correlation_id: str, event_type: str, payload: dict[str, Any]
 ) -> None:
-    """Inserts an immutable append-only event record into `trip_events`."""
     async with get_tenant_conn(tenant_id) as conn:
         if conn:
             try:
@@ -361,9 +484,6 @@ async def record_llm_usage(
     latency_ms: float = 0.0,
     cost_estimate: float = 0.0,
 ) -> None:
-    """
-    Inserts FinOps LLM usage record into Postgres `llm_usage` table with token tracking and cost estimates.
-    """
     final_cost = (
         cost_estimate
         if cost_estimate > 0.0
@@ -425,7 +545,6 @@ async def record_llm_usage(
 
 
 async def get_tenant_total_tokens_today(tenant_id: str) -> int:
-    """Returns total tokens consumed by tenant today for pre-flight budget enforcement."""
     pool = await init_db_pool()
     if pool:
         try:
@@ -451,7 +570,6 @@ async def get_tenant_total_tokens_today(tenant_id: str) -> int:
 async def get_trip_by_id(
     correlation_id: str, tenant_id: str = "default"
 ) -> dict[str, Any] | None:
-    """Retrieves stored trip result from Postgres (or memory fallback) enforcing tenant ownership."""
     async with get_tenant_conn(tenant_id) as conn:
         if conn:
             try:

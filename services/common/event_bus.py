@@ -14,12 +14,10 @@ import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
 from services.common.schemas import CloudEvent
-
-logger = logging.getLogger("travelbrain.event_bus")
 from services.core.config import get_settings
 
-# Centralized settings fallback
-# REDIS_PASSWORD initialized via get_settings()
+logger = logging.getLogger("travelbrain.event_bus")
+
 DLQ_STREAM = "stream:travel:dlq"
 
 
@@ -30,10 +28,12 @@ class EventBus:
         settings = get_settings()
         self.redis_url = redis_url or settings.redis.url
         self.password = password if password is not None else settings.redis.password
-        self.redis_url = redis_url
-        self.password = password or None
         self.client: Any = None
         self._last_percentages: dict[str, int] = {}
+
+    @property
+    def is_connected(self) -> bool:
+        return self.client is not None
 
     async def connect(self) -> None:
         if aioredis is None:
@@ -54,6 +54,15 @@ class EventBus:
             await self.client.aclose()
             self.client = None
             logger.info("Closed EventBus connection.")
+
+    async def subscribe(self, channel: str) -> Any:
+        if not self.client:
+            await self.connect()
+        if not self.client:
+            raise RuntimeError("EventBus client connection unavailable")
+        pubsub = self.client.pubsub()
+        await pubsub.subscribe(channel)
+        return pubsub
 
     async def publish(
         self, stream_name: str, event: CloudEvent[Any], maxlen: int = 10000
@@ -101,7 +110,7 @@ class EventBus:
             approximate=True,
         )
         await self.client.expire(stream_name, 86400)
-        pubsub_channel = f"trip:stream:{cid}"
+        pubsub_channel = f"events:{cid}"
         await self.client.publish(pubsub_channel, msg_payload)
         return msg_id
 
@@ -214,14 +223,7 @@ class EventBus:
                                 msg_data,
                                 handler,
                             )
-                except (
-                    ResponseError,
-                    aioredis.RedisError,
-                    OSError,
-                    RuntimeError,
-                    TimeoutError,
-                    ValueError,
-                ) as pel_err:
+                except Exception as pel_err:
                     logger.debug(f"XAUTOCLAIM info on '{stream_name}': {pel_err}")
                 try:
                     entries = await self.client.xreadgroup(
@@ -231,7 +233,7 @@ class EventBus:
                         count=batch_size,
                         block=block_ms,
                     )
-                except ResponseError as re_err:
+                except Exception as re_err:
                     if "NOGROUP" in str(re_err):
                         logger.warning(
                             f"NOGROUP error detected on '{stream_name}'. Re-creating consumer group '{group_name}' after Redis eviction..."
@@ -257,14 +259,6 @@ class EventBus:
                         )
             except asyncio.CancelledError:
                 break
-            except (
-                ResponseError,
-                aioredis.RedisError,
-                OSError,
-                RuntimeError,
-                TimeoutError,
-                ValueError,
-                json.JSONDecodeError,
-            ) as loop_err:
+            except Exception as loop_err:
                 logger.error(f"Error in consumer loop for '{stream_name}': {loop_err}")
                 await asyncio.sleep(1.0)

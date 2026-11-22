@@ -36,10 +36,8 @@ async def get_redis_client() -> Any:
         logger.info(
             f"Initialized unified Redis client connection to {settings.redis.url}"
         )
-
         registry = get_teardown_registry()
         registry.register("redis_client", close_redis_client)
-
     return _redis_client
 
 
@@ -49,7 +47,7 @@ async def close_redis_client() -> None:
         try:
             await _redis_client.aclose()
             logger.info("Closed unified Redis client connection.")
-        except (aioredis.RedisError, OSError, RuntimeError, TimeoutError) as exc:
+        except Exception as exc:
             logger.error(f"Error closing Redis client: {exc}")
         finally:
             _redis_client = None

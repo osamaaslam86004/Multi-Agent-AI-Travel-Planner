@@ -23,12 +23,10 @@ REDIS_CACHE_URL = os.getenv(
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 OPENWEATHER_MCP_COMMAND = os.getenv("OPENWEATHER_MCP_COMMAND", "openweather-mcp")
-
 weather_breaker = CircuitBreaker("OpenWeatherBreaker", fail_max=4, reset_timeout=30.0)
 weather_mcp_breaker = CircuitBreaker(
     "OpenWeatherMCPBreaker", fail_max=3, reset_timeout=20.0
 )
-
 APPROVED_WEATHER_TOOLS = {
     "get_current_weather",
     "get_weather_forecast",
