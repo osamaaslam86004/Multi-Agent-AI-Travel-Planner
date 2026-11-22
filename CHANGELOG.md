@@ -7,34 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ## [1.7.2] - 2026-11-22
-## [1.7.2] - 2026-11-22
 
 ### Added
 - **Durable Identity Schema, Migrations & Persistence Layer (`migrations/`, `services/auth_service/user_lifecycle.py`, `services/auth_service/enterprise.py`, `services/common/db.py`)**:
-  - Added database migrations and repository persistence for `user_profiles`, `federated_identities`, `login_history`, `orgs`, `org_memberships`, `role_assignments`, `idp_configs`, `scim_tokens`, and `scim_groups` with `tenant_id` scoping and Row-Level Security (RLS), replacing process-local identity state dictionaries[cite: 1].
-  - Replaced placeholder `users` row inserts in `common/db.py` with real profile foreign keys/references[cite: 1].
+  - Added database migrations and repository persistence for `user_profiles`, `federated_identities`, `login_history`, `orgs`, `org_memberships`, `role_assignments`, `idp_configs`, `scim_tokens`, and `scim_groups` with `tenant_id` scoping and Row-Level Security (RLS), replacing process-local identity state dictionaries.
+  - Replaced placeholder `users` row inserts in `common/db.py` with real profile foreign keys/references.
 - **Refresh Token Rotation, Revocation Registry & Token Typing (`services/auth_service/main.py`, `services/auth_service/security.py`, `services/common/auth_middleware.py`)**:
-  - Added explicit `token_use` claims (`access` vs. `refresh`) and implemented `/auth/refresh` with refresh token rotation, token family tracking, stored `jti` hashes, and reuse detection with family revocation[cite: 1].
-  - Implemented real token and session revocation in Redis (`revoked:{jti}`, `revoked:sid:{sid}`, and per-user `tokens_valid_after:{user_id}`) using the shared password-aware Redis client (`services.shared.redis_client.get_redis_client()`) with fail-closed (`503`) handling in `production` when Redis is unreachable[cite: 1].
+  - Added explicit `token_use` claims (`access` vs. `refresh`) and implemented `/auth/refresh` with refresh token rotation, token family tracking, stored `jti` hashes, and reuse detection with family revocation.
+  - Implemented real token and session revocation in Redis (`revoked:{jti}`, `revoked:sid:{sid}`, and per-user `tokens_valid_after:{user_id}`) using the shared password-aware Redis client (`services.shared.redis_client.get_redis_client()`) with fail-closed (`503`) handling in `production` when Redis is unreachable.
 - **Federated Identity Linking & OIDC Protocol Security (`services/auth_service/adapters.py`, `services/auth_service/main.py`, `services/auth_service/enterprise.py`)**:
-  - Added `federated_identities` binding external identities to `(provider, issuer, sub)` (and Entra `tid` + `oid`), requiring verified email for first-time account creation and restricting automatic linking to verified emails from trusted domains/providers[cite: 1].
-  - Added server-side `state`, `nonce`, and PKCE validation bound to short-lived pre-sessions, enforced `aud`/`iss`/`nonce` validation (including Entra issuer/tenant checks), offloaded blocking JWKS lookups via `asyncio.to_thread`, and sanitized upstream/validation error responses[cite: 1].
+  - Added `federated_identities` binding external identities to `(provider, issuer, sub)` (and Entra `tid` + `oid`), requiring verified email for first-time account creation and restricting automatic linking to verified emails from trusted domains/providers.
+  - Added server-side `state`, `nonce`, and PKCE validation bound to short-lived pre-sessions, enforced `aud`/`iss`/`nonce` validation (including Entra issuer/tenant checks), offloaded blocking JWKS lookups via `asyncio.to_thread`, and sanitized upstream/validation error responses.
 - **BFF OIDC Flows, Canonical Sessions & Frontend Identity UI (`services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`, `frontend/static/js/app.js`, `frontend/`)**:
-  - Added BFF OIDC login and callback routes (`GET /api/v1/auth/{provider}/login`, `GET .../callback`), `GET /api/v1/auth/me` with CSRF token delivery, and session management endpoints (`/users/me/sessions`, `DELETE .../sessions/{sid}`, and logout-all) wired to token/session revocation[cite: 1].
-  - Unified session IDs (`sid`) across BFF sessions and JWTs using canonical `session:{tenant}:{sid}` records and `user_sessions:{tenant}:{user}` indexes with sliding idle timeout[cite: 1].
-  - Updated frontend client and views to align with BFF routes and stream fields (`stream_url` / `sse_url`, CSRF headers), removed the false `"Guest Mode"` fallback when unauthenticated, and added login, profile, and session views[cite: 1].
+  - Added BFF OIDC login and callback routes (`GET /api/v1/auth/{provider}/login`, `GET .../callback`), `GET /api/v1/auth/me` with CSRF token delivery, and session management endpoints (`/users/me/sessions`, `DELETE .../sessions/{sid}`, and logout-all) wired to token/session revocation.
+  - Unified session IDs (`sid`) across BFF sessions and JWTs using canonical `session:{tenant}:{sid}` records and `user_sessions:{tenant}:{user}` indexes with sliding idle timeout.
+  - Updated frontend client and views to align with BFF routes and stream fields (`stream_url` / `sse_url`, CSRF headers), removed the false `"Guest Mode"` fallback when unauthenticated, and added login, profile, session management, and IdP configuration views.
+- **Passwordless Magic Links, Email Verification & Account Recovery (`services/auth_service/main.py`, `services/auth_service/user_lifecycle.py`, `services/common/mailer.py`)**:
+  - Added a mailer abstraction (with dev log-only and pluggable delivery adapters) and hardened magic-link issuance to return generic `202` responses without leaking tokens/URLs, store hashed single-use tokens in Redis (`GETDEL`), enforce per-email/IP rate limits and browser pre-session binding, and enforce status checks and login telemetry on verification.
+  - Added email verification and account recovery flows (`EmailVerifyRequest`, `AccountRecoveryRequest`, `AccountRecoveryConfirmRequest`) with minimum password length validation (`12+` characters).
+- **MFA TOTP Challenge & Step-Up Reauthentication (`services/auth_service/main.py`, `services/auth_service/security.py`, `services/common/auth_middleware.py`)**:
+  - Added persisted encrypted TOTP secrets, two-step enrollment verification (`mfa_enabled`), short-lived `mfa_token` issuance with `/mfa/challenge`, hashed single-use backup codes, failed-attempt rate limiting, and a last-used-step replay cache.
+  - Rebuilt `/reauthenticate` to verify real credentials (password, MFA code, or fresh IdP login) and issue RS256 `typ=sudo` tokens bound to `sid`, scope, and Redis-backed `jti` (using a dedicated key), enforced by `require_reauth` on sensitive operations (account deletion, provider unlink, role changes, IdP config updates, and SCIM token rotation).
+- **SAML 2.0 Assertion Validation, Org-Bound SSO & DNS Domain Proof (`services/auth_service/adapters.py`, `services/auth_service/enterprise.py`, `services/auth_service/main.py`)**:
+  - Replaced string-based SAML parsing with library-backed SAML validation (`python3-saml` / `pysaml2`) and `defusedxml` using per-org persisted `IdPConfig` metadata, validating signatures, `Issuer`, `Audience`, `Destination`, validity windows, `InResponseTo` (Redis-stored `AuthnRequest` IDs), and assertion replay caches while enforcing allowed org domains and account status.
+  - Added dynamic per-org auth adapter instantiation (including `GenericOIDCAdapter` federation) and DNS-TXT domain-ownership verification prior to domain discovery.
+- **SCIM 2.0 Protocol Conformance, Scoped RBAC, Trip Ownership & Domain Events (`services/auth_service/enterprise.py`, `services/auth_service/rbac.py`, `services/bff_gateway/main.py`, `contracts/events.py`, `services/common/schemas.py`)**:
+  - Added SCIM 2.0 `PUT`/`PATCH` (`SCIMPatchOperation`), `ServiceProviderConfig`, `Schemas`, and `ResourceTypes` with `application/scim+json` error responses (`409` on duplicate `userName`), org scoping, SCIM deprovisioning linked to account status/revocation, and an organization-safe IdP group-to-role allowlist.
+  - Added scoped `org_memberships` and `role_assignments(user_id, role, scope_type, scope_id)`, role assignment/revocation routes, org/tenant checks in `can_access_trip`, and shared-trip/delegated permission support (`TripShareRequest`, `DelegatedPermissionRequest`).
+  - Enforced server-side `correlation_id` generation, `(correlation_id -> user_id, tenant_id)` ownership persistence, `trips:create_own` permission checks, and SSE stream `can_access_trip` / ownership enforcement (`403` on unauthorized access).
+  - Emitted transactional outbox events (`UserAccountCreatedPayload`, `UserStatusChangedPayload`, `SSOLoginEventPayload`, `SCIMUserProvisionedPayload`, and `RoleAssignedPayload`) and consolidated duplicate CloudEvent schemas (`CloudEventV1` and `common.schemas.CloudEvent`).
 
 ### Changed
-- **Startup Config, Secret Validation & Cross-Service Wiring (`k8s/`, `docker-compose.yml`, `services/bff_gateway/main.py`, `services/common/event_bus.py`, `services/weather_service/worker.py`)**:
-  - Provisioned required secrets (including `JWT_SECRET_KEY`, `SCIM_TOKEN_SECRET`, and `JWT_PRIVATE_KEY_PEM`) in `production` manifests and `docker-compose.yml`, made startup validation role-aware for workers, and enforced fail-fast checks on missing keys or insecure defaults[cite: 1].
-  - Fixed `initiate_trip_plan` `write_outbox` arguments, moved `periodic_outbox_relay` startup into `lifespan` handling, aligned SSE streaming channels/framing and `/health/ready` checks, fixed `EventBus.__init__` credential handling for workers, replaced `search_weather` with `get_weather`, and repaired `docker-compose.yml` structure and volume declarations[cite: 1].
-  - Fixed Kubernetes `NetworkPolicy` selectors (`redis-broker-service`, `redis-cache-service`) and DNS/service/DB/Redis egress rules[cite: 1].
-- **Signing Key Lifecycle & Endpoint Authentication (`services/auth_service/security.py`, `services/auth_service/main.py`)**:
-  - Loaded primary and previous RSA signing keys from settings/secrets at startup, aborted startup when the primary key is missing in `staging` or `production`, retained previous keys in JWKS for at least max token TTL with `Cache-Control` headers, and switched auth service token checks to local public-key verification[cite: 1].
-  - Required authentication and derived acting identity from verified tokens on account, MFA, reauth, and RBAC routes instead of caller-supplied `user_id` or role lists, and enforced SCIM bearer token verification (`hmac.compare_digest`), IdP config authorization, and domain ownership proof[cite: 1].
-- **Central Login Policy Gate, Account Status & Server-Side Tenant Resolution (`services/auth_service/main.py`, `services/auth_service/user_lifecycle.py`, `services/bff_gateway/main.py`)**:
-  - Enforced central login policy evaluation (SSO enforcement and domain-to-org mapping), account status checks across all login paths, server-side tenant resolution instead of client-supplied `tenant_id`, and strict gating of dev login via `enable_dev_login` forbidden in `staging` and `production`[cite: 1].
-  - Removed `O(N)` `redis.keys(...)` session lookups and production in-memory session fallbacks, and aligned session cookie configuration[cite: 1].
+- **Startup Config, Secret Validation & Cross-Service Wiring (`k8s/`, `docker-compose.yml`, `services/bff_gateway/main.py`, `services/common/event_bus.py`, `services/weather_service/worker.py`, `core/config/validators.py`)**:
+  - Provisioned required secrets (including `JWT_SECRET_KEY`, `SCIM_TOKEN_SECRET`, and `JWT_PRIVATE_KEY_PEM`) in `production` manifests and `docker-compose.yml`, made startup validation role-aware for workers, and enforced fail-fast checks on missing keys or insecure defaults (`scim_token_secret`, default DB passwords, `cookie_secure`, `cors_origins`).
+  - Fixed `initiate_trip_plan` `write_outbox` arguments, moved `periodic_outbox_relay` startup into `lifespan` handling, aligned SSE streaming channels/framing and `/health/ready` checks, fixed `EventBus.__init__` credential handling for workers, replaced `search_weather` with `get_weather`, and repaired `docker-compose.yml` structure and volume declarations.
+  - Fixed Kubernetes `NetworkPolicy` selectors (`redis-broker-service`, `redis-cache-service`) and DNS/service/DB/Redis egress rules.
+- **Signing Key Lifecycle & Endpoint Authentication (`services/auth_service/security.py`, `services/auth_service/main.py`, `services/common/auth_middleware.py`)**:
+  - Loaded primary and previous RSA signing keys from settings/secrets at startup, aborted startup when the primary key is missing in `staging` or `production`, retained previous keys in JWKS for at least max token TTL with `Cache-Control` headers, and switched auth service token checks to local public-key verification.
+  - Required authentication and derived acting identity from verified tokens on account, MFA, reauth, and RBAC routes instead of caller-supplied `user_id` or role lists, and enforced SCIM bearer token verification (`hmac.compare_digest`), IdP config authorization, and domain ownership proof.
+  - Hardened `auth_service/main.py` CORS/middleware/lifecycle/telemetry/health checks, read `security.py` settings from `get_settings().auth` with distinct purpose keys, and updated `pyproject.toml` dependency floors (`cryptography>=44`, SAML/XML dependencies).
+- **Central Login Policy Gate, Account Lifecycle, Identity Model & Telemetry (`services/auth_service/main.py`, `services/auth_service/user_lifecycle.py`, `services/auth_service/rbac.py`, `services/bff_gateway/main.py`, `services/bff_gateway/session_manager.py`)**:
+  - Enforced central login policy evaluation (SSO enforcement and domain-to-org mapping), account status checks across all login paths, server-side tenant resolution instead of client-supplied `tenant_id`, and strict gating of dev login via `enable_dev_login` forbidden in `staging` and `production`.
+  - Removed `O(N)` `redis.keys(...)` session lookups and production in-memory session fallbacks, added constant-time CSRF checks, `__Host-` cookie prefix handling, and sliding idle timeouts in `session_manager.py`, and aligned session cookie names.
+  - Decoupled internal user IDs from email-derived UUIDv5 to support IdP email changes and multi-org memberships, recorded failed/magic-link/SAML logins with suspicious-login checks and IPv6-safe fingerprinting, added account status/link/unlink/deletion lifecycle controls, and validated profile fields (IANA timezone, ISO-4217 currency, `https` avatar URL), conditional Google OAuth consent/offline params, `PermissionDefinition` catalog checks, and real org names in SSO discovery.
 
 
 ## [1.7.1] - 2026-11-22
@@ -42,19 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Centralized `pydantic-settings` Configuration & Fail-Fast Validation (`services/core/config/`, `services/*/`)**:
   - Implemented centralized settings management using `pydantic-settings` with dedicated sub-configuration models for application, authentication, database, Redis, LLM providers, MCP integrations, observability, security, rate limits, and deployment.
-  - Added environment profile awareness (`development`, `staging`, `production`) with startup validation, fail-fast enforcement for invalid production configurations, configurable timeout/retry/concurrency settings, standardized naming conventions, and safe configuration reload support where applicable[cite: 6].
+  - Added environment profile awareness (`development`, `staging`, `production`) with startup validation, fail-fast enforcement for invalid production configurations, configurable timeout/retry/concurrency settings, standardized naming conventions, and safe configuration reload support where applicable.
 - **Standardized Service & Worker Lifecycles (`services/core/lifecycle/`, `services/*/main.py`, `services/*/worker.py`)**:
-  - Standardized FastAPI application lifespan handling and worker startup/shutdown lifecycles while preventing resource initialization at module import time[cite: 6].
-  - Centralized initialization and graceful teardown—with configurable shutdown deadlines and pending-work release—for Redis clients, PostgreSQL pools, HTTP clients, MCP sessions, OpenTelemetry, and provider clients[cite: 6].
+  - Standardized FastAPI application lifespan handling and worker startup/shutdown lifecycles while preventing resource initialization at module import time.
+  - Centralized initialization and graceful teardown—with configurable shutdown deadlines and pending-work release—for Redis clients, PostgreSQL pools, HTTP clients, MCP sessions, OpenTelemetry, and provider clients.
 - **Versioned Internal Service Contracts & Schemas (`services/contracts/`, `services/common/schemas.py`)**:
-  - Standardized API response and error response envelopes, defined internal service API contracts with explicit ownership and responsibility boundaries, and separated domain schemas from transport schemas[cite: 6].
-  - Added API and event payload contract versioning along with shared schema compatibility rules[cite: 6].
+  - Standardized API response and error response envelopes, defined internal service API contracts with explicit ownership and responsibility boundaries, and separated domain schemas from transport schemas.
+  - Added API and event payload contract versioning along with shared schema compatibility rules.
 - **Shared Architecture Cleanup & Centralized Feature Flags (`services/core/feature_flags.py`, `services/shared/redis_client.py`, `services/shared/http_client.py`, `services/common/`)**:
-  - Eliminated duplicated Redis and HTTP client initialization across modules, standardized dependency injection and logging/exception handling, and added centralized feature flag infrastructure alongside service-specific settings and architectural conventions for new services[cite: 6].
+  - Eliminated duplicated Redis and HTTP client initialization across modules, standardized dependency injection and logging/exception handling, and added centralized feature flag infrastructure alongside service-specific settings and architectural conventions for new services.
 
 ### Changed
 - **Environment Variable & Client Consolidation (`services/`)**:
-  - Removed scattered `os.getenv()` calls across service modules in favor of typed centralized settings and shared client/lifecycle utilities[cite: 6].
+  - Removed scattered `os.getenv()` calls across service modules in favor of typed centralized settings and shared client/lifecycle utilities.
 
 
 
