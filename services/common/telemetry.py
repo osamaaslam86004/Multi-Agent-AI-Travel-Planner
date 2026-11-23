@@ -14,11 +14,15 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
-# OpenTelemetry Imports with graceful fallback
+# OpenTelemetry Imports
 from opentelemetry import trace
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.trace.propagation.tracecontext import (
+    TraceContextTextMapPropagator,
+)
 
 OPENTELEMETRY_AVAILABLE = True
+
+
 # Context Variables for Log Correlation across Threads / Async Tasks
 correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "correlation_id", default="none"
@@ -149,7 +153,7 @@ def get_tracer(service_name: str = "travelbrain"):
     """Returns an OpenTelemetry tracer for the specified service name."""
     if OPENTELEMETRY_AVAILABLE and trace:
         return trace.get_tracer(service_name)
-    return trace.NoOpTracer()
+    return DummyTracer() if not OPENTELEMETRY_AVAILABLE else trace.NoOpTracer()
 
 
 # ============================================================================

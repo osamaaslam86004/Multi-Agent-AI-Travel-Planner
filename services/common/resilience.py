@@ -38,14 +38,12 @@ def is_transient_error(exc: Exception) -> bool:
         exc, (ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError)
     ):
         return False
-
     if (
         isinstance(exc, httpx.HTTPStatusError)
         and 400 <= exc.response.status_code < 500
         and exc.response.status_code != 429
     ):
         return False
-
     return bool(
         isinstance(
             exc,
@@ -94,7 +92,6 @@ class CircuitBreaker:
         self.reset_timeout = reset_timeout
         self.half_open_max_trials = half_open_max_trials
         self.redis = redis_client
-
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.success_count = 0
@@ -118,7 +115,6 @@ class CircuitBreaker:
             pipe.get(f"breaker:{self.name}:successes")
             pipe.get(f"breaker:{self.name}:last_change")
             results = await pipe.execute()
-
             st = results[0] or CircuitState.CLOSED.value
             fc = int(results[1] or 0)
             sc = int(results[2] or 0)
@@ -165,13 +161,11 @@ class CircuitBreaker:
                 self.dynamic_reset_timeout = custom_reset_timeout
             else:
                 self.dynamic_reset_timeout = self.reset_timeout
-
             if new_state == CircuitState.CLOSED:
                 self.failure_count = 0
                 self.success_count = 0
             elif new_state == CircuitState.HALF_OPEN:
                 self.success_count = 0
-
             await self._set_redis_state(
                 new_state,
                 0 if new_state == CircuitState.CLOSED else self.failure_count,
@@ -189,7 +183,6 @@ class CircuitBreaker:
         async with self._lock:
             state, fail_cnt, succ_cnt, last_change = await self._get_redis_state()
             now = time.time()
-
             if state == CircuitState.OPEN:
                 effective_timeout = getattr(
                     self, "dynamic_reset_timeout", self.reset_timeout
@@ -201,14 +194,12 @@ class CircuitBreaker:
                     raise CircuitBreakerOpenException(
                         f"CircuitBreaker '{self.name}' is OPEN. Fast-failing."
                     )
-
             if state == CircuitState.HALF_OPEN:
                 if self._half_open_trial_active:
                     raise CircuitBreakerOpenException(
                         f"CircuitBreaker '{self.name}' is HALF_OPEN (trial in progress). Fast-failing concurrent request."
                     )
                 self._half_open_trial_active = True
-
         try:
             result = await func(*args, **kwargs)
             async with self._lock:
@@ -229,7 +220,6 @@ class CircuitBreaker:
                 custom_timeout = (
                     max(self.reset_timeout, retry_after) if retry_after else None
                 )
-
                 async with self._lock:
                     (
                         state,
@@ -240,7 +230,6 @@ class CircuitBreaker:
                     fail_cnt += 1
                     self.failure_count = fail_cnt
                     await self._set_redis_state(state, fail_cnt, succ_cnt, last_change)
-
                     if state == CircuitState.HALF_OPEN or fail_cnt >= self.fail_max:
                         await self._transition(
                             CircuitState.OPEN, custom_reset_timeout=custom_timeout

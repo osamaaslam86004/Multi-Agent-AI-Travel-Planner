@@ -51,13 +51,11 @@ from services.shared.redis_client import get_redis_client
 
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.gateway")
-
 _settings = get_settings()
 AUTH_SERVICE_URL = _settings.auth.auth_service_url
 REDIS_URL = _settings.redis.url
 REDIS_PASSWORD = _settings.redis.password or ""
 COOKIE_NAME = _settings.security.session_cookie_name or SESSION_COOKIE_NAME
-
 session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 
@@ -94,11 +92,9 @@ app = FastAPI(
     version="2.0.0",
     description="Edge Gateway, Multi-Tenant Session Barrier, OpenTelemetry Tracing, and Authenticated SSE Streaming",
 )
-
 setup_telemetry(service_name="bff-gateway", app=app)
 register_exception_handlers(app)
 tracer = get_tracer("travelbrain.gateway")
-
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 if FRONTEND_DIR.exists():
@@ -191,7 +187,6 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many authentication requests.",
         )
-
     async with httpx.AsyncClient() as client:
         try:
             auth_resp = await client.post(
@@ -205,19 +200,16 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Authentication service unreachable.",
             )
-
     if auth_resp.status_code != 200:
         raise HTTPException(
             status_code=auth_resp.status_code, detail=auth_resp.json().get("detail")
         )
-
     token_data = auth_resp.json()
     jwt_token = token_data["access_token"]
     user_id = token_data["user_id"]
     email = token_data["email"]
     roles = token_data.get("roles", ["traveler"])
     resolved_tenant = token_data.get("tenant_id", req.tenant_id)
-
     old_sid = request.cookies.get(COOKIE_NAME)
     session_id, csrf_token = await session_manager.create_session(
         jwt_token=jwt_token,
@@ -227,7 +219,6 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
         roles=roles,
         old_session_id=old_sid,
     )
-
     is_secure = request.url.scheme == "https" or _settings.security.cookie_secure
     response.set_cookie(
         key=COOKIE_NAME,
@@ -252,7 +243,6 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
 async def oidc_login_initiate(provider: str, redirect_uri: str | None = None):
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(32)
-
     r = await get_redis_client()
     if r:
         await r.setex(
@@ -260,7 +250,6 @@ async def oidc_login_initiate(provider: str, redirect_uri: str | None = None):
             600,
             json.dumps({"provider": provider, "code_verifier": verifier}),
         )
-
     target_redirect = redirect_uri or f"/api/v1/auth/{provider}/callback"
     auth_url = f"{AUTH_SERVICE_URL}/api/v1/auth/oidc/login?provider={provider}&state={state}&redirect_uri={target_redirect}"
     return RedirectResponse(url=auth_url)
@@ -276,7 +265,6 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
         if raw_meta:
             meta = json.loads(raw_meta)
             verifier = meta.get("code_verifier")
-
     redirect_uri = str(request.url.remove_query_params(["code", "state"]))
     exchange_payload = {
         "provider": provider,
@@ -285,7 +273,6 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
         "state": state,
         "code_verifier": verifier,
     }
-
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
@@ -298,13 +285,11 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Auth service error: {exc}",
             )
-
     if resp.status_code != 200:
         raise HTTPException(
             status_code=resp.status_code,
             detail=resp.json().get("detail", "OIDC Login failed"),
         )
-
     token_data = resp.json()
     old_sid = request.cookies.get(COOKIE_NAME)
     session_id, csrf_token = await session_manager.create_session(
@@ -315,7 +300,6 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
         roles=token_data.get("roles", ["traveler"]),
         old_session_id=old_sid,
     )
-
     redirect_resp = RedirectResponse(url="/", status_code=302)
     is_secure = request.url.scheme == "https" or _settings.security.cookie_secure
     redirect_resp.set_cookie(
@@ -384,7 +368,6 @@ async def initiate_trip_plan(
         request.headers.get("X-Correlation-ID") or f"cor_{uuid.uuid4().hex[:12]}"
     )
     set_log_context(correlation_id=correlation_id, tenant_id=tenant_id)
-
     sanitized_query = redact_pii(plan_req.message)
     event_payload = PlanningInitiatedPayload(
         correlation_id=correlation_id,
@@ -404,7 +387,6 @@ async def initiate_trip_plan(
         traceparent=extract_traceparent(request.headers),
         data=event_payload.model_dump(),
     )
-
     await write_outbox(
         tenant_id=tenant_id,
         correlation_id=correlation_id,
@@ -412,7 +394,6 @@ async def initiate_trip_plan(
         event_type="travelbrain.planning.initiated",
         payload=cloud_event.model_dump(),
     )
-
     return {
         "status": "accepted",
         "correlation_id": correlation_id,

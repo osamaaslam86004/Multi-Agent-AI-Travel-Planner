@@ -14,7 +14,12 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import httpx
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 
 from services.common.schemas import LLMResult
 

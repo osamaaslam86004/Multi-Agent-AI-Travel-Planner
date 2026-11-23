@@ -7,7 +7,6 @@ import logging
 from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger("travelbrain.lifecycle.teardown")
-
 TeardownCallback = Callable[[], Awaitable[None]] | Callable[[], None]
 
 
@@ -47,7 +46,6 @@ class ServiceTeardownRegistry:
             logger.warning(
                 f"Teardown deadline exceeded ({deadline_seconds}s). Forcing shutdown."
             )
-
         self._callbacks.clear()
 
 

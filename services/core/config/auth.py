@@ -18,33 +18,26 @@ class AuthSettings(BaseDomainSettings):
     access_token_expire_seconds: int = 3600
     refresh_token_expire_seconds: int = 604800
     sudo_token_expire_seconds: int = 900
-
     # Core Auth Service URLs
     auth_service_url: str = "http://auth-service:8001"
     auth_service_jwks_url: str = "http://auth-service:8001/.well-known/jwks.json"
     jwt_previous_private_key_path: str | None = None
     jwt_previous_private_key_pem: str | None = None
-
     # OAuth / OIDC Providers Config
     google_client_id: str | None = None
     google_client_secret: str | None = None
-
     entra_client_id: str | None = None
     entra_client_secret: str | None = None
     entra_tenant_id: str = "common"
-
     github_client_id: str | None = None
     github_client_secret: str | None = None
-
     generic_oidc_issuer: str | None = None
     generic_oidc_client_id: str | None = None
     generic_oidc_client_secret: str | None = None
-
     # Enterprise Identity & SAML 2.0
     saml_sp_entity_id: str = "https://auth.travelbrain.ai/saml/metadata"
     saml_acs_url: str = "https://auth.travelbrain.ai/api/v1/auth/saml/acs"
     scim_token_secret: str = "dev-scim-token-secret-32chars-key"
-
     # Security & Auth Policies
     min_password_length: int = 12
     require_mfa_for_admins: bool = True

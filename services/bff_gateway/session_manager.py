@@ -10,11 +10,7 @@ import secrets
 import time
 from typing import Any
 
-try:
-    import redis.asyncio as aioredis
-except ImportError:
-    aioredis = None
-
+import redis.asyncio as aioredis
 from fastapi import HTTPException, Request, status
 
 logger = logging.getLogger("travelbrain.session_manager")
@@ -24,7 +20,6 @@ SESSION_COOKIE_NAME = "tb_session_id"
 CSRF_HEADER_NAME = "x-csrf-token"
 SESSION_TTL_SECONDS = 86400
 DEFAULT_DAILY_TENANT_TOKEN_BUDGET = 200_000
-
 _in_memory_sessions: dict[str, dict[str, Any]] = {}
 _in_memory_revoked: set[str] = set()
 
@@ -88,7 +83,6 @@ class SessionManager:
             "expires_at": str(absolute_expires_at),
         }
         _in_memory_sessions[session_id] = session_data
-
         if r:
             session_key = f"session:{tenant_id}:{session_id}"
             user_idx_key = f"user_sessions:{tenant_id}:{user_id}"
@@ -186,22 +180,38 @@ class SessionManager:
             await r.delete(user_idx_key)
         return len(to_del)
 
-    async def check_rate_limit(
+    async def check_tenant_budget(
         self,
-        client_identifier: str,
-        tenant_id: str = "default",
-        max_requests: int = 60,
-        window_seconds: int = 60,
-    ) -> bool:
+        tenant_id: str,
+        estimated_tokens: int = 1000,
+        daily_limit_tokens: int = 200000,
+    ) -> tuple[bool, int]:
         r = await self.get_redis()
         if not r:
-            return True
-        now = time.time()
-        key = f"ratelimit:{tenant_id}:{client_identifier}"
-        pipeline = r.pipeline()
-        pipeline.zremrangebyscore(key, 0, now - window_seconds)
-        pipeline.zadd(key, {f"{now}-{secrets.token_hex(4)}": now})
-        pipeline.zcard(key)
-        pipeline.expire(key, window_seconds)
-        results = await pipeline.execute()
-        return results[2] <= max_requests
+            return True, 0
+        current_str = await r.get(f"tenant:budget:{tenant_id}")
+        current = int(current_str) if current_str else 0
+        if current + estimated_tokens > daily_limit_tokens:
+            return False, current
+        return True, current
+
+
+async def check_rate_limit(
+    self,
+    client_identifier: str,
+    tenant_id: str = "default",
+    max_requests: int = 60,
+    window_seconds: int = 60,
+) -> bool:
+    r = await self.get_redis()
+    if not r:
+        return True
+    now = time.time()
+    key = f"ratelimit:{tenant_id}:{client_identifier}"
+    pipeline = r.pipeline()
+    pipeline.zremrangebyscore(key, 0, now - window_seconds)
+    pipeline.zadd(key, {f"{now}-{secrets.token_hex(4)}": now})
+    pipeline.zcard(key)
+    pipeline.expire(key, window_seconds)
+    results = await pipeline.execute()
+    return results[2] <= max_requests

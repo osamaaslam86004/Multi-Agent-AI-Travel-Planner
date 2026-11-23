@@ -26,7 +26,6 @@ REDIS_CACHE_URL = os.getenv(
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DUCKDUCKGO_MCP_COMMAND = os.getenv("DUCKDUCKGO_MCP_COMMAND", "duckduckgo-mcp")
-
 tavily_breaker = CircuitBreaker("TavilyHotelBreaker", fail_max=3, reset_timeout=30.0)
 mcp_breaker = CircuitBreaker("DuckDuckGoMCPBreaker", fail_max=3, reset_timeout=20.0)
 APPROVED_HOTEL_TOOLS = {"duckduckgo_search", "ddg_search", "search", "web_search"}
@@ -145,7 +144,6 @@ class HotelProvider:
             logger.warning(
                 f"Tier 1 (Tavily API) failed for '{target_location}': {exc}. Failing over to Tier 2 (DuckDuckGo MCP)..."
             )
-
         try:
             text = await self.mcp_breaker.call(
                 self._fetch_duckduckgo_mcp, target_location
@@ -155,7 +153,6 @@ class HotelProvider:
             logger.warning(
                 f"Tier 2 (DuckDuckGo MCP) failed for '{target_location}': {exc}. Failing over to Tier 3 (Fallback)..."
             )
-
         return self._fallback_hotels(target_location)
 
     async def _fetch_tavily_hotels(self, location: str) -> str:

@@ -1,18 +1,12 @@
 """
 Production Redis Streams Event Bus supporting Consumer Groups, PubSub & CloudEvents.
 """
-import asyncio
+
 import json
 import logging
-from collections.abc import Callable, Coroutine
 from typing import Any
 
-try:
-    import redis.asyncio as aioredis
-    from redis.exceptions import ResponseError
-except ImportError:
-    aioredis = None
-    ResponseError = Exception
+import redis.asyncio as aioredis
 
 from services.common.schemas import CloudEvent
 from services.core.config import get_settings
@@ -23,6 +17,7 @@ DLQ_STREAM = "stream:travel:dlq"
 
 class EventBus:
     """Production Redis Streams Event Bus supporting Consumer Groups & CloudEvents."""
+
     def __init__(self, redis_url: str | None = None, password: str | None = None):
         settings = get_settings()
         self.redis_url = redis_url or settings.redis.url

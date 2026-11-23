@@ -10,7 +10,6 @@ from services.core.config import get_settings
 from services.core.lifecycle.teardown import get_teardown_registry
 
 logger = logging.getLogger("travelbrain.shared.http")
-
 _http_client: httpx.AsyncClient | None = None
 
 
@@ -22,10 +21,8 @@ async def get_httpx_client() -> httpx.AsyncClient:
         limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
         _http_client = httpx.AsyncClient(timeout=timeout, limits=limits)
         logger.info("Initialized unified async HTTPX client.")
-
         registry = get_teardown_registry()
         registry.register("httpx_client", close_httpx_client)
-
     return _http_client
 
 

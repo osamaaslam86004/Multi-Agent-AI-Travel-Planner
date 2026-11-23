@@ -2,12 +2,10 @@ name: travelbrain-microservices
 networks:
   travelbrain-mesh:
     driver: bridge
-
 volumes:
   redis-data:
   postgres-data:
   redis-cache-data:
-
 services:
   bff-gateway:
     build:
@@ -31,7 +29,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   auth-service:
     build:
       context: .
@@ -63,7 +60,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   flight-service:
     build:
       context: .
@@ -80,7 +76,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   hotel-service:
     build:
       context: .
@@ -97,7 +92,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   weather-service:
     build:
       context: .
@@ -114,7 +108,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   synthesis-service:
     build:
       context: .
@@ -130,7 +123,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   trip-store-service:
     build:
       context: .
@@ -151,7 +143,6 @@ services:
         condition: service_healthy
     networks:
       - travelbrain-mesh
-
   redis-broker:
     image: redis:7-alpine
     container_name: tb-redis-broker
@@ -180,7 +171,6 @@ services:
       retries: 5
     networks:
       - travelbrain-mesh
-
   postgres:
     image: postgres:16-alpine
     container_name: tb-postgres
@@ -200,7 +190,6 @@ services:
       retries: 5
     networks:
       - travelbrain-mesh
-
   redis-cache:
     image: redis:7-alpine
     container_name: tb-redis-cache

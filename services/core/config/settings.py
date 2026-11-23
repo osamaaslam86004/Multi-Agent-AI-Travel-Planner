@@ -21,7 +21,6 @@ from services.core.config.validators import validate_profile_settings
 
 class Settings(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
-
     app: ApplicationSettings = Field(default_factory=ApplicationSettings.load)
     auth: AuthSettings = Field(default_factory=AuthSettings.load)
     db: DatabaseSettings = Field(default_factory=DatabaseSettings.load)

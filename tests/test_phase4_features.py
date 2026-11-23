@@ -40,11 +40,9 @@ async def test_traceparent_generation_and_w3c_extraction():
     assert len(parts) == 4
     assert len(parts[1]) == 32
     assert len(parts[2]) == 16
-
     headers = {"TraceParent": tp}
     extracted = extract_traceparent(headers)
     assert extracted == tp
-
     carrier = {}
     injected = inject_traceparent(carrier, tp)
     assert injected["traceparent"] == tp
@@ -54,7 +52,6 @@ async def test_traceparent_generation_and_w3c_extraction():
 async def test_structured_json_logging_formatter():
     """Verify JSON log formatter includes trace_id, span_id, correlation_id, and tenant_id."""
     set_log_context(correlation_id="trip_test_999", tenant_id="tenant_gamma")
-
     formatter = JSONFormatter()
     record = logging.LogRecord(
         name="test_logger",
@@ -65,10 +62,8 @@ async def test_structured_json_logging_formatter():
         args=(),
         exc_info=None,
     )
-
     formatted_str = formatter.format(record)
     parsed = json.loads(formatted_str)
-
     assert parsed["level"] == "INFO"
     assert parsed["logger"] == "test_logger"
     assert parsed["message"] == "Test log message"
@@ -83,13 +78,10 @@ async def test_finops_cost_calculation_and_ledger():
     """Verify FinOps pricing formulas and DB usage recording."""
     groq_cost = calculate_cost("groq", "llama-3.3-70b-versatile", 1000, 500)
     assert round(groq_cost, 6) == 0.000985
-
     gemini_cost = calculate_cost("gemini", "gemini-2.5-flash", 2000, 1000)
     assert round(gemini_cost, 6) == 0.0009
-
     local_cost = calculate_cost("local_huggingface", "qwen2.5:7b", 5000, 5000)
     assert local_cost == 0.0
-
     await record_llm_usage(
         tenant_id="tenant_finops",
         user_id="usr_finops",
@@ -110,7 +102,6 @@ async def test_preflight_tenant_budget_check():
     mock_redis = MagicMock()
     mock_redis.get = AsyncMock(return_value="198000")
     sm.get_redis = AsyncMock(return_value=mock_redis)
-
     allowed, current = await sm.check_tenant_budget(
         tenant_id="tenant_test", estimated_tokens=5000, daily_limit_tokens=200000
     )
@@ -122,16 +113,12 @@ async def test_preflight_tenant_budget_check():
 async def test_circuit_breaker_non_transient_error_filtering():
     """Verify that non-transient exceptions (ValueError) do NOT count as circuit breaker failures."""
     cb = CircuitBreaker("TestBreaker", fail_max=2, reset_timeout=5.0)
-
     with pytest.raises(ValueError):
         await cb.call(AsyncMock(side_effect=ValueError("Invalid config parameter")))
-
     assert cb.failure_count == 0
     assert cb.state == "CLOSED"
-
     with pytest.raises(httpx.HTTPError):
         await cb.call(AsyncMock(side_effect=httpx.HTTPError("503 Service Unavailable")))
-
     assert cb.failure_count == 1
 
 
@@ -144,7 +131,6 @@ async def test_circuit_breaker_retry_after_parsing():
     err = httpx.HTTPStatusError(
         "429 Too Many Requests", request=MagicMock(), response=mock_resp
     )
-
     retry_sec = parse_retry_after(err)
     assert retry_sec == 45.0
 
@@ -153,10 +139,8 @@ async def test_circuit_breaker_retry_after_parsing():
 async def test_local_huggingface_provider_availability():
     """Verify LocalHuggingFaceProvider does NOT falsely report available when offline."""
     provider = LocalHuggingFaceProvider(local_endpoint_url="http://localhost:9999/v1")
-
     with patch("httpx.get", side_effect=httpx.ConnectError("Connection refused")):
         assert provider.is_available() is False
-
     messages = [MagicMock(type="user", content="Plan trip")]
     with (
         patch("httpx.get", side_effect=httpx.ConnectError("Connection refused")),
@@ -178,21 +162,17 @@ async def test_synthesizer_xml_delimitation_and_input_bounds():
     mock_result.token_usage = {"total_tokens": 100}
     mock_chain.generate.return_value = mock_result
     engine.chain = mock_chain
-
     long_query = "A" * 2000
     long_flights = "B" * 5000
-
     _itin, _resp = await engine.synthesize_plan(
         user_query=long_query,
         flight_results=long_flights,
         hotel_results="Hotel info",
         weather_results="Sunny 25C",
     )
-
     assert mock_chain.generate.called
     call_args = mock_chain.generate.call_args[0][0]
     user_msg_content = call_args[1].content
-
     assert "<user_query>" in user_msg_content
     assert "</user_query>" in user_msg_content
     assert "<untrusted_flight_data>" in user_msg_content

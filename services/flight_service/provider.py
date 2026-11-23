@@ -26,12 +26,10 @@ REDIS_CACHE_URL = os.getenv(
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 AVIATIONSTACK_MCP_COMMAND = os.getenv("AVIATIONSTACK_MCP_COMMAND", "aviationstack-mcp")
-
 flight_breaker = CircuitBreaker("AviationStackBreaker", fail_max=4, reset_timeout=30.0)
 flight_mcp_breaker = CircuitBreaker(
     "AviationStackMCPBreaker", fail_max=3, reset_timeout=20.0
 )
-
 APPROVED_FLIGHT_TOOLS = {
     "search_flights",
     "get_flight_status",
@@ -137,7 +135,6 @@ class FlightProvider:
                 )
                 data_dict = json.loads(cached_data)
                 return ProviderResult(**data_dict)
-
         if cache_key not in self._single_flight_locks:
             self._single_flight_locks[cache_key] = asyncio.Lock()
         async with self._single_flight_locks[cache_key]:

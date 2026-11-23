@@ -9,11 +9,6 @@ import os
 
 from aiohttp import web
 
-try:
-    import redis.asyncio as aioredis
-except ImportError:
-    aioredis = None
-
 from services.common.event_bus import EventBus
 from services.common.schemas import (
     CloudEvent,
@@ -37,7 +32,6 @@ STREAM_OUT = "stream:travel:weather:completed"
 CONSUMER_GROUP = "cg-weather-service"
 HOSTNAME = os.getenv("HOSTNAME") or os.getenv("POD_NAME") or "local-worker"
 CONSUMER_NAME = f"weather-worker-{HOSTNAME}-{os.getpid()}"
-
 setup_telemetry(service_name="weather-service")
 tracer = get_tracer("travelbrain.weather_worker")
 event_bus = EventBus(redis_url=REDIS_URL)
@@ -97,7 +91,6 @@ async def handle_planning_initiated(
     logger.info(
         f"Processing weather search for trip {correlation_id} (query: '{query}', dest: '{destination}')"
     )
-
     try:
         await event_bus.publish_progress(
             correlation_id,

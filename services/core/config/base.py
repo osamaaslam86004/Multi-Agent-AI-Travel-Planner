@@ -37,27 +37,22 @@ class BaseDomainSettings(BaseModel):
         """
         aliases = aliases or {}
         data: dict[str, Any] = {}
-
         for field_name, field_info in cls.model_fields.items():
             env_val = None
-
             # 1. Check explicit alias mapping
             alias_key = aliases.get(field_name)
             if alias_key and os.getenv(alias_key) is not None:
                 env_val = os.getenv(alias_key)
-
             # 2. Check prefixed environment variable
             if env_val is None and prefix:
                 prefixed_key = f"{prefix}_{field_name}".upper()
                 if os.getenv(prefixed_key) is not None:
                     env_val = os.getenv(prefixed_key)
-
             # 3. Check exact field name uppercase
             if env_val is None:
                 exact_key = field_name.upper()
                 if os.getenv(exact_key) is not None:
                     env_val = os.getenv(exact_key)
-
             if env_val is not None:
                 # Type conversion for basic types
                 annotation = field_info.annotation
@@ -82,5 +77,4 @@ class BaseDomainSettings(BaseModel):
                         data[field_name] = env_val
                 else:
                     data[field_name] = env_val
-
         return cls(**data)

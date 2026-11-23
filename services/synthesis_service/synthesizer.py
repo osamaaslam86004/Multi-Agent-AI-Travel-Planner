@@ -15,7 +15,6 @@ from services.common.pii_redactor import redact_pii, sanitize_tool_output
 from services.common.resilient_chain import ResilientLLMChain
 
 logger = logging.getLogger("travelbrain.synthesis_engine")
-
 last_llm_result_var: contextvars.ContextVar[LLMResult | None] = contextvars.ContextVar(
     "last_llm_result", default=None
 )
@@ -65,7 +64,6 @@ class SynthesisEngine:
         clean_flights = sanitize_tool_output(flight_results, max_length=3000)
         clean_hotels = sanitize_tool_output(hotel_results, max_length=3000)
         clean_weather = sanitize_tool_output(weather_results, max_length=3000)
-
         system_prompt = (
             "You are TravelBrain AI, an expert executive travel planner. Synthesize flight, hotel, "
             "and weather agent data into a comprehensive executive travel dossier with a structured day-by-day itinerary.\n"
@@ -78,7 +76,6 @@ class SynthesisEngine:
             "Section 1: Detailed Day-by-Day Itinerary\n"
             "Section 2: Executive Trip Dossier (with summary, tables, logistics, and advisories)."
         )
-
         user_prompt = (
             f"<user_query>\n{clean_query}\n</user_query>\n\n"
             f"<untrusted_flight_data>\n{clean_flights}\n</untrusted_flight_data>\n\n"
@@ -86,12 +83,10 @@ class SynthesisEngine:
             f"<untrusted_weather_data>\n{clean_weather}\n</untrusted_weather_data>\n\n"
             f"Generate the complete travel plan."
         )
-
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
-
         try:
             result = await self.chain.generate(
                 messages,
@@ -104,7 +99,6 @@ class SynthesisEngine:
                 f"Single-call synthesis complete via provider: {result.provider_name} "
                 f"({result.model_name}) in {result.latency_ms:.1f}ms"
             )
-
             raw_text = result.content
             if "---ITINERARY_DOSSIER_SPLIT---" in raw_text:
                 parts = raw_text.split("---ITINERARY_DOSSIER_SPLIT---", 1)
@@ -115,7 +109,6 @@ class SynthesisEngine:
                     clean_query, clean_flights, clean_hotels, clean_weather
                 )
                 final_response = raw_text.strip()
-
             return itinerary, final_response
         except (
             httpx.HTTPError,

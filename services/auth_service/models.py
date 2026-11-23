@@ -110,6 +110,7 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class AccountStatusChangeRequest(BaseModel):
+    user_id: str | None = None
     status: AccountStatus
     reason: str | None = None
 
@@ -120,12 +121,14 @@ class AccountRecoveryRequest(BaseModel):
 
 class AccountRecoveryConfirmRequest(BaseModel):
     token: str
-    new_password: str = Field(..., min_length=8)
+    new_password: str = Field(..., min_length=12)
 
 
 class LinkProviderRequest(BaseModel):
     provider: str
-    provider_token: str
+    provider_user_id: str | None = None
+    email: str | None = None
+    provider_token: str | None = None
 
 
 class LoginHistoryEntry(BaseModel):

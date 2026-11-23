@@ -72,7 +72,6 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def travelbrain_error_handler(
         request: Request, exc: TravelBrainError
     ) -> JSONResponse:
-
         logger.warning(
             f"Domain exception [{exc.code}] on {request.url.path}: {exc.message}"
         )
@@ -88,9 +87,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-
         logger.warning(f"Validation error on {request.url.path}: {exc.errors()}")
-
         envelope = ApiResponse.error_response(
             code="VALIDATION_ERROR",
             message="Request body or query parameters failed validation",
@@ -106,9 +103,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-
         logger.exception(f"Unhandled exception on {request.url.path}: {exc}")
-
         envelope = ApiResponse.error_response(
             code="INTERNAL_SERVER_ERROR",
             message="An unexpected server error occurred",

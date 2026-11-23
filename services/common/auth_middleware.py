@@ -12,11 +12,13 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
+from services.auth_service.security import verify_sudo_token
 from services.core.config import get_settings
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth_middleware")
 _s = get_settings()
+
 AUTH_SERVICE_JWKS_URL = _s.auth.auth_service_jwks_url
 EXPECTED_ISSUER = _s.auth.jwt_issuer
 EXPECTED_AUDIENCE = _s.auth.jwt_audience
@@ -79,12 +81,14 @@ async def get_current_user(
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
+
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
     try:
         client = get_jwks_client()
         signing_key = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
@@ -101,22 +105,19 @@ async def get_current_user(
                 "verify_iss": True,
             },
         )
-
-        # Step 5 (H-1): Enforce token_use == 'access'
         token_use = payload.get("token_use", "access")
         if token_use != "access":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token type: access token required.",
-                headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
+                headers={"WWW-Authenticate": "Bearer error='invalid_token_type'"},
             )
 
-        # Step 5 (C-5): Revocation check with fail-closed in production
         jti = payload.get("jti")
         sid = payload.get("sid")
         user_id = payload.get("sub")
-        r = await get_redis_client()
 
+        r = await get_redis_client()
         if r is None and ENVIRONMENT == "production":
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -212,8 +213,13 @@ def require_reauth():
         sudo_hdr = request.headers.get("X-Sudo-Token")
         if not sudo_hdr:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Sensitive operation requires reauthentication (missing X-Sudo-Token).",
+            )
+        if not verify_sudo_token(sudo_hdr, expected_user_id=user.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid, expired, or user-mismatched reauthentication token.",
             )
         return user
 

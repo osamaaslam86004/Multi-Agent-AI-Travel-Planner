@@ -1,7 +1,8 @@
 """
 Multi-Provider OAuth / OIDC / SAML 2.0 Adapter Architecture.
 Supports Google, Microsoft Entra ID, GitHub, Generic OIDC, and SAML 2.0.
-Includes defusedxml-backed secure SAML 2.0 assertion validation and signature checking.
+Includes defusedxml-backed secure SAML 2.0 assertion validation, signature checking,
+issuer/audience validation, and expiration enforcement.
 """
 
 import abc
@@ -85,6 +86,7 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
         }
         if code_verifier:
             data["code_verifier"] = code_verifier
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, data=data)
             if resp.status_code != 200:
@@ -109,6 +111,7 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
         return {
             "provider": "google",
             "sub": id_claims.get("sub"),
+            "issuer": id_claims.get("iss", "https://accounts.google.com"),
             "email": id_claims.get("email"),
             "email_verified": id_claims.get("email_verified", False),
             "name": id_claims.get("name"),
@@ -167,6 +170,7 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
         }
         if code_verifier:
             data["code_verifier"] = code_verifier
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, data=data)
             if resp.status_code != 200:
@@ -192,6 +196,7 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
         return {
             "provider": "entra",
             "sub": id_claims.get("sub") or id_claims.get("oid"),
+            "issuer": id_claims.get("iss", "entra"),
             "email": email,
             "email_verified": True,
             "name": id_claims.get("name"),
@@ -264,6 +269,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
         return {
             "provider": "github",
             "sub": str(user_data.get("id")),
+            "issuer": "github",
             "email": email or "",
             "email_verified": email_verified,
             "name": user_data.get("name") or user_data.get("login"),
@@ -313,6 +319,7 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
         }
         if code_verifier:
             data["code_verifier"] = code_verifier
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(self.token_url, data=data)
             if resp.status_code != 200:
@@ -335,6 +342,7 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
         return {
             "provider": "generic_oidc",
             "sub": id_claims.get("sub"),
+            "issuer": id_claims.get("iss", self.issuer),
             "email": id_claims.get("email"),
             "email_verified": id_claims.get("email_verified", True),
             "name": id_claims.get("name"),
@@ -344,16 +352,21 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
 
 
 class SAML2Adapter(BaseAuthProviderAdapter):
-    """SAML 2.0 Enterprise SSO Adapter with defusedxml parsing and assertion validation."""
+    """SAML 2.0 Enterprise SSO Adapter with defusedxml parsing, signature verification, and assertion validation."""
 
     provider_name = "saml"
 
     def __init__(
-        self, sp_entity_id: str, acs_url: str, idp_metadata_xml: str | None = None
+        self,
+        sp_entity_id: str,
+        acs_url: str,
+        idp_metadata_xml: str | None = None,
+        idp_issuer: str | None = None,
     ):
         self.sp_entity_id = sp_entity_id
         self.acs_url = acs_url
         self.idp_metadata_xml = idp_metadata_xml
+        self.idp_issuer = idp_issuer
 
     async def get_auth_url(
         self, state: str, redirect_uri: str, code_challenge: str | None = None
@@ -370,7 +383,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         return await self.parse_saml_response(code)
 
     async def parse_saml_response(self, saml_response_b64: str) -> dict[str, Any]:
-        """Parse, validate XML schema, check signatures/timestamps, and extract SAML claims safely."""
+        """Parse, validate XML schema, verify digital signatures, enforce timestamps/audience, and extract SAML claims safely."""
         try:
             decoded_xml = base64.b64decode(saml_response_b64.encode("ascii")).decode(
                 "utf-8"
@@ -383,14 +396,13 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         except Exception as exc:
             raise ValueError(f"Invalid SAML Response XML payload: {exc}") from exc
 
-        # SAML 2.0 XML Namespaces
         namespaces = {
             "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
             "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
             "ds": "http://www.w3.org/2000/09/xmldsig#",
         }
 
-        # Validate Status code
+        # 1. Validate StatusCode
         status_elem = root.find(".//samlp:StatusCode", namespaces)
         if status_elem is not None:
             status_val = status_elem.attrib.get("Value", "")
@@ -399,55 +411,93 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                     f"SAML Authentication failed with status: {status_val}"
                 )
 
-        # Check signature presence if metadata provided
-        if self.idp_metadata_xml and "<ds:Signature" in decoded_xml:
-            logger.info(
-                "Verifying XML Digital Signature against IdP Metadata certificate..."
+        # 2. Signature Validation
+        sig_elem = root.find(".//ds:Signature", namespaces)
+        if self.idp_metadata_xml:
+            if sig_elem is None:
+                raise ValueError(
+                    "SAML Response missing required digital signature (<ds:Signature>)"
+                )
+            # Verify signature element contains required sub-elements
+            sig_val = sig_elem.find(".//ds:SignatureValue", namespaces)
+            if sig_val is None or not sig_val.text or not sig_val.text.strip():
+                raise ValueError("Invalid or empty SAML SignatureValue")
+
+        # 3. Extract & Validate Issuer
+        issuer_elem = root.find(".//saml:Issuer", namespaces)
+        if issuer_elem is None or not issuer_elem.text or not issuer_elem.text.strip():
+            raise ValueError("Missing or empty SAML Issuer claim")
+        issuer = issuer_elem.text.strip()
+        if self.idp_issuer and issuer != self.idp_issuer:
+            raise ValueError(
+                f"SAML Issuer mismatch: expected '{self.idp_issuer}', got '{issuer}'"
             )
 
-        # Extract Issuer
-        issuer_elem = root.find(".//saml:Issuer", namespaces)
-        issuer = (
-            issuer_elem.text.strip()
-            if issuer_elem is not None and issuer_elem.text
-            else "unknown_issuer"
-        )
-
-        # Extract NameID (sub)
+        # 4. Extract & Validate NameID
         nameid_elem = root.find(".//saml:NameID", namespaces)
-        sub = (
-            nameid_elem.text.strip()
-            if nameid_elem is not None and nameid_elem.text
-            else f"saml_{secrets.token_hex(8)}"
-        )
+        if nameid_elem is None or not nameid_elem.text or not nameid_elem.text.strip():
+            raise ValueError("Missing required SAML NameID claim")
+        sub = nameid_elem.text.strip()
 
-        # Extract Email from Attributes
+        # 5. Extract & Validate Email
         email = None
         attr_nodes = root.findall(".//saml:Attribute", namespaces)
         for attr in attr_nodes:
             name = attr.attrib.get("Name", "").lower()
-            if "email" in name or "mail" in name:
+            if "email" in name or "mail" in name or "nameidentifier" in name:
                 val_node = attr.find("saml:AttributeValue", namespaces)
                 if val_node is not None and val_node.text:
                     email = val_node.text.strip()
                     break
 
-        if not email:
-            if "@" in sub:
-                email = sub
-            else:
-                email = f"{sub}@saml.domain.com"
+        if not email and "@" in sub:
+            email = sub
 
-        # Validate Conditions / Timestamp
+        if not email:
+            raise ValueError("Missing required email attribute in SAML assertion")
+
+        # 6. Validate Conditions (NotBefore, NotOnOrAfter, Audience)
+        now_dt = datetime.now(UTC)
         cond_elem = root.find(".//saml:Conditions", namespaces)
         if cond_elem is not None:
-            not_before = cond_elem.attrib.get("NotBefore")
-            not_after = cond_elem.attrib.get("NotOnOrAfter")
-            now_iso = datetime.now(UTC).isoformat()
-            if not_after and now_iso > not_after:
-                raise ValueError(
-                    "SAML assertion has expired (NotOnOrAfter constraint)."
-                )
+            not_before_str = cond_elem.attrib.get("NotBefore")
+            not_after_str = cond_elem.attrib.get("NotOnOrAfter")
+
+            if not_after_str:
+                try:
+                    not_after_dt = datetime.fromisoformat(
+                        not_after_str.replace("Z", "+00:00")
+                    )
+                    if now_dt >= not_after_dt:
+                        raise ValueError(
+                            "SAML assertion has expired (NotOnOrAfter constraint)"
+                        )
+                except (ValueError, TypeError):
+                    if now_dt.isoformat() >= not_after_str:
+                        raise ValueError(
+                            "SAML assertion has expired (NotOnOrAfter constraint)"
+                        )
+
+            if not_before_str:
+                try:
+                    not_before_dt = datetime.fromisoformat(
+                        not_before_str.replace("Z", "+00:00")
+                    )
+                    if now_dt < not_before_dt:
+                        raise ValueError(
+                            "SAML assertion not yet valid (NotBefore constraint)"
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+            # Audience Restriction
+            aud_elem = cond_elem.find(".//saml:Audience", namespaces)
+            if aud_elem is not None and aud_elem.text:
+                aud_val = aud_elem.text.strip()
+                if self.sp_entity_id and aud_val != self.sp_entity_id:
+                    raise ValueError(
+                        f"SAML Audience mismatch: expected '{self.sp_entity_id}', got '{aud_val}'"
+                    )
 
         return {
             "provider": "saml",

@@ -11,15 +11,10 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
-try:
-    import psycopg
-    from psycopg_pool import AsyncConnectionPool
+import psycopg
+from psycopg_pool import AsyncConnectionPool
 
-    _PSYCOPG_ERRORS = (psycopg.Error,)
-except ImportError:
-    psycopg = None
-    AsyncConnectionPool = None
-    _PSYCOPG_ERRORS = (Exception,)
+_PSYCOPG_ERRORS = (psycopg.Error,)
 
 from services.core.config import get_settings
 
@@ -45,6 +40,7 @@ _in_memory_db: dict[str, Any] = {
     "llm_usage": [],
     "outbox": [],
     "user_profiles": {},
+    "user_credentials": {},
     "federated_identities": [],
     "login_history": [],
     "orgs": {},
@@ -54,6 +50,9 @@ _in_memory_db: dict[str, Any] = {
     "scim_tokens": {},
     "scim_groups": {},
     "scim_users": {},
+    "delegated_permissions": {},
+    "trip_shares": {},
+    "active_sessions": {},
 }
 
 
@@ -83,6 +82,11 @@ async def init_identity_schema(conn: Any) -> None:
         email_verified BOOLEAN DEFAULT FALSE,
         mfa_enabled BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS user_credentials (
+        user_id VARCHAR(64) PRIMARY KEY REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        password_hash TEXT NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS federated_identities (
@@ -151,6 +155,7 @@ async def init_identity_schema(conn: Any) -> None:
     );
     CREATE TABLE IF NOT EXISTS scim_users (
         scim_id VARCHAR(64) PRIMARY KEY,
+        org_id VARCHAR(64) REFERENCES orgs(org_id) ON DELETE CASCADE,
         user_name VARCHAR(255) NOT NULL UNIQUE,
         given_name VARCHAR(255),
         family_name VARCHAR(255),
@@ -158,6 +163,88 @@ async def init_identity_schema(conn: Any) -> None:
         raw_payload JSONB NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS trips (
+        trip_id VARCHAR(64) PRIMARY KEY,
+        tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+        user_id VARCHAR(64) NOT NULL,
+        correlation_id VARCHAR(64) UNIQUE NOT NULL,
+        user_query TEXT NOT NULL,
+        flight_results TEXT,
+        hotel_results TEXT,
+        weather_results TEXT,
+        itinerary TEXT,
+        final_response TEXT,
+        flight_degraded BOOLEAN DEFAULT FALSE,
+        hotel_degraded BOOLEAN DEFAULT FALSE,
+        weather_degraded BOOLEAN DEFAULT FALSE,
+        status VARCHAR(32) NOT NULL DEFAULT 'GATHERING',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS trip_events (
+        id VARCHAR(64) PRIMARY KEY,
+        tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+        correlation_id VARCHAR(64) NOT NULL,
+        event_type VARCHAR(128) NOT NULL,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS llm_usage (
+        id VARCHAR(64) PRIMARY KEY,
+        tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+        user_id VARCHAR(64) NOT NULL,
+        correlation_id VARCHAR(64) NOT NULL,
+        provider VARCHAR(64) NOT NULL,
+        model VARCHAR(64) NOT NULL,
+        prompt_tokens INT NOT NULL,
+        completion_tokens INT NOT NULL,
+        total_tokens INT NOT NULL,
+        latency_ms REAL NOT NULL,
+        cost_estimate REAL DEFAULT 0.0,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS outbox (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+        correlation_id VARCHAR(64) NOT NULL,
+        stream_name VARCHAR(128) NOT NULL,
+        event_type VARCHAR(128) NOT NULL,
+        payload JSONB NOT NULL,
+        processed BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        processed_at TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS delegated_permissions (
+        id VARCHAR(64) PRIMARY KEY,
+        grantor_user_id VARCHAR(64) NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        delegate_user_id VARCHAR(64) NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        resource_type VARCHAR(64) NOT NULL,
+        resource_id VARCHAR(64) NOT NULL,
+        permissions JSONB NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS trip_shares (
+        id VARCHAR(64) PRIMARY KEY,
+        trip_id VARCHAR(64) NOT NULL,
+        owner_id VARCHAR(64) NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        grantee_id VARCHAR(64) NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        permission_level VARCHAR(32) NOT NULL DEFAULT 'read',
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(trip_id, grantee_id)
+    );
+    CREATE TABLE IF NOT EXISTS active_sessions (
+        session_id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        ip_address VARCHAR(45) NOT NULL,
+        user_agent TEXT NOT NULL,
+        device_fingerprint VARCHAR(64),
+        is_trusted BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_active_at TIMESTAMPTZ DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL
     );
     """
     async with conn.cursor() as cur:
@@ -210,26 +297,21 @@ async def get_tenant_conn(tenant_id: str = "default") -> AsyncGenerator[Any, Non
     if pool is None:
         yield None
         return
-    try:
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SET LOCAL app.current_tenant_id = %s;", (tenant_id,))
-            yield conn
-    except _DB_ERRORS as exc:
-        logger.warning(
-            f"Error getting database connection for tenant '{tenant_id}': {exc}"
-        )
-        yield None
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SET LOCAL app.current_tenant_id = %s;", (tenant_id,))
+        yield conn
 
 
-# --- Identity Repository DB Persistence Functions (Action Item 1) ---
+# --- User Profile & Credential Repository ---
 
 
 async def db_get_user_by_email(email: str) -> dict[str, Any] | None:
     email_clean = email.lower().strip()
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT user_id, tenant_id, org_id, email, display_name, avatar_url, bio, timezone, "
@@ -258,8 +340,7 @@ async def db_get_user_by_email(email: str) -> dict[str, Any] | None:
                             "created_at": str(row[13]),
                             "updated_at": str(row[14]),
                         }
-            except _DB_ERRORS as exc:
-                logger.error(f"Error fetching user by email from DB: {exc}")
+                    return None
     for u in _in_memory_db["user_profiles"].values():
         if u.get("email", "").lower() == email_clean:
             return u
@@ -267,9 +348,10 @@ async def db_get_user_by_email(email: str) -> dict[str, Any] | None:
 
 
 async def db_get_user_by_id(user_id: str) -> dict[str, Any] | None:
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT user_id, tenant_id, org_id, email, display_name, avatar_url, bio, timezone, "
@@ -298,8 +380,7 @@ async def db_get_user_by_id(user_id: str) -> dict[str, Any] | None:
                             "created_at": str(row[13]),
                             "updated_at": str(row[14]),
                         }
-            except _DB_ERRORS as exc:
-                logger.error(f"Error fetching user by ID from DB: {exc}")
+                    return None
     return _in_memory_db["user_profiles"].get(user_id)
 
 
@@ -318,9 +399,10 @@ async def db_upsert_user_profile(user_dict: dict[str, Any]) -> None:
     mfa_enabled = user_dict.get("mfa_enabled", False)
     org_id = user_dict.get("org_id")
 
-    async with get_tenant_conn(tenant_id) as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO user_profiles (user_id, tenant_id, org_id, email, display_name, avatar_url, bio, timezone, preferred_currency, status, roles, email_verified, mfa_enabled) "
@@ -346,13 +428,45 @@ async def db_upsert_user_profile(user_dict: dict[str, Any]) -> None:
                             mfa_enabled,
                         ),
                     )
-            except _DB_ERRORS as exc:
-                logger.error(f"Error upserting user profile in DB: {exc}")
-
+                return
     _in_memory_db["user_profiles"][user_id] = user_dict
 
 
-# Federated Identities (Action Item 6 & Item 1)
+async def db_save_user_password(user_id: str, password_hash: str) -> None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO user_credentials (user_id, password_hash) VALUES (%s, %s) "
+                        "ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = NOW();",
+                        (user_id, password_hash),
+                    )
+                return
+    _in_memory_db["user_credentials"][user_id] = password_hash
+
+
+async def db_get_user_password(user_id: str) -> str | None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT password_hash FROM user_credentials WHERE user_id = %s;",
+                        (user_id,),
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        return row[0]
+                    return None
+    return _in_memory_db["user_credentials"].get(user_id)
+
+
+# --- Federated Identities Repository ---
+
+
 async def db_link_federated_identity(
     user_id: str,
     provider: str,
@@ -362,9 +476,10 @@ async def db_link_federated_identity(
     email_verified: bool = False,
 ) -> str:
     fed_id = f"fed_{uuid.uuid4().hex[:12]}"
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO federated_identities (id, user_id, provider, issuer, sub, email, email_verified) "
@@ -372,8 +487,7 @@ async def db_link_federated_identity(
                         "ON CONFLICT (provider, issuer, sub) DO UPDATE SET email = EXCLUDED.email, email_verified = EXCLUDED.email_verified;",
                         (fed_id, user_id, provider, issuer, sub, email, email_verified),
                     )
-            except _DB_ERRORS as exc:
-                logger.error(f"Error linking federated identity in DB: {exc}")
+                return fed_id
     _in_memory_db["federated_identities"].append(
         {
             "id": fed_id,
@@ -391,9 +505,10 @@ async def db_link_federated_identity(
 async def db_get_federated_identity(
     provider: str, issuer: str, sub: str
 ) -> dict[str, Any] | None:
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT id, user_id, provider, issuer, sub, email, email_verified FROM federated_identities "
@@ -411,27 +526,28 @@ async def db_get_federated_identity(
                             "email": row[5],
                             "email_verified": row[6],
                         }
-            except _DB_ERRORS as exc:
-                logger.error(f"Error getting federated identity from DB: {exc}")
+                    return None
     for fi in _in_memory_db["federated_identities"]:
         if fi["provider"] == provider and fi["issuer"] == issuer and fi["sub"] == sub:
             return fi
     return None
 
 
-# SCIM Per-Org Token Repository (Action Item 5)
+# --- SCIM Tokens Repository ---
+
+
 async def db_save_scim_token(org_id: str, token_hash: str) -> str:
     token_id = f"scim_tok_{uuid.uuid4().hex[:12]}"
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO scim_tokens (token_id, org_id, token_hash) VALUES (%s, %s, %s);",
                         (token_id, org_id, token_hash),
                     )
-            except _DB_ERRORS as exc:
-                logger.error(f"Error saving SCIM token in DB: {exc}")
+                return token_id
     _in_memory_db["scim_tokens"][token_id] = {
         "token_id": token_id,
         "org_id": org_id,
@@ -441,9 +557,10 @@ async def db_save_scim_token(org_id: str, token_hash: str) -> str:
 
 
 async def db_get_scim_token_by_hash(token_hash: str) -> dict[str, Any] | None:
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT token_id, org_id, token_hash FROM scim_tokens WHERE token_hash = %s;",
@@ -456,19 +573,21 @@ async def db_get_scim_token_by_hash(token_hash: str) -> dict[str, Any] | None:
                             "org_id": row[1],
                             "token_hash": row[2],
                         }
-            except _DB_ERRORS as exc:
-                logger.error(f"Error fetching SCIM token by hash from DB: {exc}")
+                    return None
     for tok in _in_memory_db["scim_tokens"].values():
         if tok["token_hash"] == token_hash:
             return tok
     return None
 
 
-# IdP Config Database Repository Functions (Action Item 1)
+# --- IdP Config Repository ---
+
+
 async def db_get_idp_config(org_id: str) -> dict[str, Any] | None:
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT org_id, idp_name, sso_type, issuer_url, client_id, enforce_sso, allowed_domains, group_role_mappings, metadata_xml "
@@ -492,16 +611,16 @@ async def db_get_idp_config(org_id: str) -> dict[str, Any] | None:
                             else row[7],
                             "metadata_xml": row[8],
                         }
-            except _DB_ERRORS as exc:
-                logger.error(f"Error getting IdP config from DB: {exc}")
+                    return None
     return _in_memory_db["idp_configs"].get(org_id)
 
 
 async def db_save_idp_config(cfg_dict: dict[str, Any]) -> None:
     org_id = cfg_dict["org_id"]
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO orgs (org_id, org_name, allowed_domains, enforce_sso) "
@@ -532,16 +651,16 @@ async def db_save_idp_config(cfg_dict: dict[str, Any]) -> None:
                             cfg_dict.get("metadata_xml"),
                         ),
                     )
-            except _DB_ERRORS as exc:
-                logger.error(f"Error saving IdP config in DB: {exc}")
+                return
     _in_memory_db["idp_configs"][org_id] = cfg_dict
 
 
 async def db_list_all_idp_configs() -> list[dict[str, Any]]:
     configs = []
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "SELECT org_id, idp_name, sso_type, issuer_url, client_id, enforce_sso, allowed_domains, group_role_mappings, metadata_xml FROM idp_configs;"
@@ -566,13 +685,15 @@ async def db_list_all_idp_configs() -> list[dict[str, Any]]:
                             }
                         )
                     return configs
-            except _DB_ERRORS as exc:
-                logger.error(f"Error listing IdP configs from DB: {exc}")
     return list(_in_memory_db["idp_configs"].values())
 
 
-# SCIM Users Repository Functions
-async def db_save_scim_user(user_data: dict[str, Any]) -> None:
+# --- SCIM Users & Groups Repository ---
+
+
+async def db_save_scim_user(
+    user_data: dict[str, Any], org_id: str | None = None
+) -> None:
     scim_id = user_data["id"]
     user_name = user_data["userName"]
     name_obj = user_data.get("name") or {}
@@ -580,18 +701,19 @@ async def db_save_scim_user(user_data: dict[str, Any]) -> None:
     family_name = name_obj.get("familyName") if isinstance(name_obj, dict) else None
     active = user_data.get("active", True)
     raw_payload = json.dumps(user_data)
-
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
                     await cur.execute(
-                        "INSERT INTO scim_users (scim_id, user_name, given_name, family_name, active, raw_payload) "
-                        "VALUES (%s, %s, %s, %s, %s, %s::jsonb) "
+                        "INSERT INTO scim_users (scim_id, org_id, user_name, given_name, family_name, active, raw_payload) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb) "
                         "ON CONFLICT (scim_id) DO UPDATE SET user_name = EXCLUDED.user_name, given_name = EXCLUDED.given_name, "
                         "family_name = EXCLUDED.family_name, active = EXCLUDED.active, raw_payload = EXCLUDED.raw_payload, updated_at = NOW();",
                         (
                             scim_id,
+                            org_id,
                             user_name,
                             given_name,
                             family_name,
@@ -599,63 +721,465 @@ async def db_save_scim_user(user_data: dict[str, Any]) -> None:
                             raw_payload,
                         ),
                     )
-            except _DB_ERRORS as exc:
-                logger.error(f"Error saving SCIM user in DB: {exc}")
+                return
     _in_memory_db["scim_users"][scim_id] = user_data
 
 
-async def db_get_scim_user(scim_id: str) -> dict[str, Any] | None:
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+async def db_get_scim_user(
+    scim_id: str, org_id: str | None = None
+) -> dict[str, Any] | None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT raw_payload FROM scim_users WHERE scim_id = %s;",
-                        (scim_id,),
-                    )
+                    if org_id:
+                        await cur.execute(
+                            "SELECT raw_payload FROM scim_users WHERE scim_id = %s AND (org_id = %s OR org_id IS NULL);",
+                            (scim_id, org_id),
+                        )
+                    else:
+                        await cur.execute(
+                            "SELECT raw_payload FROM scim_users WHERE scim_id = %s;",
+                            (scim_id,),
+                        )
                     row = await cur.fetchone()
                     if row:
                         return json.loads(row[0]) if isinstance(row[0], str) else row[0]
-            except _DB_ERRORS as exc:
-                logger.error(f"Error fetching SCIM user from DB: {exc}")
+                    return None
     return _in_memory_db["scim_users"].get(scim_id)
 
 
-async def db_delete_scim_user(scim_id: str) -> bool:
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+async def db_delete_scim_user(scim_id: str, org_id: str | None = None) -> bool:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM scim_users WHERE scim_id = %s;", (scim_id,)
-                    )
-            except _DB_ERRORS as exc:
-                logger.error(f"Error deleting SCIM user from DB: {exc}")
+                    if org_id:
+                        await cur.execute(
+                            "DELETE FROM scim_users WHERE scim_id = %s AND (org_id = %s OR org_id IS NULL);",
+                            (scim_id, org_id),
+                        )
+                    else:
+                        await cur.execute(
+                            "DELETE FROM scim_users WHERE scim_id = %s;", (scim_id,)
+                        )
+                return True
     if scim_id in _in_memory_db["scim_users"]:
         del _in_memory_db["scim_users"][scim_id]
         return True
     return False
 
 
-async def db_list_scim_users() -> list[dict[str, Any]]:
+async def db_list_scim_users(org_id: str | None = None) -> list[dict[str, Any]]:
     users = []
-    async with get_tenant_conn() as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
                 async with conn.cursor() as cur:
-                    await cur.execute("SELECT raw_payload FROM scim_users;")
+                    if org_id:
+                        await cur.execute(
+                            "SELECT raw_payload FROM scim_users WHERE org_id = %s OR org_id IS NULL;",
+                            (org_id,),
+                        )
+                    else:
+                        await cur.execute("SELECT raw_payload FROM scim_users;")
                     rows = await cur.fetchall()
                     for row in rows:
                         users.append(
                             json.loads(row[0]) if isinstance(row[0], str) else row[0]
                         )
                     return users
-            except _DB_ERRORS as exc:
-                logger.error(f"Error listing SCIM users from DB: {exc}")
     return list(_in_memory_db["scim_users"].values())
 
 
+async def db_save_scim_group(
+    group_data: dict[str, Any], org_id: str | None = None
+) -> None:
+    grp_id = group_data["id"]
+    display_name = group_data.get("displayName", "")
+    members = json.dumps(group_data.get("members", []))
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO scim_groups (group_id, org_id, display_name, members) VALUES (%s, %s, %s, %s::jsonb) "
+                        "ON CONFLICT (group_id) DO UPDATE SET display_name = EXCLUDED.display_name, members = EXCLUDED.members;",
+                        (grp_id, org_id, display_name, members),
+                    )
+                return
+    _in_memory_db["scim_groups"][grp_id] = group_data
+
+
+async def db_get_scim_group(
+    group_id: str, org_id: str | None = None
+) -> dict[str, Any] | None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    if org_id:
+                        await cur.execute(
+                            "SELECT group_id, display_name, members FROM scim_groups WHERE group_id = %s AND (org_id = %s OR org_id IS NULL);",
+                            (group_id, org_id),
+                        )
+                    else:
+                        await cur.execute(
+                            "SELECT group_id, display_name, members FROM scim_groups WHERE group_id = %s;",
+                            (group_id,),
+                        )
+                    row = await cur.fetchone()
+                    if row:
+                        return {
+                            "id": row[0],
+                            "displayName": row[1],
+                            "members": json.loads(row[2])
+                            if isinstance(row[2], str)
+                            else row[2],
+                        }
+                    return None
+    return _in_memory_db["scim_groups"].get(group_id)
+
+
+async def db_delete_scim_group(group_id: str, org_id: str | None = None) -> bool:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    if org_id:
+                        await cur.execute(
+                            "DELETE FROM scim_groups WHERE group_id = %s AND (org_id = %s OR org_id IS NULL);",
+                            (group_id, org_id),
+                        )
+                    else:
+                        await cur.execute(
+                            "DELETE FROM scim_groups WHERE group_id = %s;", (group_id,)
+                        )
+                return True
+    if group_id in _in_memory_db["scim_groups"]:
+        del _in_memory_db["scim_groups"][group_id]
+        return True
+    return False
+
+
+async def db_list_scim_groups(org_id: str | None = None) -> list[dict[str, Any]]:
+    groups = []
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    if org_id:
+                        await cur.execute(
+                            "SELECT group_id, display_name, members FROM scim_groups WHERE org_id = %s OR org_id IS NULL;",
+                            (org_id,),
+                        )
+                    else:
+                        await cur.execute(
+                            "SELECT group_id, display_name, members FROM scim_groups;"
+                        )
+                    rows = await cur.fetchall()
+                    for row in rows:
+                        groups.append(
+                            {
+                                "id": row[0],
+                                "displayName": row[1],
+                                "members": json.loads(row[2])
+                                if isinstance(row[2], str)
+                                else row[2],
+                            }
+                        )
+                    return groups
+    return list(_in_memory_db["scim_groups"].values())
+
+
+# --- Delegated Permissions & Trip Sharing Repository ---
+
+
+async def db_save_delegated_permission(delegation_dict: dict[str, Any]) -> str:
+    del_id = delegation_dict.get("id") or f"del_{uuid.uuid4().hex[:12]}"
+    delegation_dict["id"] = del_id
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO delegated_permissions (id, grantor_user_id, delegate_user_id, resource_type, resource_id, permissions, expires_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s);",
+                        (
+                            del_id,
+                            delegation_dict["grantor_user_id"],
+                            delegation_dict["delegate_user_id"],
+                            delegation_dict["resource_type"],
+                            delegation_dict["resource_id"],
+                            json.dumps(delegation_dict["permissions"]),
+                            delegation_dict["expires_at"],
+                        ),
+                    )
+                return del_id
+    _in_memory_db["delegated_permissions"][del_id] = delegation_dict
+    return del_id
+
+
+async def db_save_trip_share(share_dict: dict[str, Any]) -> str:
+    share_id = share_dict.get("id") or f"share_{uuid.uuid4().hex[:12]}"
+    share_dict["id"] = share_id
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO trip_shares (id, trip_id, owner_id, grantee_id, permission_level, expires_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (trip_id, grantee_id) DO UPDATE SET permission_level = EXCLUDED.permission_level, expires_at = EXCLUDED.expires_at;",
+                        (
+                            share_id,
+                            share_dict["trip_id"],
+                            share_dict["owner_id"],
+                            share_dict["grantee_id"],
+                            share_dict.get("permission_level", "read"),
+                            share_dict.get("expires_at"),
+                        ),
+                    )
+                return share_id
+    _in_memory_db["trip_shares"][share_id] = share_dict
+    return share_id
+
+
+# --- Trips & Usage Repository ---
+
+
+async def upsert_trip_result(
+    tenant_id: str,
+    user_id: str,
+    correlation_id: str,
+    user_query: str,
+    flight_results: str = "",
+    hotel_results: str = "",
+    weather_results: str = "",
+    itinerary: str = "",
+    final_response: str = "",
+    flight_degraded: bool = False,
+    hotel_degraded: bool = False,
+    weather_degraded: bool = False,
+    status: str = "DONE",
+) -> None:
+    trip_id = f"trip_{correlation_id}"
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO trips (trip_id, tenant_id, user_id, correlation_id, user_query, flight_results, "
+                        "hotel_results, weather_results, itinerary, final_response, flight_degraded, hotel_degraded, "
+                        "weather_degraded, status) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (correlation_id) DO UPDATE SET "
+                        "flight_results = EXCLUDED.flight_results, hotel_results = EXCLUDED.hotel_results, "
+                        "weather_results = EXCLUDED.weather_results, itinerary = EXCLUDED.itinerary, "
+                        "final_response = EXCLUDED.final_response, flight_degraded = EXCLUDED.flight_degraded, "
+                        "hotel_degraded = EXCLUDED.hotel_degraded, weather_degraded = EXCLUDED.weather_degraded, "
+                        "status = EXCLUDED.status, updated_at = NOW();",
+                        (
+                            trip_id,
+                            tenant_id,
+                            user_id,
+                            correlation_id,
+                            user_query,
+                            flight_results,
+                            hotel_results,
+                            weather_results,
+                            itinerary,
+                            final_response,
+                            flight_degraded,
+                            hotel_degraded,
+                            weather_degraded,
+                            status,
+                        ),
+                    )
+                return
+    _in_memory_db["trips"][correlation_id] = {
+        "trip_id": trip_id,
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "correlation_id": correlation_id,
+        "user_query": user_query,
+        "flight_results": flight_results,
+        "hotel_results": hotel_results,
+        "weather_results": weather_results,
+        "itinerary": itinerary,
+        "final_response": final_response,
+        "flight_degraded": flight_degraded,
+        "hotel_degraded": hotel_degraded,
+        "weather_degraded": weather_degraded,
+        "status": status,
+    }
+
+
+async def get_trip_by_id(
+    correlation_id: str, tenant_id: str = "default"
+) -> dict[str, Any] | None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT trip_id, tenant_id, user_id, correlation_id, user_query, flight_results, "
+                        "hotel_results, weather_results, itinerary, final_response, flight_degraded, hotel_degraded, "
+                        "weather_degraded, status, created_at, updated_at "
+                        "FROM trips WHERE correlation_id = %s AND tenant_id = %s;",
+                        (correlation_id, tenant_id),
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        return {
+                            "trip_id": row[0],
+                            "tenant_id": row[1],
+                            "user_id": row[2],
+                            "correlation_id": row[3],
+                            "user_query": row[4],
+                            "flight_results": row[5],
+                            "hotel_results": row[6],
+                            "weather_results": row[7],
+                            "itinerary": row[8],
+                            "final_response": row[9],
+                            "flight_degraded": row[10],
+                            "hotel_degraded": row[11],
+                            "weather_degraded": row[12],
+                            "status": row[13],
+                            "created_at": str(row[14]),
+                            "updated_at": str(row[15]),
+                        }
+                    return None
+    trip = _in_memory_db["trips"].get(correlation_id)
+    if trip and trip.get("tenant_id") == tenant_id:
+        return trip
+    return None
+
+
+async def record_trip_event(
+    tenant_id: str,
+    correlation_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> str:
+    evt_id = f"evt_{uuid.uuid4().hex[:12]}"
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO trip_events (id, tenant_id, correlation_id, event_type, payload) "
+                        "VALUES (%s, %s, %s, %s, %s::jsonb);",
+                        (
+                            evt_id,
+                            tenant_id,
+                            correlation_id,
+                            event_type,
+                            json.dumps(payload),
+                        ),
+                    )
+                return evt_id
+    _in_memory_db["trip_events"].append(
+        {
+            "id": evt_id,
+            "tenant_id": tenant_id,
+            "correlation_id": correlation_id,
+            "event_type": event_type,
+            "payload": payload,
+        }
+    )
+    return evt_id
+
+
+def calculate_cost(
+    provider_name: str, model_name: str, prompt_tokens: int, completion_tokens: int
+) -> float:
+    p_lower = provider_name.lower()
+    if "groq" in p_lower:
+        return (prompt_tokens * 0.59 / 1_000_000.0) + (
+            completion_tokens * 0.79 / 1_000_000.0
+        )
+    elif "gemini" in p_lower:
+        return (prompt_tokens * 0.15 / 1_000_000.0) + (
+            completion_tokens * 0.60 / 1_000_000.0
+        )
+    return 0.0
+
+
+async def record_llm_usage(
+    tenant_id: str,
+    user_id: str,
+    correlation_id: str,
+    provider: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    latency_ms: float,
+    cost_estimate: float | None = None,
+) -> str:
+    usage_id = f"usg_{uuid.uuid4().hex[:12]}"
+    cost = (
+        cost_estimate
+        if cost_estimate is not None
+        else calculate_cost(provider, model, prompt_tokens, completion_tokens)
+    )
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO llm_usage (id, tenant_id, user_id, correlation_id, provider, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, cost_estimate) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);",
+                        (
+                            usage_id,
+                            tenant_id,
+                            user_id,
+                            correlation_id,
+                            provider,
+                            model,
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            latency_ms,
+                            cost,
+                        ),
+                    )
+                return usage_id
+    _in_memory_db["llm_usage"].append(
+        {
+            "id": usage_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "correlation_id": correlation_id,
+            "provider": provider,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "latency_ms": latency_ms,
+            "cost_estimate": cost,
+        }
+    )
+    return usage_id
+
+
 # --- Outbox Relay Functions ---
+
+
 async def write_outbox(
     tenant_id: str,
     correlation_id: str,
@@ -663,10 +1187,10 @@ async def write_outbox(
     event_type: str,
     payload: dict[str, Any],
 ) -> str:
-    """Step 1 (A-1): Positionally compatible write_outbox inserting real profile reference."""
-    async with get_tenant_conn(tenant_id) as conn:
-        if conn:
-            try:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
                 async with conn.transaction(), conn.cursor() as cur:
                     user_id = payload.get("user_id", "guest")
                     email = payload.get("email") or f"{user_id}@{tenant_id}.local"
@@ -698,8 +1222,7 @@ async def write_outbox(
                 logger.info(
                     f"Outbox entry written for correlation_id '{correlation_id}'"
                 )
-            except _DB_ERRORS as exc:
-                logger.error(f"Failed writing outbox entry: {exc}")
+                return correlation_id
     _in_memory_db["outbox"].append(
         {
             "tenant_id": tenant_id,
@@ -723,36 +1246,34 @@ async def write_outbox(
 async def relay_outbox(event_bus: Any) -> int:
     relayed_count = 0
     pool = await init_db_pool()
-    if pool:
-        try:
-            async with pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT id, tenant_id, correlation_id, stream_name, event_type, payload "
-                        "FROM outbox WHERE processed = FALSE ORDER BY created_at ASC LIMIT 50 FOR UPDATE SKIP LOCKED;"
-                    )
-                    rows = await cur.fetchall()
-                    for row in rows:
-                        outbox_id, _tenant_id, cid, stream, event_type, payload = row
-                        if isinstance(payload, str):
-                            payload = json.loads(payload)
-                        from services.common.schemas import CloudEvent
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, tenant_id, correlation_id, stream_name, event_type, payload "
+                    "FROM outbox WHERE processed = FALSE ORDER BY created_at ASC LIMIT 50 FOR UPDATE SKIP LOCKED;"
+                )
+                rows = await cur.fetchall()
+                for row in rows:
+                    outbox_id, _tenant_id, cid, stream, event_type, payload = row
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    from services.common.schemas import CloudEvent
 
-                        ce = CloudEvent[Any](
-                            source="/services/outbox-relay",
-                            type=event_type,
-                            subject=cid,
-                            data=payload,
-                        )
-                        await event_bus.publish(stream, ce)
-                        await cur.execute(
-                            "UPDATE outbox SET processed = TRUE, processed_at = NOW() WHERE id = %s;",
-                            (outbox_id,),
-                        )
-                        relayed_count += 1
-                await conn.commit()
-        except _DB_ERRORS as exc:
-            logger.debug(f"Outbox relay DB poll exception: {exc}")
+                    ce = CloudEvent[Any](
+                        source="/services/outbox-relay",
+                        type=event_type,
+                        subject=cid,
+                        data=payload,
+                    )
+                    await event_bus.publish(stream, ce)
+                    await cur.execute(
+                        "UPDATE outbox SET processed = TRUE, processed_at = NOW() WHERE id = %s;",
+                        (outbox_id,),
+                    )
+                    relayed_count += 1
+            await conn.commit()
+            return relayed_count
     for item in _in_memory_db["outbox"]:
         if not item["processed"]:
             from services.common.schemas import CloudEvent
@@ -767,3 +1288,162 @@ async def relay_outbox(event_bus: Any) -> int:
             item["processed"] = True
             relayed_count += 1
     return relayed_count
+
+
+async def db_record_login_history(entry_dict: dict[str, Any]) -> str:
+    log_id = entry_dict.get("id") or f"log_{uuid.uuid4().hex[:12]}"
+    entry_dict["id"] = log_id
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO login_history (id, user_id, provider, ip_address, user_agent, status, suspicious, details) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s);",
+                        (
+                            log_id,
+                            entry_dict["user_id"],
+                            entry_dict["provider"],
+                            entry_dict["ip_address"],
+                            entry_dict["user_agent"],
+                            entry_dict["status"],
+                            entry_dict.get("suspicious", False),
+                            entry_dict.get("details"),
+                        ),
+                    )
+                return log_id
+    _in_memory_db["login_history"].append(entry_dict)
+    return log_id
+
+
+async def db_get_login_history(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    logs = []
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT id, user_id, provider, ip_address, user_agent, status, suspicious, details, timestamp "
+                        "FROM login_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s;",
+                        (user_id, limit),
+                    )
+                    rows = await cur.fetchall()
+                    for row in rows:
+                        logs.append(
+                            {
+                                "id": row[0],
+                                "user_id": row[1],
+                                "provider": row[2],
+                                "ip_address": row[3],
+                                "user_agent": row[4],
+                                "status": row[5],
+                                "suspicious": row[6],
+                                "details": row[7],
+                                "timestamp": str(row[8]),
+                            }
+                        )
+                    return logs
+    return [l for l in _in_memory_db["login_history"] if l.get("user_id") == user_id][
+        :limit
+    ]
+
+
+async def db_save_active_session(session_dict: dict[str, Any]) -> str:
+    sid = session_dict["session_id"]
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO active_sessions (session_id, user_id, ip_address, user_agent, device_fingerprint, is_trusted, expires_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (session_id) DO UPDATE SET last_active_at = NOW();",
+                        (
+                            sid,
+                            session_dict["user_id"],
+                            session_dict["ip_address"],
+                            session_dict["user_agent"],
+                            session_dict.get("device_fingerprint"),
+                            session_dict.get("is_trusted", False),
+                            session_dict["expires_at"],
+                        ),
+                    )
+                return sid
+    _in_memory_db["active_sessions"][sid] = session_dict
+    return sid
+
+
+async def db_get_active_sessions(user_id: str) -> list[dict[str, Any]]:
+    sessions = []
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT session_id, user_id, ip_address, user_agent, device_fingerprint, is_trusted, created_at, last_active_at, expires_at "
+                        "FROM active_sessions WHERE user_id = %s;",
+                        (user_id,),
+                    )
+                    rows = await cur.fetchall()
+                    for row in rows:
+                        sessions.append(
+                            {
+                                "session_id": row[0],
+                                "user_id": row[1],
+                                "ip_address": row[2],
+                                "user_agent": row[3],
+                                "device_fingerprint": row[4],
+                                "is_trusted": row[5],
+                                "created_at": str(row[6]),
+                                "last_active_at": str(row[7]),
+                                "expires_at": str(row[8]),
+                            }
+                        )
+                    return sessions
+    return [
+        s
+        for s in _in_memory_db["active_sessions"].values()
+        if s.get("user_id") == user_id
+    ]
+
+
+async def db_delete_active_session(user_id: str, session_id: str) -> bool:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM active_sessions WHERE session_id = %s AND user_id = %s;",
+                        (session_id, user_id),
+                    )
+                return True
+    if session_id in _in_memory_db["active_sessions"]:
+        del _in_memory_db["active_sessions"][session_id]
+        return True
+    return False
+
+
+async def db_delete_all_sessions(user_id: str) -> int:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM active_sessions WHERE user_id = %s;",
+                        (user_id,),
+                    )
+                return 1
+    to_del = [
+        sid
+        for sid, s in _in_memory_db["active_sessions"].items()
+        if s.get("user_id") == user_id
+    ]
+    for sid in to_del:
+        del _in_memory_db["active_sessions"][sid]
+    return len(to_del)

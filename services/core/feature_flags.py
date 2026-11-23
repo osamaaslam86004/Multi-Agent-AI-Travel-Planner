@@ -31,7 +31,6 @@ class FeatureFlagManager:
             val = getattr(self.settings, flag_name)
             if isinstance(val, bool):
                 default = val
-
         try:
             redis_client = await get_redis_client()
             if redis_client:
@@ -41,7 +40,6 @@ class FeatureFlagManager:
                     )
                     if tenant_val is not None:
                         return tenant_val.lower() in ("true", "1", "yes", "on")
-
                 global_val = await redis_client.get(f"tb:ff:global:{flag_name}")
                 if global_val is not None:
                     return global_val.lower() in ("true", "1", "yes", "on")
@@ -53,7 +51,6 @@ class FeatureFlagManager:
             ValueError,
         ) as exc:
             logger.debug(f"Failed dynamic feature flag lookup for '{flag_name}': {exc}")
-
         return default
 
 

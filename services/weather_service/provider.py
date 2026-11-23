@@ -20,7 +20,6 @@ REDIS_CACHE_URL = os.getenv(
     "REDIS_CACHE_URL", os.getenv("REDIS_URL", "redis://localhost:6379/3")
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-
 weather_breaker = CircuitBreaker("OpenWeatherBreaker", fail_max=4, reset_timeout=30.0)
 
 
@@ -78,10 +77,8 @@ class WeatherProvider:
                     "Weather cache hit for key '%s' (tenant: %s)", cache_key, tenant_id
                 )
                 return ProviderResult(**json.loads(cached_data))
-
         if cache_key not in self._single_flight_locks:
             self._single_flight_locks[cache_key] = asyncio.Lock()
-
         async with self._single_flight_locks[cache_key]:
             if redis:
                 cached_data = await redis.get(cache_key)

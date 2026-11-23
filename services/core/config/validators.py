@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from services.core.config.settings import Settings
-
 logger = logging.getLogger("travelbrain.config.validators")
 
 
@@ -28,7 +27,6 @@ def validate_profile_settings(settings: "Settings") -> None:
             f"Unknown environment profile '{env}', defaulting to development validation."
         )
         return
-
     if env == "production":
         _validate_production(settings)
     elif env == "staging":
@@ -41,7 +39,6 @@ def _validate_production(settings: "Settings") -> None:
     errors = []
     if settings.app.debug:
         errors.append("APP_DEBUG cannot be True in production profile.")
-
     # Role-aware validation: Workers do not require API auth secrets or RSA signing keys
     if not _is_worker_process():
         if "dev-jwt-key" in settings.auth.jwt_secret_key:
@@ -66,7 +63,6 @@ def _validate_production(settings: "Settings") -> None:
             )
         if not settings.security.cookie_secure:
             errors.append("SECURITY_COOKIE_SECURE must be True in production profile.")
-
     if errors:
         error_msg = (
             "Fail-fast startup configuration check failed for PRODUCTION profile:\n"
@@ -81,11 +77,9 @@ def _validate_staging(settings: "Settings") -> None:
     errors = []
     if settings.app.debug:
         logger.warning("DEBUG mode is enabled in staging profile.")
-
     if not _is_worker_process():
         if settings.auth.enable_dev_login:
             errors.append("ENABLE_DEV_LOGIN cannot be True in staging profile.")
-
     if errors:
         error_msg = (
             "Fail-fast startup configuration check failed for STAGING profile:\n"
@@ -93,7 +87,6 @@ def _validate_staging(settings: "Settings") -> None:
         )
         logger.error(error_msg)
         raise ValueError(error_msg)
-
     logger.info("Staging configuration profile successfully validated.")
 
 

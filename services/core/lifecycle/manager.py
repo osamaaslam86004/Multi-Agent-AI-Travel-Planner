@@ -26,7 +26,6 @@ async def lifespan_manager(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(
         f"Starting service '{settings.app.app_name}' (v{settings.app.app_version}) in profile: {settings.app.environment}"
     )
-
     try:
         yield
     finally:
@@ -73,14 +72,12 @@ class WorkerLifespan:
     ) -> None:
         self.running = True
         self.setup_signal_handlers()
-
         logger.info(f"Worker '{self.service_name}' starting up...")
         if startup_cb:
             if asyncio.iscoroutinefunction(startup_cb):
                 await startup_cb()
             else:
                 startup_cb()
-
         try:
             if work_loop_cb:
                 await work_loop_cb()
@@ -96,7 +93,6 @@ class WorkerLifespan:
                     await shutdown_cb()
                 else:
                     shutdown_cb()
-
             registry = get_teardown_registry()
             await registry.teardown_all(deadline_seconds=self.deadline_seconds)
             logger.info(f"Worker '{self.service_name}' stopped cleanly.")

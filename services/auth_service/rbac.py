@@ -9,7 +9,6 @@ import logging
 from services.auth_service.models import RoleDefinition
 
 logger = logging.getLogger("travelbrain.auth.rbac")
-
 ROLES_CATALOG: dict[str, RoleDefinition] = {
     "platform_owner": RoleDefinition(
         name="Platform Owner",

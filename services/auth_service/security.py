@@ -25,13 +25,11 @@ from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from services.core.config import get_settings
 
 _settings = get_settings()
-
 ISSUER = _settings.auth.jwt_issuer
 AUDIENCE = _settings.auth.jwt_audience
 ACCESS_TOKEN_EXPIRE_SECONDS = _settings.auth.access_token_expire_seconds
 REFRESH_TOKEN_EXPIRE_SECONDS = _settings.auth.refresh_token_expire_seconds
 SUDO_TOKEN_EXPIRE_SECONDS = _settings.auth.sudo_token_expire_seconds
-
 _primary_private_key: rsa.RSAPrivateKey | None = None
 _previous_private_key: rsa.RSAPrivateKey | None = None
 
@@ -56,8 +54,8 @@ def compute_rfc7638_kid(pub_key: rsa.RSAPublicKey) -> str:
 
 
 def generate_user_id(email: str | None = None) -> str:
-    """Action Item 6: Generate random internal user_id (usr_{uuid4}) replacing email-derived UUIDv5."""
-    return f"usr_{uuid.uuid4().hex[:16]}"
+    """Action Item 6 & Step 6: Generate cryptographically random internal user_id (usr_<uuid4_hex>) with full 128-bit entropy."""
+    return f"usr_{uuid.uuid4().hex}"
 
 
 # Argon2id Password Hashing

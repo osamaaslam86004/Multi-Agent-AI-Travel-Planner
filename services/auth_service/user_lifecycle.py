@@ -51,18 +51,19 @@ class UserLifecycleService:
     ) -> UserProfile:
         email_clean = email.lower().strip()
         now_str = datetime.now(UTC).isoformat()
+        iss_val = issuer or auth_provider
 
-        # Action Item 6: First check if user is linked via federated identity
+        # Step 6: Query federated identity record using verified (provider, issuer, sub)
         existing_fed = None
         if provider_sub:
-            iss = issuer or auth_provider
             existing_fed = await db_get_federated_identity(
-                auth_provider, iss, provider_sub
+                auth_provider, iss_val, provider_sub
             )
 
         existing_user_dict = None
         if existing_fed:
             existing_user_dict = await db_get_user_by_id(existing_fed["user_id"])
+
         if not existing_user_dict:
             existing_user_dict = await db_get_user_by_email(email_clean)
 
@@ -71,7 +72,8 @@ class UserLifecycleService:
             profile = UserProfile(
                 user_id=user_id,
                 email=existing_user_dict["email"],
-                display_name=existing_user_dict.get("display_name")
+                display_name=display_name
+                or existing_user_dict.get("display_name")
                 or email_clean.split("@")[0].title(),
                 avatar_url=existing_user_dict.get("avatar_url"),
                 bio=existing_user_dict.get("bio"),
@@ -87,7 +89,7 @@ class UserLifecycleService:
                 updated_at=now_str,
             )
         else:
-            # Action Item 6: Generate internal random user_id (usr_{uuid4})
+            # Step 6: Generate internal random user_id (usr_<uuid4_hex>)
             user_id = generate_user_id(email_clean)
             profile = UserProfile(
                 user_id=user_id,
@@ -102,7 +104,6 @@ class UserLifecycleService:
 
         if auth_provider != "direct":
             sub_val = provider_sub or user_id
-            iss_val = issuer or auth_provider
             await db_link_federated_identity(
                 user_id=user_id,
                 provider=auth_provider,
@@ -125,7 +126,7 @@ class UserLifecycleService:
                     )
                 )
 
-        # Action Item 1: Persist to database repository
+        # Step 1: Persist profile to DB
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
@@ -175,7 +176,6 @@ class UserLifecycleService:
         if preferred_currency is not None:
             profile.preferred_currency = preferred_currency
         profile.updated_at = datetime.now(UTC).isoformat()
-
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
@@ -192,6 +192,7 @@ class UserLifecycleService:
             AccountStatus.SUSPENDED,
             AccountStatus.DEACTIVATED,
             AccountStatus.DELETED,
+            AccountStatus.PENDING_DELETION,
         ]:
             await self.logout_all_devices(user_id)
         await db_upsert_user_profile(profile.model_dump())
@@ -212,7 +213,6 @@ class UserLifecycleService:
         profile = await self.get_profile(user_id)
         if not profile:
             raise ValueError(f"User profile '{user_id}' not found")
-
         iss = issuer or provider
         await db_link_federated_identity(
             user_id=user_id,
@@ -242,6 +242,8 @@ class UserLifecycleService:
         profile = await self.get_profile(user_id)
         if not profile:
             raise ValueError(f"User profile '{user_id}' not found")
+        if len(profile.linked_providers) <= 1 and not profile.email_verified:
+            raise ValueError("Cannot unlink sole authentication provider.")
         profile.linked_providers = [
             lp for lp in profile.linked_providers if lp.provider != provider
         ]

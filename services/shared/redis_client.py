@@ -6,10 +6,7 @@ Gracefully handles environments where redis is optional.
 import logging
 from typing import Any
 
-try:
-    import redis.asyncio as aioredis
-except ImportError:
-    aioredis = None
+import redis.asyncio as aioredis
 
 from services.core.config import get_settings
 from services.core.lifecycle.teardown import get_teardown_registry

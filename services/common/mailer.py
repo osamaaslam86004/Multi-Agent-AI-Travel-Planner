@@ -1,9 +1,11 @@
 """
 Pluggable Mailer Interface & Delivery Adapters for TravelBrain.
-Supports LogMailer (development/logging) and SMTPMailer (production delivery).
+Supports LogMailer (development/logging with masked token logging)
+and SMTPMailer (non-blocking production delivery).
 """
 
 import abc
+import asyncio
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -12,6 +14,18 @@ from email.mime.text import MIMEText
 from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.common.mailer")
+
+
+def _mask_token_in_url(token_or_url: str) -> str:
+    """Mask token material in URLs or raw tokens before logging to prevent secret leakage."""
+    if not token_or_url:
+        return ""
+    if "token=" in token_or_url:
+        base, token = token_or_url.rsplit("token=", 1)
+        masked = token[:6] + "..." if len(token) > 6 else "***"
+        return f"{base}token={masked}"
+    masked = token_or_url[:6] + "..." if len(token_or_url) > 6 else "***"
+    return masked
 
 
 class MailerInterface(abc.ABC):
@@ -34,38 +48,43 @@ class LogMailer(MailerInterface):
     """Log-only Mailer Adapter for development and testing environments."""
 
     async def send_magic_link(self, email: str, token_or_url: str) -> bool:
-        logger.info(f"[LogMailer] Dispatching Magic Link to '{email}': {token_or_url}")
+        logger.info(
+            f"[LogMailer] Dispatching Magic Link to '{email}': {_mask_token_in_url(token_or_url)}"
+        )
         return True
 
     async def send_email_verification(self, email: str, token_or_url: str) -> bool:
         logger.info(
-            f"[LogMailer] Dispatching Email Verification to '{email}': {token_or_url}"
+            f"[LogMailer] Dispatching Email Verification to '{email}': {_mask_token_in_url(token_or_url)}"
         )
         return True
 
     async def send_account_recovery(self, email: str, token_or_url: str) -> bool:
         logger.info(
-            f"[LogMailer] Dispatching Account Recovery Password Reset to '{email}': {token_or_url}"
+            f"[LogMailer] Dispatching Account Recovery Password Reset to '{email}': {_mask_token_in_url(token_or_url)}"
         )
         return True
 
 
 class SMTPMailer(MailerInterface):
-    """Production SMTP Delivery Adapter."""
+    """Production SMTP Delivery Adapter with non-blocking async execution."""
 
     def __init__(
         self,
-        host: str = "smtp.travelbrain.ai",
-        port: int = 587,
-        username: str = "",
-        password: str = "",
-        sender_email: str = "noreply@travelbrain.ai",
+        host: str | None = None,
+        port: int | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        sender_email: str | None = None,
     ):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self.sender_email = sender_email
+        settings = get_settings()
+        self.host = host or getattr(settings.auth, "smtp_host", "smtp.travelbrain.ai")
+        self.port = port or getattr(settings.auth, "smtp_port", 587)
+        self.username = username or getattr(settings.auth, "smtp_username", "")
+        self.password = password or getattr(settings.auth, "smtp_password", "")
+        self.sender_email = sender_email or getattr(
+            settings.auth, "smtp_sender_email", "noreply@travelbrain.ai"
+        )
 
     def _send_email_sync(
         self, recipient: str, subject: str, body_text: str, body_html: str | None = None
@@ -75,12 +94,10 @@ class SMTPMailer(MailerInterface):
             msg["Subject"] = subject
             msg["From"] = self.sender_email
             msg["To"] = recipient
-
             msg.attach(MIMEText(body_text, "plain"))
             if body_html:
                 msg.attach(MIMEText(body_html, "html"))
-
-            with smtplib.SMTP(self.host, self.port) as server:
+            with smtplib.SMTP(self.host, self.port, timeout=10.0) as server:
                 server.starttls()
                 if self.username and self.password:
                     server.login(self.username, self.password)
@@ -94,17 +111,17 @@ class SMTPMailer(MailerInterface):
     async def send_magic_link(self, email: str, token_or_url: str) -> bool:
         subject = "Your TravelBrain Secure Magic Link Login"
         body = f"Use the following secure link to log in to your account:\n\n{token_or_url}\n\nThis link expires in 15 minutes."
-        return self._send_email_sync(email, subject, body)
+        return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
     async def send_email_verification(self, email: str, token_or_url: str) -> bool:
         subject = "Verify Your TravelBrain Account Email"
         body = f"Please verify your email address by clicking the link below:\n\n{token_or_url}\n\nThis link expires in 24 hours."
-        return self._send_email_sync(email, subject, body)
+        return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
     async def send_account_recovery(self, email: str, token_or_url: str) -> bool:
         subject = "TravelBrain Account Password Reset & Recovery Request"
         body = f"A password reset request was initiated for your account.\n\nUse the link below to set a new password:\n\n{token_or_url}\n\nThis link expires in 30 minutes."
-        return self._send_email_sync(email, subject, body)
+        return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
 
 _mailer_instance: MailerInterface | None = None

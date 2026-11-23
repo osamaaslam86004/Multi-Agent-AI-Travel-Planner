@@ -12,7 +12,9 @@ import signal
 import redis.asyncio as aioredis
 from aiohttp import web
 from opentelemetry import trace
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.trace.propagation.tracecontext import (
+    TraceContextTextMapPropagator,
+)
 
 from services.common.event_bus import EventBus
 from services.common.schemas import (
