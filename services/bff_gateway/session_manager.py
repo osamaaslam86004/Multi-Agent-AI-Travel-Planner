@@ -115,7 +115,7 @@ class SessionManager:
         session_key = f"session:{tenant_id}:{session_id}"
         data = await r.hgetall(session_key)
         if not data and tenant_id == "default":
-            keys = await r.keys(f"session:*:{session_id}")
+            keys = [f"session:{tenant_id}:{session_id}"]
             if keys:
                 session_key = keys[0]
                 data = await r.hgetall(session_key)
@@ -135,7 +135,7 @@ class SessionManager:
         _in_memory_sessions.pop(session_id, None)
         r = await self.get_redis()
         if r:
-            keys = await r.keys(f"session:*:{session_id}")
+            keys = [f"session:{tenant_id}:{session_id}"]
             for k in keys:
                 data = await r.hgetall(k)
                 uid = data.get("user_id")
@@ -250,27 +250,29 @@ class SessionManager:
             return False, current
         return True, current
 
-
-async def check_rate_limit(
-    self,
-    client_identifier: str,
-    tenant_id: str = "default",
-    max_requests: int = 60,
-    window_seconds: int = 60,
-) -> bool:
-    r = await self.get_redis()
-    if not r:
-        if os.getenv("ENVIRONMENT", "development").lower() in ("production", "staging"):
-            raise HTTPException(
-                status_code=503, detail="Distributed rate-limit state unavailable."
-            )
-        return True
-    now = time.time()
-    key = f"ratelimit:{tenant_id}:{client_identifier}"
-    pipeline = r.pipeline()
-    pipeline.zremrangebyscore(key, 0, now - window_seconds)
-    pipeline.zadd(key, {f"{now}-{secrets.token_hex(4)}": now})
-    pipeline.zcard(key)
-    pipeline.expire(key, window_seconds)
-    results = await pipeline.execute()
-    return results[2] <= max_requests
+    async def check_rate_limit(
+        self,
+        client_identifier: str,
+        tenant_id: str = "default",
+        max_requests: int = 60,
+        window_seconds: int = 60,
+    ) -> bool:
+        r = await self.get_redis()
+        if not r:
+            if os.getenv("ENVIRONMENT", "development").lower() in (
+                "production",
+                "staging",
+            ):
+                raise HTTPException(
+                    status_code=503, detail="Distributed rate-limit state unavailable."
+                )
+            return True
+        now = time.time()
+        key = f"ratelimit:{tenant_id}:{client_identifier}"
+        pipeline = r.pipeline()
+        pipeline.zremrangebyscore(key, 0, now - window_seconds)
+        pipeline.zadd(key, {f"{now}-{secrets.token_hex(4)}": now})
+        pipeline.zcard(key)
+        pipeline.expire(key, window_seconds)
+        results = await pipeline.execute()
+        return results[2] <= max_requests

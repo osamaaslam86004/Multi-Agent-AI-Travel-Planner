@@ -6,9 +6,11 @@ step-up reauthentication, SCIM 2.0 with filtering/PATCH/ETags, and RBAC.
 """
 
 import hashlib
+import json
 import logging
 import secrets
 import time
+from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
@@ -97,6 +99,7 @@ from services.auth_service.security_state import (
     save_backup_codes,
     save_mfa_secret,
     store_mfa_login_challenge,
+    store_mfa_secret,
 )
 from services.auth_service.user_lifecycle import lifecycle_service
 from services.common.auth_middleware import (
@@ -126,13 +129,11 @@ from services.shared.redis_client import get_redis_client
 logger = logging.getLogger("travelbrain.auth_service")
 _settings = get_settings()
 ENVIRONMENT = _settings.app.environment.lower()
-
 app = FastAPI(
     title="TravelBrain Enterprise Auth & Identity Service",
     version="2.0.0",
     docs_url="/docs" if ENVIRONMENT == "development" else None,
 )
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_settings.app.cors_origins,
@@ -140,7 +141,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
 ReauthDep = Annotated[AuthenticatedUser, Depends(require_reauth())]
 
@@ -312,7 +312,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
     )
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-
     user_id = profile.user_id
     stored_hash = await db_get_user_password(user_id)
     if stored_hash:
@@ -344,7 +343,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
                 detail=f"Password must be at least {_settings.auth.min_password_length} characters.",
             )
         await db_save_user_password(user_id, hash_password(req.password))
-
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
     suspicious, reason = assess_suspicious_login(
@@ -367,7 +365,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
             status_code=403,
             detail="Suspicious login blocked. Verify account security before retrying.",
         )
-
     await lifecycle_service.record_login_attempt(
         user_id,
         "direct",
@@ -377,7 +374,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
         suspicious=suspicious,
         details=reason,
     )
-
     if profile.mfa_enabled or suspicious:
         challenge_token = await store_mfa_login_challenge(
             user_id=user_id,
@@ -402,7 +398,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
             mfa_challenge_token=challenge_token,
             mfa_methods=["totp", "backup_code"],
         )
-
     await _check_device_trust(user_id, request)
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     access_token, refresh_token, exp = issue_jwt(
@@ -445,17 +440,14 @@ async def mfa_verify_login(req: MFAVerifyLoginRequest, request: Request):
     elif req.backup_code:
         if await consume_backup_code(user_id, req.backup_code):
             totp_valid = True
-
     if not totp_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid MFA verification code or backup code.",
         )
-
     profile = await lifecycle_service.get_profile(user_id)
     if not profile:
         raise HTTPException(status_code=401, detail="User account not found.")
-
     eff_perms = list(policy_registry.resolve_effective_permissions(challenge["roles"]))
     access_token, refresh_token, exp = issue_jwt(
         user_id=user_id,
@@ -596,7 +588,6 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
             status_code=400, detail="Provider must return a verified email address."
         )
     await _check_domain_sso_policy(email, method=req.provider)
-
     sub = tokens.get("sub")
     issuer = tokens.get("issuer") or req.provider
     profile = await lifecycle_service.get_or_create_profile(
@@ -608,7 +599,6 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
     )
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-
     if tx.get("org_id"):
         if profile.org_id and profile.org_id != tx["org_id"]:
             raise HTTPException(
@@ -622,7 +612,6 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
     else:
         token_roles = profile.roles
     user_id = profile.user_id
-
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
     suspicious, reason = assess_suspicious_login(
@@ -631,7 +620,6 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
         user_agent,
         [h.model_dump() for h in await lifecycle_service.get_login_history(user_id)],
     )
-
     if profile.mfa_enabled or suspicious:
         challenge_token = await store_mfa_login_challenge(
             user_id=user_id,
@@ -656,7 +644,6 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
             mfa_challenge_token=challenge_token,
             mfa_methods=["totp", "backup_code"],
         )
-
     eff_perms = list(policy_registry.resolve_effective_permissions(token_roles))
     await _check_device_trust(user_id, request)
     await lifecycle_service.record_login_attempt(
@@ -797,7 +784,6 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
     )
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-
     if profile.org_id and profile.org_id != org_id:
         raise HTTPException(status_code=403, detail="User organization scope mismatch")
     profile.org_id = org_id
@@ -808,7 +794,6 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
     profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
     user_id = profile.user_id
-
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
     suspicious, reason = assess_suspicious_login(
@@ -817,7 +802,6 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
         user_agent,
         [h.model_dump() for h in await lifecycle_service.get_login_history(user_id)],
     )
-
     if profile.mfa_enabled or suspicious:
         challenge_token = await store_mfa_login_challenge(
             user_id=user_id,
@@ -842,7 +826,6 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
             mfa_challenge_token=challenge_token,
             mfa_methods=["totp", "backup_code"],
         )
-
     eff_perms = list(policy_registry.resolve_effective_permissions(token_roles))
     await _check_device_trust(user_id, request)
     await lifecycle_service.record_login_attempt(
@@ -1006,18 +989,14 @@ async def switch_active_org(req: SwitchOrgRequest, user: CurrentUserDep):
         raise HTTPException(
             status_code=403, detail="Not a member of target organization"
         )
-
     profile = await lifecycle_service.get_profile(user.user_id)
     if not profile:
         raise HTTPException(status_code=404, detail="User profile not found")
-
     profile.org_id = req.org_id
     if target_mem and target_mem["role"] not in profile.roles:
         profile.roles.append(target_mem["role"])
-
     profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
-
     eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     access_token, refresh_token, exp = issue_jwt(
         user_id=user.user_id,
@@ -1190,7 +1169,6 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
         raise HTTPException(status_code=401, detail="Email verification required.")
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-
     if profile.mfa_enabled:
         challenge_token = await store_mfa_login_challenge(
             user_id=profile.user_id,
@@ -1215,7 +1193,6 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
             mfa_challenge_token=challenge_token,
             mfa_methods=["totp", "backup_code"],
         )
-
     await _check_device_trust(profile.user_id, request)
     permissions = list(policy_registry.resolve_effective_permissions(profile.roles))
     access_token, refresh_token, exp = issue_jwt(
@@ -1474,7 +1451,7 @@ async def change_status_route(
 
 
 @app.delete("/api/v1/users/me")
-async def delete_my_account(user: CurrentUserDep, reauth: ReauthDep):
+async def delete_my_account_by_delete(user: CurrentUserDep, reauth: ReauthDep):
     await lifecycle_service.schedule_account_deletion(
         user.user_id, grace_period_days=30
     )
@@ -2057,3 +2034,12 @@ async def scim_delete_group(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
         )
+
+
+@app.get("/api/v1/auth/saml/metadata")
+async def saml_sp_metadata_route():
+    from services.auth_service.adapters import SAML2Adapter
+
+    adapter = SAML2Adapter()
+    metadata_xml = adapter.get_sp_metadata()
+    return Response(content=metadata_xml, media_type="application/xml")

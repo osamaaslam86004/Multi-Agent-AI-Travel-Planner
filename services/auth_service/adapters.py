@@ -31,7 +31,6 @@ except ImportError:
     raise RuntimeError(
         "SAML support requires defusedxml and lxml; refusing unsafe parser fallback"
     )
-
 logger = logging.getLogger("travelbrain.auth.adapters")
 
 
@@ -223,7 +222,8 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
         signing_key = await asyncio.to_thread(
             self._jwks_client.get_signing_key_from_jwt, id_token_raw
         )
-        expected_issuer = f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
+        tid = id_claims.get("tid")
+        expected_issuer = f"https://login.microsoftonline.com/{tid if self.tenant_id == 'common' else self.tenant_id}/v2.0"
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
@@ -232,12 +232,14 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
             issuer=expected_issuer,
             options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
-        if id_claims.get("tid") != self.tenant_id or not id_claims.get("sub"):
+        if (
+            self.tenant_id != "common" and id_claims.get("tid") != self.tenant_id
+        ) or not id_claims.get("sub"):
             raise RuntimeError("Microsoft token tenant or subject mismatch")
         if nonce and id_claims.get("nonce") != nonce:
             raise RuntimeError("OIDC nonce mismatch")
         email = id_claims.get("email") or id_claims.get("preferred_username") or ""
-        email_verified = bool(id_claims.get("email_verified", False))
+        email_verified = bool(id_claims.get("email_verified", True if email else False))
         return {
             "provider": "entra",
             "sub": id_claims.get("sub") or id_claims.get("oid"),
@@ -559,7 +561,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         xml_bytes = lxml_etree.tostring(root, encoding="utf-8", xml_declaration=True)
         compressed = __import__("zlib").compress(xml_bytes)[2:-4]
         encoded = base64.b64encode(compressed).decode("ascii")
-
         queryParams = {
             "SAMLRequest": encoded,
             "RelayState": relay_state,
@@ -583,7 +584,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                 )
             except Exception as exc:
                 logger.warning(f"SP AuthnRequest signing warning: {exc}")
-
         url = (
             endpoint
             + ("&" if "?" in endpoint else "?")
@@ -613,7 +613,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             root = lxml_etree.fromstring(raw, parser=parser)
         except Exception as exc:
             raise ValueError("Invalid or unsafe SAML XML") from exc
-
         ns = {
             "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
             "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
@@ -648,7 +647,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             minutes=5
         ) or issue_time < datetime.now(UTC) - timedelta(minutes=5):
             raise ValueError("SAML Response IssueInstant outside allowed clock skew")
-
         if not self.idp_metadata_xml or not self.idp_issuer:
             raise ValueError("Trusted SAML IdP metadata is required")
         try:
@@ -692,7 +690,9 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError("IdP metadata contains no trusted signing certificate")
         signature = root.find("ds:Signature", ns)
         if signature is None:
-            raise ValueError("SAML Response must be signed at the response level")
+            signature = root.find(".//ds:Signature", ns)
+        if signature is None:
+            raise ValueError("SAML Response or Assertion must be signed")
         response_id = root.attrib.get("ID")
         if not response_id:
             raise ValueError("SAML Response ID is required")
@@ -713,7 +713,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError("Unsupported SAML digest algorithm")
         if len(references) != 1 or references[0].attrib.get("URI") != f"#{response_id}":
             raise ValueError("SAML signature must reference the Response root ID")
-
         canonicalization = signature.find("ds:SignedInfo/ds:CanonicalizationMethod", ns)
         if canonicalization is None or canonicalization.attrib.get("Algorithm") not in {
             "http://www.w3.org/2001/10/xml-exc-c14n#",
@@ -733,7 +732,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError("Unsupported SAML signature transform")
         if len(root.xpath(f"//*[@ID='{response_id}']")) != 1:
             raise ValueError("SAML Response ID must be unique")
-
         cert_pem = (
             "-----BEGIN CERTIFICATE-----\n"
             + "\n".join(
@@ -766,12 +764,15 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError(
                 "Trusted IdP signing certificate is invalid or expired"
             ) from exc
-
         if xmlsec is not None:
             try:
                 trusted_key = xmlsec.Key.from_memory(
                     cert_pem, xmlsec.KeyFormat.CERT_PEM, None
                 )
+                try:
+                    xmlsec.tree.add_ids(root, ["ID"])
+                except Exception:
+                    pass
                 verify_ctx = xmlsec.SignatureContext()
                 verify_ctx.key = trusted_key
                 verify_ctx.verify(signature)
@@ -791,7 +792,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             logger.warning(
                 "xmlsec library absent; exercising structural SAML assertion validation in test/dev environment."
             )
-
         destination = root.attrib.get("Destination")
         in_response_to = root.attrib.get("InResponseTo")
         if not response_id or destination != self.acs_url or not in_response_to:
@@ -800,11 +800,9 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             )
         if expected_in_response_to and in_response_to != expected_in_response_to:
             raise ValueError("SAML InResponseTo does not match the issued AuthnRequest")
-
         assertion = root.find("saml:Assertion", ns)
         if assertion is None:
             raise ValueError("SAML assertion missing")
-
         assertion_id = assertion.attrib.get("ID")
         if not assertion_id:
             raise ValueError("SAML Assertion ID missing")
@@ -815,7 +813,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             or assertion_issuer.text.strip() != self.idp_issuer
         ):
             raise ValueError("SAML Assertion issuer mismatch")
-
         now = datetime.now(UTC)
         conditions = assertion.find("saml:Conditions", ns)
         if conditions is None:
@@ -833,13 +830,11 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError("SAML assertion expired or missing expiry")
         if not_before and now < parse_time(not_before):
             raise ValueError("SAML assertion is not yet valid")
-
         audiences = [
             n.text.strip() for n in conditions.findall(".//saml:Audience", ns) if n.text
         ]
         if self.sp_entity_id not in audiences:
             raise ValueError("SAML assertion audience mismatch")
-
         confirmations = assertion.findall(".//saml:SubjectConfirmation", ns)
         bearer_method = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
         valid_bearer = any(
@@ -858,12 +853,10 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError(
                 "SAML SubjectConfirmation recipient, method, or expiry is invalid"
             )
-
         nameid = assertion.find(".//saml:NameID", ns)
         if nameid is None or not nameid.text or not nameid.text.strip():
             raise ValueError("SAML NameID missing")
         sub = nameid.text.strip()
-
         email = None
         for attr in assertion.findall(".//saml:Attribute", ns):
             name = attr.attrib.get("Name", "").lower()
@@ -879,7 +872,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                     break
         if not email or "@" not in email:
             raise ValueError("Verified email claim missing from SAML assertion")
-
         groups = []
         for attr in assertion.findall(".//saml:Attribute", ns):
             attr_name = attr.attrib.get("Name", "").lower()
@@ -894,7 +886,6 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                     for v in attr.findall("saml:AttributeValue", ns)
                     if v.text and v.text.strip()
                 )
-
         return {
             "provider": "saml",
             "sub": sub,

@@ -22,6 +22,11 @@ services:
       - AUTH_SERVICE_JWKS_URL=http://auth-service:8001/.well-known/jwks.json
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-travelbrain_dev_jwt_secret_key_32chars_min}
       - ENVIRONMENT=development
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-travelbrain}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-travelbrain_pg_pass_2026}
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
     depends_on:
       redis-broker:
         condition: service_healthy
@@ -53,6 +58,11 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - ENVIRONMENT=development
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-travelbrain}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-travelbrain_pg_pass_2026}
+      - POSTGRES_DB=${POSTGRES_DB:-travelbrain}
     depends_on:
       redis-broker:
         condition: service_healthy

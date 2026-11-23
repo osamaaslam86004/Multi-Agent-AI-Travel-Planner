@@ -41,6 +41,10 @@ class AuthSettings(BaseDomainSettings):
     identity_encryption_key: str | None = (
         None  # Fernet base64 key; separate from JWT signing key
     )
+    smtp_host: str = "smtp.travelbrain.ai"
+    smtp_port: int = 587
+    smtp_from_email: str = "noreply@travelbrain.ai"
+    public_base_url: str = "https://app.travelbrain.ai"
     # Security & Auth Policies
     min_password_length: int = 12
     require_mfa_for_admins: bool = True

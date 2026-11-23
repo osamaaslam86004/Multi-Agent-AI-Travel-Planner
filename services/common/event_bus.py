@@ -1,7 +1,8 @@
+import asyncio
+
 """
 Production Redis Streams Event Bus supporting Consumer Groups, PubSub & CloudEvents.
 """
-
 import json
 import logging
 from typing import Any
@@ -108,3 +109,87 @@ class EventBus:
         pubsub_channel = f"events:{cid}"
         await self.client.publish(pubsub_channel, msg_payload)
         return msg_id
+
+    async def consume(
+        self,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        handler: Any,
+        stop_event: Any = None,
+    ) -> None:
+        """Consume messages from Redis stream using Consumer Groups with XACK & DLQ support."""
+        if not self.client:
+            await self.connect()
+        if not self.client:
+            logger.warning("Redis client unavailable; consume loop exiting.")
+            return
+
+        try:
+            await self.client.xgroup_create(
+                stream_name, group_name, id="0", mkstream=True
+            )
+        except Exception:
+            pass  # Group already exists
+
+        logger.info(
+            f"Consumer '{consumer_name}' started listening on '{stream_name}' (group: '{group_name}')"
+        )
+
+        while stop_event is None or not stop_event.is_set():
+            try:
+                entries = await self.client.xreadgroup(
+                    groupname=group_name,
+                    consumername=consumer_name,
+                    streams={stream_name: ">"},
+                    count=10,
+                    block=2000,
+                )
+                if not entries:
+                    continue
+
+                for _, messages in entries:
+                    for msg_id, fields in messages:
+                        raw_event = fields.get("event") or fields.get("data")
+                        try:
+                            if raw_event:
+                                event_dict = (
+                                    json.loads(raw_event)
+                                    if isinstance(raw_event, str)
+                                    else raw_event
+                                )
+                                from services.common.schemas import CloudEvent
+
+                                if (
+                                    isinstance(event_dict, dict)
+                                    and "specversion" in event_dict
+                                ):
+                                    ce = CloudEvent[Any](**event_dict)
+                                else:
+                                    ce = CloudEvent[Any](
+                                        data=event_dict,
+                                        source=stream_name,
+                                        type="custom",
+                                    )
+                                await handler(ce)
+                            await self.client.xack(stream_name, group_name, msg_id)
+                        except Exception as exc:
+                            logger.error(
+                                f"Error handling message {msg_id} on {stream_name}: {exc}"
+                            )
+                            # Send to DLQ
+                            await self.client.xadd(
+                                DLQ_STREAM,
+                                {
+                                    "original_stream": stream_name,
+                                    "msg_id": msg_id,
+                                    "error": str(exc),
+                                    "event": str(raw_event),
+                                },
+                            )
+                            await self.client.xack(stream_name, group_name, msg_id)
+            except Exception as exc:
+                if stop_event and stop_event.is_set():
+                    break
+                logger.error(f"Error in EventBus.consume loop for {stream_name}: {exc}")
+                await asyncio.sleep(1)

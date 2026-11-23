@@ -42,7 +42,6 @@ from services.common.db import (
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth.user_lifecycle")
-
 _in_memory_profiles: dict[str, UserProfile] = {}
 _in_memory_login_history: dict[str, list[LoginHistoryEntry]] = {}
 _in_memory_sessions: dict[str, list[dict[str, Any]]] = {}
@@ -66,13 +65,11 @@ class UserLifecycleService:
         email_clean = email.lower().strip()
         now_str = datetime.now(UTC).isoformat()
         iss_val = issuer or auth_provider
-
         existing_fed = None
         if provider_sub:
             existing_fed = await db_get_federated_identity(
                 auth_provider, iss_val, provider_sub
             )
-
         existing_user_dict = None
         if existing_fed:
             existing_user_dict = await db_get_user_by_id(existing_fed["user_id"])
@@ -80,7 +77,6 @@ class UserLifecycleService:
             existing_user_dict = await db_get_user_by_email(
                 email_clean, tenant_id=tenant_id
             )
-
         if existing_user_dict:
             user_id = existing_user_dict["user_id"]
             linked_rows = await db_get_user_linked_providers(user_id)
@@ -125,7 +121,6 @@ class UserLifecycleService:
                 created_at=now_str,
                 updated_at=now_str,
             )
-
         if auth_provider != "direct":
             sub_val = provider_sub or user_id
             await db_link_federated_identity(
@@ -149,7 +144,6 @@ class UserLifecycleService:
                         linked_at=now_str,
                     )
                 )
-
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
@@ -202,7 +196,8 @@ class UserLifecycleService:
         if not profile:
             raise ValueError(f"User profile '{user_id}' not found")
         if display_name is not None:
-            profile.display_name = display_name
+            if display_name and not profile.display_name:
+                profile.display_name = display_name
         if avatar_url is not None:
             profile.avatar_url = avatar_url
         if bio is not None:
@@ -275,7 +270,7 @@ class UserLifecycleService:
         logger.info(f"Cancelled soft-deletion for user '{user_id}'")
         return profile
 
-    async def cleanup_expired_deleted_accounts() -> int:
+    async def cleanup_expired_deleted_accounts(self) -> int:
         """Background worker step: hard-deletes & anonymizes accounts past their grace period."""
         now_iso = datetime.now(UTC).isoformat()
         cleaned_count = 0
@@ -307,7 +302,6 @@ class UserLifecycleService:
                         cleaned_count += 1
                 await conn.commit()
             return cleaned_count
-
         for uid, p in list(_in_memory_profiles.items()):
             if p.status == AccountStatus.PENDING_DELETION:
                 p.status = AccountStatus.DELETED
@@ -413,7 +407,6 @@ class UserLifecycleService:
         email = inv["email"]
         org_id = inv["org_id"]
         role = inv["role"]
-
         profile = await self.get_or_create_profile(
             email=email, display_name=display_name, auth_provider="invitation"
         )
@@ -421,7 +414,6 @@ class UserLifecycleService:
             from services.auth_service.security import hash_password
 
             await db_save_user_password(profile.user_id, hash_password(password))
-
         profile.org_id = org_id
         if role not in profile.roles:
             profile.roles.append(role)

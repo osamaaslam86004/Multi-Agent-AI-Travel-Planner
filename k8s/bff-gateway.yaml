@@ -37,6 +37,29 @@ spec:
             - configMapRef:
                 name: travelbrain-config
           env:
+            - name: POSTGRES_HOST
+              value: "postgres"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: "travelbrain"
+            - name: POSTGRES_USER
+              value: "travelbrain"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: POSTGRES_PASSWORD
+            - name: SCIM_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: SCIM_TOKEN_SECRET
+            - name: JWT_PRIVATE_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: JWT_PRIVATE_KEY_PEM
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:

@@ -93,12 +93,8 @@ def verify_password(password: str, password_hash: str) -> bool:
 # Step 3 (C-6): Deterministic RSA Keypair Loading
 def _initialize_rsa_keys() -> None:
     global _primary_private_key, _previous_private_key
-    pem_env = _settings.auth.jwt_previous_private_key_pem or os.getenv(
-        "JWT_PRIVATE_KEY_PEM"
-    )
-    path_env = _settings.auth.jwt_previous_private_key_path or os.getenv(
-        "JWT_PRIVATE_KEY_PATH"
-    )
+    pem_env = _settings.auth.jwt_private_key_pem or os.getenv("JWT_PRIVATE_KEY_PEM")
+    path_env = _settings.auth.jwt_private_key_path or os.getenv("JWT_PRIVATE_KEY_PATH")
     if _primary_private_key is None:
         if pem_env:
             try:

@@ -26,12 +26,18 @@ _in_memory_sec_state: dict[str, Any] = {}
 
 async def _redis():
     client = await get_redis_client()
+    settings = get_settings()
+    is_prod = settings.app.environment.lower() in ("production", "staging")
     if client is None:
+        if is_prod:
+            raise SecurityStateUnavailable("Distributed security state unavailable")
         return None
     try:
         await client.ping()
         return client
     except Exception:
+        if is_prod:
+            raise SecurityStateUnavailable("Distributed security state unavailable")
         return None
 
 
