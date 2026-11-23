@@ -1,38 +1,48 @@
 """
 User Account Lifecycle Management Service.
 Handles user profiles, account state transitions, identity provider linking,
-login history tracking, active sessions, and multi-device logout with database persistence.
+login history tracking, active sessions, invitations, grace period soft-deletion, and multi-device logout with database persistence.
 """
 
 import logging
 import os
+import secrets
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from services.auth_service.models import (
     AccountStatus,
     ActiveSessionResponse,
+    InvitationResponse,
     LinkedProviderInfo,
     LoginHistoryEntry,
     UserProfile,
 )
 from services.auth_service.security import generate_user_id
 from services.common.db import (
+    db_accept_invitation,
+    db_add_org_membership,
     db_get_federated_identity,
+    db_get_invitation,
     db_get_login_history,
     db_get_user_by_email,
     db_get_user_by_id,
+    db_get_user_linked_providers,
     db_get_user_password,
     db_link_federated_identity,
     db_record_login_history,
+    db_save_invitation,
+    db_save_user_password,
     db_unlink_federated_identity,
     db_upsert_user_profile,
+    init_db_pool,
 )
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth.user_lifecycle")
+
 _in_memory_profiles: dict[str, UserProfile] = {}
 _in_memory_login_history: dict[str, list[LoginHistoryEntry]] = {}
 _in_memory_sessions: dict[str, list[dict[str, Any]]] = {}
@@ -56,19 +66,33 @@ class UserLifecycleService:
         email_clean = email.lower().strip()
         now_str = datetime.now(UTC).isoformat()
         iss_val = issuer or auth_provider
-        # Step 6: Query federated identity record using verified (provider, issuer, sub)
+
         existing_fed = None
         if provider_sub:
             existing_fed = await db_get_federated_identity(
                 auth_provider, iss_val, provider_sub
             )
+
         existing_user_dict = None
         if existing_fed:
             existing_user_dict = await db_get_user_by_id(existing_fed["user_id"])
         if not existing_user_dict:
-            existing_user_dict = await db_get_user_by_email(email_clean)
+            existing_user_dict = await db_get_user_by_email(
+                email_clean, tenant_id=tenant_id
+            )
+
         if existing_user_dict:
             user_id = existing_user_dict["user_id"]
+            linked_rows = await db_get_user_linked_providers(user_id)
+            linked_infos = [
+                LinkedProviderInfo(
+                    provider=r["provider"],
+                    provider_user_id=r["provider_user_id"],
+                    email=r.get("email"),
+                    linked_at=r["linked_at"],
+                )
+                for r in linked_rows
+            ]
             profile = UserProfile(
                 user_id=user_id,
                 email=existing_user_dict["email"],
@@ -85,11 +109,11 @@ class UserLifecycleService:
                 roles=existing_user_dict.get("roles", ["member"]),
                 email_verified=existing_user_dict.get("email_verified", True),
                 mfa_enabled=existing_user_dict.get("mfa_enabled", False),
+                linked_providers=linked_infos,
                 created_at=existing_user_dict.get("created_at", now_str),
                 updated_at=now_str,
             )
         else:
-            # Step 6: Generate internal random user_id (usr_<uuid4_hex>)
             user_id = generate_user_id(email_clean)
             profile = UserProfile(
                 user_id=user_id,
@@ -101,6 +125,7 @@ class UserLifecycleService:
                 created_at=now_str,
                 updated_at=now_str,
             )
+
         if auth_provider != "direct":
             sub_val = provider_sub or user_id
             await db_link_federated_identity(
@@ -124,14 +149,26 @@ class UserLifecycleService:
                         linked_at=now_str,
                     )
                 )
-        # Step 1: Persist profile to DB
+
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
 
-    async def get_profile(self, user_id: str) -> UserProfile | None:
-        user_dict = await db_get_user_by_id(user_id)
+    async def get_profile(
+        self, user_id: str, tenant_id: str | None = None
+    ) -> UserProfile | None:
+        user_dict = await db_get_user_by_id(user_id, tenant_id=tenant_id)
         if user_dict:
+            linked_rows = await db_get_user_linked_providers(user_id)
+            linked_infos = [
+                LinkedProviderInfo(
+                    provider=r["provider"],
+                    provider_user_id=r["provider_user_id"],
+                    email=r.get("email"),
+                    linked_at=r["linked_at"],
+                )
+                for r in linked_rows
+            ]
             return UserProfile(
                 user_id=user_dict["user_id"],
                 email=user_dict["email"],
@@ -146,6 +183,7 @@ class UserLifecycleService:
                 roles=user_dict.get("roles", ["member"]),
                 email_verified=user_dict.get("email_verified", False),
                 mfa_enabled=user_dict.get("mfa_enabled", False),
+                linked_providers=linked_infos,
                 created_at=user_dict.get("created_at"),
                 updated_at=user_dict.get("updated_at"),
             )
@@ -200,6 +238,85 @@ class UserLifecycleService:
         )
         return profile
 
+    async def schedule_account_deletion(
+        self, user_id: str, grace_period_days: int = 30
+    ) -> UserProfile:
+        profile = await self.get_profile(user_id)
+        if not profile:
+            raise ValueError(f"User profile '{user_id}' not found")
+        now = datetime.now(UTC)
+        sched = now + timedelta(days=grace_period_days)
+        profile.status = AccountStatus.PENDING_DELETION
+        profile.updated_at = now.isoformat()
+        p_dict = profile.model_dump()
+        p_dict["deletion_requested_at"] = now.isoformat()
+        p_dict["deletion_scheduled_at"] = sched.isoformat()
+        await db_upsert_user_profile(p_dict)
+        await self.logout_all_devices(user_id)
+        _in_memory_profiles[user_id] = profile
+        logger.info(
+            f"Scheduled soft-deletion for user '{user_id}' at {sched.isoformat()}"
+        )
+        return profile
+
+    async def cancel_account_deletion(self, user_id: str) -> UserProfile:
+        profile = await self.get_profile(user_id)
+        if not profile:
+            raise ValueError(f"User profile '{user_id}' not found")
+        if profile.status != AccountStatus.PENDING_DELETION:
+            raise ValueError("Account is not pending deletion")
+        profile.status = AccountStatus.ACTIVE
+        profile.updated_at = datetime.now(UTC).isoformat()
+        p_dict = profile.model_dump()
+        p_dict["deletion_requested_at"] = None
+        p_dict["deletion_scheduled_at"] = None
+        await db_upsert_user_profile(p_dict)
+        _in_memory_profiles[user_id] = profile
+        logger.info(f"Cancelled soft-deletion for user '{user_id}'")
+        return profile
+
+    async def cleanup_expired_deleted_accounts() -> int:
+        """Background worker step: hard-deletes & anonymizes accounts past their grace period."""
+        now_iso = datetime.now(UTC).isoformat()
+        cleaned_count = 0
+        pool = await init_db_pool()
+        if pool is not None:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT user_id, email FROM user_profiles WHERE status = 'pending_deletion' "
+                        "AND deletion_scheduled_at <= NOW();"
+                    )
+                    rows = await cur.fetchall()
+                    for r in rows:
+                        uid, email = r[0], r[1]
+                        anon_email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
+                        await cur.execute(
+                            "UPDATE user_profiles SET email = %s, display_name = 'Deleted User', "
+                            "avatar_url = NULL, bio = NULL, status = 'deleted', updated_at = NOW() "
+                            "WHERE user_id = %s;",
+                            (anon_email, uid),
+                        )
+                        await cur.execute(
+                            "DELETE FROM user_credentials WHERE user_id = %s;", (uid,)
+                        )
+                        await cur.execute(
+                            "DELETE FROM federated_identities WHERE user_id = %s;",
+                            (uid,),
+                        )
+                        cleaned_count += 1
+                await conn.commit()
+            return cleaned_count
+
+        for uid, p in list(_in_memory_profiles.items()):
+            if p.status == AccountStatus.PENDING_DELETION:
+                p.status = AccountStatus.DELETED
+                p.display_name = "Deleted User"
+                p.email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
+                p.linked_providers = []
+                cleaned_count += 1
+        return cleaned_count
+
     async def link_provider(
         self,
         user_id: str,
@@ -253,6 +370,65 @@ class UserLifecycleService:
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
+        return profile
+
+    async def create_invitation(
+        self,
+        email: str,
+        org_id: str,
+        role: str,
+        created_by: str,
+        expires_in_days: int = 7,
+    ) -> InvitationResponse:
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now(UTC) + timedelta(days=expires_in_days)).isoformat()
+        await db_save_invitation(token, email, org_id, role, created_by, expires_at)
+        return InvitationResponse(
+            token=token,
+            email=email.lower().strip(),
+            org_id=org_id,
+            role=role,
+            expires_at=expires_at,
+        )
+
+    async def get_invitation(self, token: str) -> dict[str, Any] | None:
+        inv = await db_get_invitation(token)
+        if not inv:
+            return None
+        if inv.get("accepted"):
+            raise ValueError("Invitation has already been accepted")
+        exp = inv.get("expires_at")
+        if exp and datetime.fromisoformat(
+            str(exp).replace("Z", "+00:00")
+        ) < datetime.now(UTC):
+            raise ValueError("Invitation token has expired")
+        return inv
+
+    async def accept_invitation(
+        self, token: str, password: str | None = None, display_name: str | None = None
+    ) -> UserProfile:
+        inv = await self.get_invitation(token)
+        if not inv:
+            raise ValueError("Invalid invitation token")
+        email = inv["email"]
+        org_id = inv["org_id"]
+        role = inv["role"]
+
+        profile = await self.get_or_create_profile(
+            email=email, display_name=display_name, auth_provider="invitation"
+        )
+        if password:
+            from services.auth_service.security import hash_password
+
+            await db_save_user_password(profile.user_id, hash_password(password))
+
+        profile.org_id = org_id
+        if role not in profile.roles:
+            profile.roles.append(role)
+        profile.updated_at = datetime.now(UTC).isoformat()
+        await db_upsert_user_profile(profile.model_dump())
+        await db_add_org_membership(profile.user_id, org_id, role)
+        await db_accept_invitation(token)
         return profile
 
     async def record_login_attempt(

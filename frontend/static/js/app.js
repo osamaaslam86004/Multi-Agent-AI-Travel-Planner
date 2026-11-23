@@ -1,7 +1,6 @@
-/* Step 8 (M-8): Frontend Alignment with BFF Contract & Session Management */
+/* TravelBrain AI Frontend — BFF Session & Security Event Management */
 (function () {
   "use strict";
-
   var $ = function (id) {
     return document.getElementById(id);
   };
@@ -13,11 +12,33 @@
   var sendBtn = $("sendBtn");
   var statusBtn = $("apiStatus");
   var statusText = statusBtn ? statusBtn.querySelector(".status-text") : null;
+  var securityBtn = $("securityBtn");
+  var securityModal = $("securityModal");
+  var securityModalScrim = $("securityModalScrim");
+  var closeSecurityModal = $("closeSecurityModal");
+  var doneSecurityModal = $("doneSecurityModal");
+  var securityEventsList = $("securityEventsList");
+  var logoutAllBtn = $("logoutAllBtn");
+  var mfaCodeInput = $("mfaCodeInput");
+  var submitMfaBtn = $("submitMfaBtn");
 
   var csrfToken = "";
   var userSession = null;
   var busy = false;
   var currentEventSource = null;
+  var mfaChallengeToken = null;
+
+  function showToast(msg) {
+    var toast = $("toast");
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.hidden = false;
+    toast.classList.add("show");
+    setTimeout(function () {
+      toast.classList.remove("show");
+      toast.hidden = true;
+    }, 3000);
+  }
 
   function initSession() {
     if (statusBtn && statusText) {
@@ -47,43 +68,87 @@
       });
   }
 
-  function send(text, structuredDest, structuredDep) {
-    if (busy) return;
-    var message = String(
-      text == null ? (input ? input.value : "") : text,
-    ).trim();
-    if (!message) return;
-
-    if (input) input.value = "";
-    busy = True;
-
-    var headers = { "Content-Type": "application/json" };
-    if (csrfToken) {
-      headers["X-CSRF-Token"] = csrfToken;
-    }
-    var payload = {
-      message: message,
-      destination: structuredDest || null,
-      departure_city: structuredDep || null,
-    };
-
-    fetch("/api/v1/trips/plan", {
-      method: "POST",
-      headers: headers,
-      body: JSON.stringify(payload),
-    })
+  function loadSecurityEvents() {
+    if (!securityEventsList) return;
+    fetch("/api/v1/users/me/security-events", { credentials: "same-origin" })
       .then(function (res) {
         return res.json();
       })
-      .then(function (planData) {
-        var streamUrl = planData.stream_url || planData.sse_url;
-        if (!streamUrl) return;
-        if (currentEventSource) currentEventSource.close();
-        currentEventSource = new EventSource(streamUrl);
+      .then(function (data) {
+        var events = data.security_events || [];
+        if (events.length === 0) {
+          securityEventsList.textContent = "No security events recorded.";
+          return;
+        }
+        var html = "<ul style='padding-left:16px; margin:0;'>";
+        events.slice(0, 10).forEach(function (e) {
+          var tag = e.suspicious ? " <strong style='color:var(--rose)'>[SUSPICIOUS]</strong>" : "";
+          html += "<li>" + (e.timestamp || "").split("T")[0] + " - " + e.provider + " (" + e.ip_address + ")" + tag + "</li>";
+        });
+        html += "</ul>";
+        securityEventsList.innerHTML = html;
       })
-      .catch(function (err) {
-        console.error("Trip plan error:", err);
+      .catch(function () {
+        securityEventsList.textContent = "Sign in to view security log.";
       });
+  }
+
+  if (securityBtn && securityModal && securityModalScrim) {
+    securityBtn.addEventListener("click", function () {
+      securityModal.hidden = false;
+      securityModalScrim.hidden = false;
+      loadSecurityEvents();
+    });
+    var closeModal = function () {
+      securityModal.hidden = true;
+      securityModalScrim.hidden = true;
+    };
+    if (closeSecurityModal) closeSecurityModal.addEventListener("click", closeModal);
+    if (doneSecurityModal) doneSecurityModal.addEventListener("click", closeModal);
+    securityModalScrim.addEventListener("click", closeModal);
+  }
+
+  if (submitMfaBtn && mfaCodeInput) {
+    submitMfaBtn.addEventListener("click", function () {
+      var code = mfaCodeInput.value.trim();
+      if (!code) return;
+      var payload = {
+        mfa_challenge_token: mfaChallengeToken || "mfa_challenge_demo",
+        totp_code: code,
+      };
+      fetch("/api/v1/auth/mfa/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify(payload),
+      })
+        .then(function (res) {
+          return res.json();
+        })
+        .then(function (resData) {
+          if (resData.authenticated) {
+            showToast("MFA verification successful!");
+            initSession();
+          } else {
+            showToast(resData.detail || "MFA verification failed");
+          }
+        })
+        .catch(function (err) {
+          showToast("MFA error: " + err.message);
+        });
+    });
+  }
+
+  if (logoutAllBtn) {
+    logoutAllBtn.addEventListener("click", function () {
+      fetch("/api/v1/users/me/logout-all", {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+      })
+        .then(function () {
+          showToast("All active sessions revoked.");
+          initSession();
+        });
+    });
   }
 
   initSession();

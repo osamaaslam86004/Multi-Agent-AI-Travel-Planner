@@ -2,8 +2,8 @@
 API Gateway / Backend For Frontend (BFF) Service.
 Handles OpenTelemetry distributed tracing, structured JSON logging, pre-flight FinOps budgets,
 rate limiting per user/tenant, secure HTTP-only cookie sessions with rotation, anti-CSRF enforcement,
-Idempotency-Key verification, trip ownership, Prometheus /metrics endpoint, and resilient SSE streaming.
-Integrates Phase 2 Enterprise Identity OIDC login/callback, /auth/me, profile/session proxies, and outbox relay.
+Idempotency-Key verification, trip access ACLs, Prometheus /metrics endpoint, and resilient SSE streaming.
+Integrates Phase 2 Enterprise Identity MFA challenges, provider linking, invitations, soft-deletion, and security events.
 """
 
 import asyncio
@@ -30,7 +30,14 @@ from services.bff_gateway.session_manager import (
     SESSION_COOKIE_NAME,
     SessionManager,
 )
-from services.common.db import db_can_access_trip, relay_outbox, write_outbox
+from services.common.db import (
+    db_can_access_trip,
+    db_get_login_history,
+    db_list_user_trips,
+    get_trip_by_id,
+    relay_outbox,
+    write_outbox,
+)
 from services.common.event_bus import EventBus
 from services.common.pii_redactor import redact_pii
 from services.common.schemas import CloudEvent, PlanningInitiatedPayload
@@ -54,6 +61,7 @@ AUTH_SERVICE_URL = _settings.auth.auth_service_url
 REDIS_URL = _settings.redis.url
 REDIS_PASSWORD = _settings.redis.password or ""
 COOKIE_NAME = _settings.security.session_cookie_name or SESSION_COOKIE_NAME
+
 session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 
@@ -69,7 +77,6 @@ async def periodic_outbox_relay():
 
 @asynccontextmanager
 async def bff_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Step 1 (A-2): Custom lifespan manager ensuring background relay runs reliably."""
     async with lifespan_manager(app):
         try:
             await event_bus.connect()
@@ -90,9 +97,11 @@ app = FastAPI(
     version="2.0.0",
     description="Edge Gateway, Multi-Tenant Session Barrier, OpenTelemetry Tracing, and Authenticated SSE Streaming",
 )
+
 setup_telemetry(service_name="bff-gateway", app=app)
 register_exception_handlers(app)
 tracer = get_tracer("travelbrain.gateway")
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 if FRONTEND_DIR.exists():
@@ -119,6 +128,30 @@ class LoginRequest(BaseModel):
     email: str
     password: str | None = None
     tenant_id: str = "default"
+
+
+class MFAVerifyRequest(BaseModel):
+    mfa_challenge_token: str
+    totp_code: str | None = None
+    backup_code: str | None = None
+
+
+class TripShareWebRequest(BaseModel):
+    grantee_id: str
+    permission_level: str = "read"
+    expires_at: str | None = None
+
+
+class InvitationWebRequest(BaseModel):
+    email: str
+    org_id: str
+    role: str = "member"
+
+
+class InvitationAcceptWebRequest(BaseModel):
+    token: str
+    password: str | None = None
+    display_name: str | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -150,7 +183,6 @@ async def metrics_endpoint():
     return Response(content=payload, media_type=content_type)
 
 
-# Step 8 (C-9, M-8): BFF Auth / User Session Status Endpoint
 @app.get("/api/v1/auth/me")
 async def get_current_session_user(request: Request):
     try:
@@ -170,7 +202,7 @@ async def get_current_session_user(request: Request):
         )
 
 
-# Direct Login Route
+# Direct Login Route with MFA challenge support
 @app.post("/api/v1/auth/login")
 async def bff_login(req: LoginRequest, request: Request, response: Response):
     client_ip = request.client.host if request.client else "127.0.0.1"
@@ -203,6 +235,17 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
             status_code=auth_resp.status_code, detail=auth_resp.json().get("detail")
         )
     token_data = auth_resp.json()
+    if token_data.get("mfa_required"):
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "mfa_required": True,
+                "mfa_challenge_token": token_data.get("mfa_challenge_token"),
+                "mfa_methods": token_data.get("mfa_methods", ["totp", "backup_code"]),
+                "user_id": token_data.get("user_id"),
+            },
+        )
+
     jwt_token = token_data["access_token"]
     user_id = token_data["user_id"]
     email = token_data["email"]
@@ -227,6 +270,7 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
         max_age=86400,
     )
     return {
+        "authenticated": True,
         "user_id": user_id,
         "email": email,
         "roles": roles,
@@ -236,7 +280,62 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
     }
 
 
-# OIDC authorization transaction is created and stored by Auth Service (Redis-backed).
+# MFA Verification Route
+@app.post("/api/v1/auth/mfa/verify")
+async def bff_mfa_verify(req: MFAVerifyRequest, request: Request, response: Response):
+    async with httpx.AsyncClient() as client:
+        try:
+            auth_resp = await client.post(
+                f"{AUTH_SERVICE_URL}/api/v1/auth/mfa/verify-login",
+                json=req.model_dump(),
+                timeout=5.0,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service unreachable.",
+            )
+    if auth_resp.status_code != 200:
+        raise HTTPException(
+            status_code=auth_resp.status_code,
+            detail=auth_resp.json().get("detail", "MFA verification failed"),
+        )
+    token_data = auth_resp.json()
+    jwt_token = token_data["access_token"]
+    user_id = token_data["user_id"]
+    email = token_data["email"]
+    roles = token_data.get("roles", ["traveler"])
+    resolved_tenant = token_data.get("tenant_id", "default")
+    old_sid = request.cookies.get(COOKIE_NAME)
+    session_id, csrf_token = await session_manager.create_session(
+        jwt_token=jwt_token,
+        user_id=user_id,
+        email=email,
+        tenant_id=resolved_tenant,
+        roles=roles,
+        old_session_id=old_sid,
+    )
+    is_secure = request.url.scheme == "https" or _settings.security.cookie_secure
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=session_id,
+        httponly=True,
+        secure=is_secure,
+        samesite=_settings.security.cookie_samesite or "lax",
+        max_age=86400,
+    )
+    return {
+        "authenticated": True,
+        "user_id": user_id,
+        "email": email,
+        "roles": roles,
+        "tenant_id": resolved_tenant,
+        "csrf_token": csrf_token,
+        "expires_in": 86400,
+    }
+
+
+# OIDC authorization transaction
 @app.get("/api/v1/auth/{provider}/login")
 async def oidc_login_initiate(
     provider: str,
@@ -306,6 +405,11 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
             detail=resp.json().get("detail", "OIDC login failed"),
         )
     token_data = resp.json()
+    if token_data.get("mfa_required"):
+        return RedirectResponse(
+            url=f"/#mfa?token={token_data.get('mfa_challenge_token')}", status_code=302
+        )
+
     old_sid = request.cookies.get(COOKIE_NAME)
     session_id, csrf_token = await session_manager.create_session(
         jwt_token=token_data["access_token"],
@@ -354,7 +458,82 @@ async def bff_logout(request: Request, response: Response):
     return {"status": "logged_out"}
 
 
-# Step 8 (H-7): Session & User Account Proxy Endpoints
+# Provider Linking Proxies
+@app.post("/api/v1/users/me/providers/link")
+async def proxy_link_provider(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{AUTH_SERVICE_URL}/api/v1/users/me/providers/link",
+            json=body,
+            headers={"Authorization": f"Bearer {session.get('jwt')}"},
+            timeout=5.0,
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code, detail=resp.json().get("detail")
+        )
+    return resp.json()
+
+
+@app.delete("/api/v1/users/me/providers/unlink/{provider}")
+async def proxy_unlink_provider(provider: str, request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    async with httpx.AsyncClient() as client:
+        resp = await client.delete(
+            f"{AUTH_SERVICE_URL}/api/v1/users/me/providers/{provider}",
+            headers={"Authorization": f"Bearer {session.get('jwt')}"},
+            timeout=5.0,
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code, detail=resp.json().get("detail")
+        )
+    return resp.json()
+
+
+# Account Soft-Deletion Proxies
+@app.post("/api/v1/users/me/delete-account")
+async def proxy_delete_account(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    async with httpx.AsyncClient() as client:
+        resp = await client.delete(
+            f"{AUTH_SERVICE_URL}/api/v1/users/me",
+            headers={"Authorization": f"Bearer {session.get('jwt')}"},
+            timeout=5.0,
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code, detail=resp.json().get("detail")
+        )
+    return resp.json()
+
+
+@app.post("/api/v1/users/me/cancel-deletion")
+async def proxy_cancel_deletion(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{AUTH_SERVICE_URL}/api/v1/users/me/cancel-deletion",
+            headers={"Authorization": f"Bearer {session.get('jwt')}"},
+            timeout=5.0,
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code, detail=resp.json().get("detail")
+        )
+    return resp.json()
+
+
+# Security Events & Device Management Proxies
+@app.get("/api/v1/users/me/security-events")
+async def proxy_security_events(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    history = await db_get_login_history(session.get("user_id"), limit=50)
+    return {"security_events": history}
+
+
 @app.get("/api/v1/users/me/sessions")
 async def proxy_list_sessions(request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
@@ -417,7 +596,7 @@ async def proxy_logout_all(request: Request, response: Response):
     return {"status": "logged_out_all"}
 
 
-# Step 1 (A-1): Trip Planning & Outbox Fix (with route alias for frontend)
+# Trip Planning & Outbox
 @app.post("/api/v1/trips/plan")
 @app.post("/api/v1/plan")
 async def initiate_trip_plan(
@@ -464,7 +643,51 @@ async def initiate_trip_plan(
     }
 
 
-# Step 1 (A-3): SSE Streaming Route with Frame Termination (with route alias for frontend)
+# Trip CRUD & Access Control Routes
+@app.get("/api/v1/trips")
+async def list_trips(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    user_id, tenant_id = session["user_id"], session.get("tenant_id", "default")
+    trips = await db_list_user_trips(user_id, tenant_id=tenant_id)
+    return {"trips": trips}
+
+
+@app.get("/api/v1/trips/{correlation_id}")
+async def get_trip(correlation_id: str, request: Request):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    user_id, tenant_id = session["user_id"], session.get("tenant_id", "default")
+    if not await db_can_access_trip(user_id, correlation_id, tenant_id, action="read"):
+        raise HTTPException(status_code=404, detail="Trip not found or access denied")
+    trip = await get_trip_by_id(correlation_id, tenant_id=tenant_id)
+    return trip
+
+
+@app.post("/api/v1/trips/{correlation_id}/share")
+async def share_trip(correlation_id: str, req: TripShareWebRequest, request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    user_id, tenant_id = session["user_id"], session.get("tenant_id", "default")
+    if not await db_can_access_trip(user_id, correlation_id, tenant_id, action="share"):
+        raise HTTPException(status_code=403, detail="Trip sharing permission denied")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{AUTH_SERVICE_URL}/api/v1/trips/share",
+            json={
+                "trip_id": correlation_id,
+                "grantee_id": req.grantee_id,
+                "permission_level": req.permission_level,
+                "expires_at": req.expires_at,
+            },
+            headers={"Authorization": f"Bearer {session.get('jwt')}"},
+            timeout=5.0,
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code, detail=resp.json().get("detail")
+        )
+    return resp.json()
+
+
+# SSE Streaming Route
 @app.get("/api/v1/trips/{correlation_id}/stream")
 @app.get("/api/v1/events/stream/{correlation_id}")
 async def stream_planning_events(correlation_id: str, request: Request):

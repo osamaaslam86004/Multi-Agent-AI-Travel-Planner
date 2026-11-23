@@ -1,7 +1,8 @@
 """
 Auth & Identity Microservice REST API.
-Handles direct login, multi-provider OIDC/SAML 2.0 authentication, user account lifecycle,
-password recovery, step-up reauthentication, per-org SCIM 2.0 token management, and RBAC.
+Handles direct login, multi-provider OIDC/SAML 2.0 authentication, MFA challenges,
+user account lifecycle, invitations, grace period soft-deletion, provider linking,
+step-up reauthentication, SCIM 2.0 with filtering/PATCH/ETags, and RBAC.
 """
 
 import hashlib
@@ -32,10 +33,14 @@ from services.auth_service.models import (
     EmailVerifyRequest,
     IdPConfigRequest,
     IdPConfigResponse,
+    InvitationAcceptRequest,
+    InvitationCreateRequest,
+    InvitationResponse,
     JWKSResponse,
     LinkProviderRequest,
     MagicLinkRequest,
     MagicLinkVerifyRequest,
+    MFAVerifyLoginRequest,
     MultiProviderLoginRequest,
     OrgSSODiscoveryRequest,
     OrgSSODiscoveryResponse,
@@ -47,10 +52,11 @@ from services.auth_service.models import (
     SAMLACSRequest,
     SCIMGroupSchema,
     SCIMListResponse,
-    SCIMName,
     SCIMPatchRequest,
     SCIMUserSchema,
+    SecurityEventResponse,
     SessionRevokeRequest,
+    SwitchOrgRequest,
     TokenRefreshRequest,
     TokenResponse,
     TokenRevokeRequest,
@@ -79,6 +85,7 @@ from services.auth_service.security import (
 from services.auth_service.security_state import (
     consume_backup_code,
     consume_mfa_enrollment,
+    consume_mfa_login_challenge,
     delete_mfa_secret,
     digest,
     get_mfa_secret,
@@ -89,7 +96,7 @@ from services.auth_service.security_state import (
     refresh_register,
     save_backup_codes,
     save_mfa_secret,
-    store_mfa_secret,
+    store_mfa_login_challenge,
 )
 from services.auth_service.user_lifecycle import lifecycle_service
 from services.common.auth_middleware import (
@@ -102,6 +109,7 @@ from services.common.db import (
     db_get_federated_identity,
     db_get_scim_token_by_hash,
     db_get_user_by_email,
+    db_get_user_org_memberships,
     db_get_user_password,
     db_revoke_role,
     db_save_delegated_permission,
@@ -118,11 +126,13 @@ from services.shared.redis_client import get_redis_client
 logger = logging.getLogger("travelbrain.auth_service")
 _settings = get_settings()
 ENVIRONMENT = _settings.app.environment.lower()
+
 app = FastAPI(
     title="TravelBrain Enterprise Auth & Identity Service",
     version="2.0.0",
     docs_url="/docs" if ENVIRONMENT == "development" else None,
 )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_settings.app.cors_origins,
@@ -130,6 +140,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
 ReauthDep = Annotated[AuthenticatedUser, Depends(require_reauth())]
 
@@ -211,7 +222,6 @@ def assert_login_allowed(profile: UserProfile):
 
 
 async def _check_domain_sso_policy(email: str, method: str = "direct"):
-    """Enforce domain policy on direct login (SSO-enforced domains cannot use passwords)."""
     if "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email address required.")
     domain = email.rsplit("@", 1)[-1].lower().strip()
@@ -302,13 +312,8 @@ async def direct_login(req: UserLoginRequest, request: Request):
     )
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-    if profile.mfa_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="MFA challenge required; direct login challenge is not wired to the client contract.",
-        )
+
     user_id = profile.user_id
-    # Verify password if password record exists
     stored_hash = await db_get_user_password(user_id)
     if stored_hash:
         if not verify_password(req.password, stored_hash):
@@ -339,8 +344,7 @@ async def direct_login(req: UserLoginRequest, request: Request):
                 detail=f"Password must be at least {_settings.auth.min_password_length} characters.",
             )
         await db_save_user_password(user_id, hash_password(req.password))
-    await _check_device_trust(user_id, request)
-    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
     suspicious, reason = assess_suspicious_login(
@@ -363,6 +367,7 @@ async def direct_login(req: UserLoginRequest, request: Request):
             status_code=403,
             detail="Suspicious login blocked. Verify account security before retrying.",
         )
+
     await lifecycle_service.record_login_attempt(
         user_id,
         "direct",
@@ -372,6 +377,34 @@ async def direct_login(req: UserLoginRequest, request: Request):
         suspicious=suspicious,
         details=reason,
     )
+
+    if profile.mfa_enabled or suspicious:
+        challenge_token = await store_mfa_login_challenge(
+            user_id=user_id,
+            email=email_clean,
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            roles=profile.roles,
+            ttl=300,
+        )
+        return TokenResponse(
+            access_token="",
+            refresh_token="",
+            expires_in=300,
+            user_id=user_id,
+            email=email_clean,
+            roles=profile.roles,
+            permissions=[],
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            mfa_verified=False,
+            mfa_required=True,
+            mfa_challenge_token=challenge_token,
+            mfa_methods=["totp", "backup_code"],
+        )
+
+    await _check_device_trust(user_id, request)
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
     access_token, refresh_token, exp = issue_jwt(
         user_id=user_id,
         email=email_clean,
@@ -391,6 +424,59 @@ async def direct_login(req: UserLoginRequest, request: Request):
         permissions=eff_perms,
         tenant_id=profile.tenant_id,
         org_id=profile.org_id,
+        mfa_verified=True,
+    )
+
+
+@app.post("/api/v1/auth/mfa/verify-login", response_model=TokenResponse)
+async def mfa_verify_login(req: MFAVerifyLoginRequest, request: Request):
+    challenge = await consume_mfa_login_challenge(req.mfa_challenge_token)
+    if not challenge:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired MFA challenge token.",
+        )
+    user_id = challenge["user_id"]
+    totp_valid = False
+    if req.totp_code:
+        secret = await get_mfa_secret(user_id)
+        if secret and verify_totp_code(secret, req.totp_code):
+            totp_valid = True
+    elif req.backup_code:
+        if await consume_backup_code(user_id, req.backup_code):
+            totp_valid = True
+
+    if not totp_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid MFA verification code or backup code.",
+        )
+
+    profile = await lifecycle_service.get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=401, detail="User account not found.")
+
+    eff_perms = list(policy_registry.resolve_effective_permissions(challenge["roles"]))
+    access_token, refresh_token, exp = issue_jwt(
+        user_id=user_id,
+        email=challenge["email"],
+        roles=challenge["roles"],
+        permissions=eff_perms,
+        tenant_id=challenge["tenant_id"],
+        org_id=challenge["org_id"],
+    )
+    await _register_refresh_token(refresh_token)
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=exp,
+        user_id=user_id,
+        email=challenge["email"],
+        roles=challenge["roles"],
+        permissions=eff_perms,
+        tenant_id=challenge["tenant_id"],
+        org_id=challenge["org_id"],
+        mfa_verified=True,
     )
 
 
@@ -510,7 +596,7 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
             status_code=400, detail="Provider must return a verified email address."
         )
     await _check_domain_sso_policy(email, method=req.provider)
-    # Step 6: Pass actual provider sub and issuer to get_or_create_profile
+
     sub = tokens.get("sub")
     issuer = tokens.get("issuer") or req.provider
     profile = await lifecycle_service.get_or_create_profile(
@@ -522,11 +608,7 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
     )
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-    if profile.mfa_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="MFA challenge required; login challenge completion is not yet wired to the BFF contract.",
-        )
+
     if tx.get("org_id"):
         if profile.org_id and profile.org_id != tx["org_id"]:
             raise HTTPException(
@@ -540,12 +622,51 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
     else:
         token_roles = profile.roles
     user_id = profile.user_id
-    eff_perms = list(policy_registry.resolve_effective_permissions(token_roles))
-    await _check_device_trust(user_id, request)
+
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
+    suspicious, reason = assess_suspicious_login(
+        user_id,
+        ip_addr,
+        user_agent,
+        [h.model_dump() for h in await lifecycle_service.get_login_history(user_id)],
+    )
+
+    if profile.mfa_enabled or suspicious:
+        challenge_token = await store_mfa_login_challenge(
+            user_id=user_id,
+            email=profile.email,
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            roles=token_roles,
+            ttl=300,
+        )
+        return TokenResponse(
+            access_token="",
+            refresh_token="",
+            expires_in=300,
+            user_id=user_id,
+            email=profile.email,
+            roles=token_roles,
+            permissions=[],
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            mfa_verified=False,
+            mfa_required=True,
+            mfa_challenge_token=challenge_token,
+            mfa_methods=["totp", "backup_code"],
+        )
+
+    eff_perms = list(policy_registry.resolve_effective_permissions(token_roles))
+    await _check_device_trust(user_id, request)
     await lifecycle_service.record_login_attempt(
-        user_id, req.provider, ip_addr, user_agent, "success"
+        user_id,
+        req.provider,
+        ip_addr,
+        user_agent,
+        "success",
+        suspicious=suspicious,
+        details=reason,
     )
     access_token, refresh_token, exp = issue_jwt(
         user_id=user_id,
@@ -566,10 +687,11 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
         permissions=eff_perms,
         tenant_id=profile.tenant_id,
         org_id=profile.org_id,
+        mfa_verified=True,
     )
 
 
-# Step 2: Real SAML ACS Route
+# SAML ACS Route
 @app.get("/api/v1/auth/saml/{org_id}/start")
 async def saml_login_start(org_id: str):
     cfg = await enterprise_service.get_idp_config(org_id)
@@ -649,20 +771,11 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
             status_code=401, detail="SAML AuthnRequest already consumed or mismatched"
         )
     response_id = claims.get("response_id")
-    in_response_to = claims.get("in_response_to")
-    request_org = (
-        await r.get(f"saml_request:{digest(in_response_to)}")
-        if in_response_to
-        else None
-    )
-    if not response_id or not request_org or request_org != org_id:
+    if not response_id:
         raise HTTPException(
             status_code=401,
-            detail="SAML request correlation is invalid or unsolicited.",
+            detail="SAML Response ID missing.",
         )
-    consumed_request = await r.getdel(f"saml_request:{digest(in_response_to)}")
-    if consumed_request != org_id:
-        raise HTTPException(status_code=401, detail="SAML request already consumed.")
     if not await r.set(f"saml_replay:{digest(response_id)}", "1", ex=600, nx=True):
         raise HTTPException(status_code=401, detail="SAML response replay detected.")
     await _check_domain_sso_policy(claims["email"], method="saml")
@@ -684,11 +797,7 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
     )
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
-    if profile.mfa_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="MFA challenge required; login challenge completion is not yet wired to the BFF contract.",
-        )
+
     if profile.org_id and profile.org_id != org_id:
         raise HTTPException(status_code=403, detail="User organization scope mismatch")
     profile.org_id = org_id
@@ -696,17 +805,54 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
         org_id, claims.get("groups", [])
     )
     token_roles = sorted(set(profile.roles + mapped_roles))
-    profile.updated_at = (
-        __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-    )
+    profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
     user_id = profile.user_id
-    eff_perms = list(policy_registry.resolve_effective_permissions(token_roles))
-    await _check_device_trust(user_id, request)
+
     ip_addr = request.client.host if request.client else "127.0.0.1"
     user_agent = request.headers.get("User-Agent", "unknown")
+    suspicious, reason = assess_suspicious_login(
+        user_id,
+        ip_addr,
+        user_agent,
+        [h.model_dump() for h in await lifecycle_service.get_login_history(user_id)],
+    )
+
+    if profile.mfa_enabled or suspicious:
+        challenge_token = await store_mfa_login_challenge(
+            user_id=user_id,
+            email=profile.email,
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            roles=token_roles,
+            ttl=300,
+        )
+        return TokenResponse(
+            access_token="",
+            refresh_token="",
+            expires_in=300,
+            user_id=user_id,
+            email=profile.email,
+            roles=token_roles,
+            permissions=[],
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            mfa_verified=False,
+            mfa_required=True,
+            mfa_challenge_token=challenge_token,
+            mfa_methods=["totp", "backup_code"],
+        )
+
+    eff_perms = list(policy_registry.resolve_effective_permissions(token_roles))
+    await _check_device_trust(user_id, request)
     await lifecycle_service.record_login_attempt(
-        user_id, "saml", ip_addr, user_agent, "success"
+        user_id,
+        "saml",
+        ip_addr,
+        user_agent,
+        "success",
+        suspicious=suspicious,
+        details=reason,
     )
     access_token, refresh_token, exp = issue_jwt(
         user_id=user_id,
@@ -727,6 +873,7 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
         permissions=eff_perms,
         tenant_id=profile.tenant_id,
         org_id=profile.org_id,
+        mfa_verified=True,
     )
 
 
@@ -792,6 +939,125 @@ async def refresh_tokens(req: TokenRefreshRequest):
         tenant_id=profile.tenant_id,
         org_id=profile.org_id,
     )
+
+
+# Organization Invitations
+@app.post("/api/v1/orgs/{org_id}/invitations", response_model=InvitationResponse)
+async def create_invitation_route(
+    org_id: str, req: InvitationCreateRequest, user: CurrentUserDep
+):
+    _require_org_scope(user, org_id, "org:manage")
+    return await lifecycle_service.create_invitation(
+        req.email, org_id, req.role, user.user_id, req.expires_in_days
+    )
+
+
+@app.get("/api/v1/invitations/{token}")
+async def get_invitation_route(token: str):
+    inv = await lifecycle_service.get_invitation(token)
+    if not inv:
+        raise HTTPException(
+            status_code=404, detail="Invitation token not found or expired"
+        )
+    return inv
+
+
+@app.post("/api/v1/invitations/accept", response_model=UserProfile)
+async def accept_invitation_route(req: InvitationAcceptRequest):
+    try:
+        return await lifecycle_service.accept_invitation(
+            req.token, req.password, req.display_name
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# Account Grace Period Soft-Deletion
+@app.post("/api/v1/users/me/delete-account")
+async def delete_my_account(user: CurrentUserDep, reauth: ReauthDep):
+    await lifecycle_service.schedule_account_deletion(
+        user.user_id, grace_period_days=30
+    )
+    return {
+        "status": "pending_deletion",
+        "detail": "Account scheduled for deletion after 30-day grace period.",
+    }
+
+
+@app.post("/api/v1/users/me/cancel-deletion", response_model=UserProfile)
+async def cancel_my_account_deletion(user: CurrentUserDep):
+    try:
+        return await lifecycle_service.cancel_account_deletion(user.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# Active Organization Switching
+@app.get("/api/v1/users/me/orgs")
+async def list_my_orgs(user: CurrentUserDep):
+    return await db_get_user_org_memberships(user.user_id)
+
+
+@app.post("/api/v1/users/me/switch-org", response_model=TokenResponse)
+async def switch_active_org(req: SwitchOrgRequest, user: CurrentUserDep):
+    memberships = await db_get_user_org_memberships(user.user_id)
+    target_mem = next((m for m in memberships if m["org_id"] == req.org_id), None)
+    if not target_mem and not user.has_permission("platform:admin"):
+        raise HTTPException(
+            status_code=403, detail="Not a member of target organization"
+        )
+
+    profile = await lifecycle_service.get_profile(user.user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User profile not found")
+
+    profile.org_id = req.org_id
+    if target_mem and target_mem["role"] not in profile.roles:
+        profile.roles.append(target_mem["role"])
+
+    profile.updated_at = datetime.now(UTC).isoformat()
+    await db_upsert_user_profile(profile.model_dump())
+
+    eff_perms = list(policy_registry.resolve_effective_permissions(profile.roles))
+    access_token, refresh_token, exp = issue_jwt(
+        user_id=user.user_id,
+        email=profile.email,
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=req.org_id,
+    )
+    await _register_refresh_token(refresh_token)
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=exp,
+        user_id=user.user_id,
+        email=profile.email,
+        roles=profile.roles,
+        permissions=eff_perms,
+        tenant_id=profile.tenant_id,
+        org_id=req.org_id,
+    )
+
+
+# Security Events & Login History
+@app.get("/api/v1/users/me/security-events")
+async def get_security_events(user: CurrentUserDep):
+    history = await lifecycle_service.get_login_history(user.user_id, limit=50)
+    return [
+        SecurityEventResponse(
+            id=h.id,
+            user_id=h.user_id,
+            timestamp=h.timestamp,
+            provider=h.provider,
+            ip_address=h.ip_address,
+            user_agent=h.user_agent,
+            suspicious=h.suspicious,
+            details=h.details,
+        )
+        for h in history
+    ]
 
 
 # Token Revocation
@@ -875,9 +1141,7 @@ async def revoke_all_sessions(user: CurrentUserDep):
     return {"status": "logged_out_all", "count": len(session_ids)}
 
 
-# ---------------------------------------------------------------------------
 # Password Recovery & Magic Links
-# ---------------------------------------------------------------------------
 @app.post("/api/v1/auth/magic-link")
 async def request_magic_link(req: MagicLinkRequest):
     r = await get_redis_client()
@@ -926,11 +1190,32 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
         raise HTTPException(status_code=401, detail="Email verification required.")
     assert_login_allowed(profile)
     assert_admin_mfa_enrolled(profile)
+
     if profile.mfa_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="MFA challenge required; passwordless challenge completion is not wired to the BFF contract.",
+        challenge_token = await store_mfa_login_challenge(
+            user_id=profile.user_id,
+            email=profile.email,
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            roles=profile.roles,
+            ttl=300,
         )
+        return TokenResponse(
+            access_token="",
+            refresh_token="",
+            expires_in=300,
+            user_id=profile.user_id,
+            email=profile.email,
+            roles=profile.roles,
+            permissions=[],
+            tenant_id=profile.tenant_id,
+            org_id=profile.org_id,
+            mfa_verified=False,
+            mfa_required=True,
+            mfa_challenge_token=challenge_token,
+            mfa_methods=["totp", "backup_code"],
+        )
+
     await _check_device_trust(profile.user_id, request)
     permissions = list(policy_registry.resolve_effective_permissions(profile.roles))
     access_token, refresh_token, exp = issue_jwt(
@@ -952,6 +1237,7 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
         permissions=permissions,
         tenant_id=profile.tenant_id,
         org_id=profile.org_id,
+        mfa_verified=True,
     )
 
 
@@ -982,7 +1268,6 @@ async def request_account_recovery(req: AccountRecoveryRequest):
     }
 
 
-# Step 3: Password Reset Confirmation
 @app.post("/api/v1/users/recovery/confirm")
 async def confirm_account_recovery(req: AccountRecoveryConfirmRequest):
     if len(req.new_password) < _settings.auth.min_password_length:
@@ -1008,15 +1293,12 @@ async def confirm_account_recovery(req: AccountRecoveryConfirmRequest):
             status_code=400, detail="Invalid or expired account recovery token."
         )
     user_id = profile.user_id
-    # Persist the updated password in DB
     new_hash = hash_password(req.new_password)
     await db_save_user_password(user_id, new_hash)
-    # Invalidate all existing user sessions/tokens
     await lifecycle_service.logout_all_devices(user_id)
     return {"status": "success", "detail": "Password successfully updated."}
 
 
-# Email Verification
 @app.post("/api/v1/users/verify-email/request", status_code=202)
 async def request_email_verification(user: CurrentUserDep):
     r = await get_redis_client()
@@ -1042,11 +1324,7 @@ async def confirm_email_verification(req: EmailVerifyRequest):
         )
     profile = await lifecycle_service.get_or_create_profile(email)
     profile.email_verified = True
-    profile.updated_at = (
-        __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-    )
-    from services.common.db import db_upsert_user_profile
-
+    profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
     return {"status": "success", "detail": "Email verified successfully."}
 
@@ -1097,7 +1375,6 @@ async def mfa_enroll(user: CurrentUserDep):
 async def mfa_verify_enrollment(req: TOTPVerifyRequest, user: CurrentUserDep):
     secret = await consume_mfa_enrollment(user.user_id)
     if not secret or not verify_totp_code(secret, req.code):
-        # Enrollment secret is single-use on confirmation; failed enrollment can restart.
         raise HTTPException(
             status_code=400, detail="Invalid or expired MFA enrollment."
         )
@@ -1109,9 +1386,7 @@ async def mfa_verify_enrollment(req: TOTPVerifyRequest, user: CurrentUserDep):
         await delete_mfa_secret(user.user_id)
         raise HTTPException(status_code=404, detail="Profile not found")
     profile.mfa_enabled = True
-    profile.updated_at = (
-        __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-    )
+    profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
     return {"status": "enabled", "backup_codes": backup_codes}
 
@@ -1124,9 +1399,7 @@ async def mfa_disable(req: TOTPVerifyRequest, user: CurrentUserDep, reauth: Reau
     profile = await lifecycle_service.get_profile(user.user_id)
     if profile:
         profile.mfa_enabled = False
-        profile.updated_at = (
-            __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-        )
+        profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
     await delete_mfa_secret(user.user_id)
     return {"status": "disabled"}
@@ -1184,7 +1457,6 @@ async def update_my_profile(req: ProfileUpdateRequest, user: CurrentUserDep):
     )
 
 
-# Step 3: Account Status Route
 @app.post("/api/v1/users/status", response_model=UserProfile)
 async def change_status_route(
     req: AccountStatusChangeRequest,
@@ -1203,8 +1475,8 @@ async def change_status_route(
 
 @app.delete("/api/v1/users/me")
 async def delete_my_account(user: CurrentUserDep, reauth: ReauthDep):
-    await lifecycle_service.change_account_status(
-        user.user_id, AccountStatus.PENDING_DELETION, "User initiated account deletion"
+    await lifecycle_service.schedule_account_deletion(
+        user.user_id, grace_period_days=30
     )
     return {
         "status": "pending_deletion",
@@ -1212,7 +1484,14 @@ async def delete_my_account(user: CurrentUserDep, reauth: ReauthDep):
     }
 
 
-# Provider Linking & Unlinking
+@app.get("/api/v1/users/me/login-history")
+async def get_my_login_history(user: CurrentUserDep):
+    return await lifecycle_service.get_login_history(user.user_id)
+
+
+# ---------------------------------------------------------------------------
+# Provider Linking & Unlinking Routes
+# ---------------------------------------------------------------------------
 @app.get("/api/v1/users/me/providers/{provider}/link/authorize-url")
 async def provider_link_authorize_url(
     provider: str, redirect_uri: str, user: CurrentUserDep
@@ -1339,11 +1618,6 @@ async def unlink_provider_route(provider: str, user: CurrentUserDep, reauth: Rea
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.get("/api/v1/users/me/login-history")
-async def get_my_login_history(user: CurrentUserDep):
-    return await lifecycle_service.get_login_history(user.user_id)
-
-
 # ---------------------------------------------------------------------------
 # RBAC, Delegations & Trip Sharing
 # ---------------------------------------------------------------------------
@@ -1403,9 +1677,7 @@ async def assign_role_route(req: RoleAssignmentRequest, user: CurrentUserDep):
     await db_assign_role(req.user_id, req.role, role_scope, scope_id, user.user_id)
     if req.role not in target.roles:
         target.roles.append(req.role)
-    target.updated_at = (
-        __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-    )
+    target.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(target.model_dump())
     await r.set(f"tokens_valid_after:{target.user_id}", str(time.time()))
     return {
@@ -1459,9 +1731,7 @@ async def revoke_role_route(req: RoleRevocationRequest, user: CurrentUserDep):
         target.roles = [r for r in target.roles if r != req.role]
         if not target.roles:
             target.roles = ["member"]
-        target.updated_at = (
-            __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-        )
+        target.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(target.model_dump())
         await r.set(f"tokens_valid_after:{target.user_id}", str(time.time()))
     return {"status": "revoked" if count else "not_found", "role": req.role}
@@ -1490,10 +1760,8 @@ async def create_delegated_permission_route(
             status_code=404, detail="Delegate must belong to the same tenant"
         )
     try:
-        expiry = __import__("datetime").datetime.fromisoformat(
-            req.expires_at.replace("Z", "+00:00")
-        )
-        if expiry <= __import__("datetime").datetime.now(__import__("datetime").UTC):
+        expiry = datetime.fromisoformat(req.expires_at.replace("Z", "+00:00"))
+        if expiry <= datetime.now(UTC):
             raise ValueError("Delegation expiry must be in the future")
     except ValueError:
         raise HTTPException(
@@ -1531,12 +1799,8 @@ async def share_trip_route(req: TripShareRequest, user: CurrentUserDep):
         raise HTTPException(status_code=400, detail="Invalid trip share permission")
     if req.expires_at:
         try:
-            share_expiry = __import__("datetime").datetime.fromisoformat(
-                req.expires_at.replace("Z", "+00:00")
-            )
-            if share_expiry <= __import__("datetime").datetime.now(
-                __import__("datetime").UTC
-            ):
+            share_expiry = datetime.fromisoformat(req.expires_at.replace("Z", "+00:00"))
+            if share_expiry <= datetime.now(UTC):
                 raise ValueError
         except ValueError:
             raise HTTPException(
@@ -1574,7 +1838,6 @@ async def set_idp_config_route(
     return await enterprise_service.set_idp_config(req)
 
 
-# Step 5: Issue SCIM Token
 @app.post("/api/v1/orgs/{org_id}/scim-tokens")
 async def issue_org_scim_token(org_id: str, user: CurrentUserDep, reauth: ReauthDep):
     _require_org_scope(user, org_id, "scim:manage")
@@ -1588,7 +1851,6 @@ async def issue_org_scim_token(org_id: str, user: CurrentUserDep, reauth: Reauth
     }
 
 
-# Step 5: SCIM Token Verification Dependency
 async def verify_scim_token(request: Request, authorization: str = Header(None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -1614,9 +1876,22 @@ SCIMAuthDep = Depends(verify_scim_token)
 # SCIM 2.0 Endpoints
 @app.get("/scim/v2/Users", response_model=SCIMListResponse)
 async def scim_list_users(
-    request: Request, org_id: str = SCIMAuthDep, filter: str | None = None
+    request: Request,
+    org_id: str = SCIMAuthDep,
+    filter: str | None = None,
+    startIndex: int = 1,
+    count: int = 100,
+    sortBy: str | None = None,
+    sortOrder: str = "ascending",
 ):
-    return await scim_service.list_users(org_id=org_id, filter_query=filter)
+    return await scim_service.list_users(
+        org_id=org_id,
+        filter_query=filter,
+        start_index=startIndex,
+        count=count,
+        sort_by=sortBy,
+        sort_order=sortOrder,
+    )
 
 
 @app.post("/scim/v2/Users", response_model=SCIMUserSchema, status_code=201)
@@ -1639,73 +1914,78 @@ async def scim_get_user(request: Request, user_id: str, org_id: str = SCIMAuthDe
 
 @app.put("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
 async def scim_update_user(
-    request: Request, user_id: str, user: SCIMUserSchema, org_id: str = SCIMAuthDep
+    request: Request,
+    user_id: str,
+    user: SCIMUserSchema,
+    org_id: str = SCIMAuthDep,
+    if_match: str | None = Header(None, alias="If-Match"),
 ):
-    return await scim_service.update_user(user_id, user, org_id=org_id)
+    try:
+        return await scim_service.update_user(
+            user_id, user, org_id=org_id, if_match=if_match
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
+        )
 
 
 @app.patch("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
 async def scim_patch_user(
-    request: Request, user_id: str, patch: SCIMPatchRequest, org_id: str = SCIMAuthDep
+    request: Request,
+    user_id: str,
+    patch: SCIMPatchRequest,
+    org_id: str = SCIMAuthDep,
+    if_match: str | None = Header(None, alias="If-Match"),
 ):
-    user = await scim_service.get_user(user_id, org_id=org_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="SCIM User not found")
-    for operation in patch.Operations:
-        op = operation.op.lower()
-        path = (operation.path or "").lower()
-        if op not in {"add", "replace", "remove"}:
-            raise HTTPException(
-                status_code=400, detail="Unsupported SCIM PATCH operation"
-            )
-        if path in {"active", "displayname"}:
-            if op == "remove":
-                if path == "active":
-                    user.active = False
-                else:
-                    user.displayName = None
-            elif path == "active":
-                user.active = bool(operation.value)
-            else:
-                user.displayName = str(operation.value)
-        elif path in {"name.givenname", "name.familyname"}:
-            if user.name is None:
-                user.name = SCIMName()
-            if op == "remove":
-                if path == "name.givenname":
-                    user.name.givenName = None
-                else:
-                    user.name.familyName = None
-            else:
-                if path == "name.givenname":
-                    user.name.givenName = str(operation.value)
-                else:
-                    user.name.familyName = str(operation.value)
-        elif path == "emails":
-            if op == "remove":
-                user.emails = []
-            else:
-                user.emails = (
-                    operation.value
-                    if isinstance(operation.value, list)
-                    else [operation.value]
-                )
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported SCIM PATCH path")
-    return await scim_service.update_user(user_id, user, org_id=org_id)
+    try:
+        return await scim_service.patch_user(
+            user_id, patch.Operations, org_id=org_id, if_match=if_match
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
+        )
 
 
 @app.delete("/scim/v2/Users/{user_id}", status_code=204)
-async def scim_delete_user(request: Request, user_id: str, org_id: str = SCIMAuthDep):
-    deleted = await scim_service.delete_user(user_id, org_id=org_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="SCIM User not found.")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+async def scim_delete_user(
+    request: Request,
+    user_id: str,
+    org_id: str = SCIMAuthDep,
+    if_match: str | None = Header(None, alias="If-Match"),
+):
+    try:
+        deleted = await scim_service.delete_user(
+            user_id, org_id=org_id, if_match=if_match
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="SCIM User not found.")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
+        )
 
 
 @app.get("/scim/v2/Groups", response_model=SCIMListResponse)
-async def scim_list_groups(request: Request, org_id: str = SCIMAuthDep):
-    return await scim_service.list_groups(org_id=org_id)
+async def scim_list_groups(
+    request: Request,
+    org_id: str = SCIMAuthDep,
+    filter: str | None = None,
+    startIndex: int = 1,
+    count: int = 100,
+    sortBy: str | None = None,
+    sortOrder: str = "ascending",
+):
+    return await scim_service.list_groups(
+        org_id=org_id,
+        filter_query=filter,
+        start_index=startIndex,
+        count=count,
+        sort_by=sortBy,
+        sort_order=sortOrder,
+    )
 
 
 @app.post("/scim/v2/Groups", response_model=SCIMGroupSchema, status_code=201)
@@ -1725,50 +2005,55 @@ async def scim_get_group(request: Request, group_id: str, org_id: str = SCIMAuth
 
 @app.put("/scim/v2/Groups/{group_id}", response_model=SCIMGroupSchema)
 async def scim_update_group(
-    request: Request, group_id: str, group: SCIMGroupSchema, org_id: str = SCIMAuthDep
+    request: Request,
+    group_id: str,
+    group: SCIMGroupSchema,
+    org_id: str = SCIMAuthDep,
+    if_match: str | None = Header(None, alias="If-Match"),
 ):
     try:
-        return await scim_service.update_group(group_id, group, org_id=org_id)
+        return await scim_service.update_group(
+            group_id, group, org_id=org_id, if_match=if_match
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(
+            status_code=412 if "If-Match" in str(exc) else 404, detail=str(exc)
+        )
 
 
 @app.patch("/scim/v2/Groups/{group_id}", response_model=SCIMGroupSchema)
 async def scim_patch_group(
-    request: Request, group_id: str, patch: SCIMPatchRequest, org_id: str = SCIMAuthDep
+    request: Request,
+    group_id: str,
+    patch: SCIMPatchRequest,
+    org_id: str = SCIMAuthDep,
+    if_match: str | None = Header(None, alias="If-Match"),
 ):
-    group = await scim_service.get_group(group_id, org_id=org_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="SCIM Group not found")
-    for operation in patch.Operations:
-        op, path = operation.op.lower(), (operation.path or "").lower()
-        if op not in {"add", "replace", "remove"}:
-            raise HTTPException(
-                status_code=400, detail="Unsupported SCIM PATCH operation"
-            )
-        if path == "displayname":
-            if op == "remove":
-                raise HTTPException(
-                    status_code=400, detail="displayName cannot be removed"
-                )
-            group.displayName = str(operation.value)
-        elif path == "members":
-            if op == "remove":
-                group.members = []
-            else:
-                group.members = (
-                    operation.value
-                    if isinstance(operation.value, list)
-                    else [operation.value]
-                )
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported SCIM PATCH path")
-    return await scim_service.update_group(group_id, group, org_id=org_id)
+    try:
+        return await scim_service.patch_group(
+            group_id, patch.Operations, org_id=org_id, if_match=if_match
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
+        )
 
 
 @app.delete("/scim/v2/Groups/{group_id}", status_code=204)
-async def scim_delete_group(request: Request, group_id: str, org_id: str = SCIMAuthDep):
-    deleted = await scim_service.delete_group(group_id, org_id=org_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="SCIM Group not found")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+async def scim_delete_group(
+    request: Request,
+    group_id: str,
+    org_id: str = SCIMAuthDep,
+    if_match: str | None = Header(None, alias="If-Match"),
+):
+    try:
+        deleted = await scim_service.delete_group(
+            group_id, org_id=org_id, if_match=if_match
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="SCIM Group not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
+        )

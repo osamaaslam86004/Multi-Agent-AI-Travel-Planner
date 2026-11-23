@@ -51,6 +51,9 @@
               <span class="status-dot"></span>
               <span class="status-text">Connecting…</span>
             </button>
+            <button class="btn btn-ghost btn-sm" id="securityBtn" type="button">
+              🛡️ Security &amp; Devices
+            </button>
             <button class="btn btn-soft btn-sm" id="newTripBtn" type="button">
               <svg
                 viewBox="0 0 24 24"
@@ -314,6 +317,105 @@
         </div>
       </main>
     </div>
+
+    <!-- Security & Devices Modal -->
+    <div class="modal-scrim" id="securityModalScrim" hidden></div>
+    <div class="modal" id="securityModal" hidden>
+      <div class="modal-head">
+        <div class="modal-heading">
+          <h2>Security, Active Sessions &amp; Linked Providers</h2>
+          <p>
+            Manage authentication methods, view login history, and control
+            active devices.
+          </p>
+        </div>
+        <button class="icon-btn sm" id="closeSecurityModal" type="button">
+          &times;
+        </button>
+      </div>
+      <div class="modal-body">
+        <section class="cred">
+          <div class="cred-head">
+            <span class="cred-label">Linked Identity Providers</span>
+          </div>
+          <p class="cred-hint">
+            Link enterprise SSO or OAuth accounts to your profile for step-up
+            security.
+          </p>
+          <div
+            style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px"
+          >
+            <button
+              class="btn btn-ghost btn-xs"
+              type="button"
+              onclick="window.location.href = '/api/v1/auth/google/login'"
+            >
+              Google
+            </button>
+            <button
+              class="btn btn-ghost btn-xs"
+              type="button"
+              onclick="window.location.href = '/api/v1/auth/github/login'"
+            >
+              GitHub
+            </button>
+            <button
+              class="btn btn-ghost btn-xs"
+              type="button"
+              onclick="window.location.href = '/api/v1/auth/entra/login'"
+            >
+              Microsoft Entra
+            </button>
+          </div>
+        </section>
+
+        <section class="cred">
+          <div class="cred-head">
+            <span class="cred-label">MFA Login Verification</span>
+          </div>
+          <div class="cred-field">
+            <input
+              type="text"
+              id="mfaCodeInput"
+              class="cred-input"
+              placeholder="Enter 6-digit TOTP code or backup code"
+            />
+            <button
+              class="btn btn-primary btn-sm"
+              id="submitMfaBtn"
+              type="button"
+            >
+              Verify MFA
+            </button>
+          </div>
+        </section>
+
+        <section class="cred">
+          <div class="cred-head">
+            <span class="cred-label">Security &amp; Login History</span>
+          </div>
+          <div
+            id="securityEventsList"
+            style="font-size: 12.5px; max-height: 140px; overflow-y: auto"
+          >
+            Loading activity log...
+          </div>
+        </section>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost btn-sm" id="logoutAllBtn" type="button">
+          Revoke All Sessions
+        </button>
+        <button
+          class="btn btn-primary btn-sm"
+          id="doneSecurityModal"
+          type="button"
+        >
+          Done
+        </button>
+      </div>
+    </div>
+
     <!-- toast -->
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/static/js/markdown.js"></script>

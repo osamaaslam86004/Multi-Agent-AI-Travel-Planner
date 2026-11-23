@@ -41,6 +41,9 @@ class TokenResponse(BaseModel):
     tenant_id: str = "default"
     org_id: str | None = None
     mfa_verified: bool = True
+    mfa_required: bool = False
+    mfa_challenge_token: str | None = None
+    mfa_methods: list[str] | None = None
 
 
 class TokenRefreshRequest(BaseModel):
@@ -203,6 +206,12 @@ class MFAChallengeRequest(BaseModel):
     code: str
 
 
+class MFAVerifyLoginRequest(BaseModel):
+    mfa_challenge_token: str
+    totp_code: str | None = None
+    backup_code: str | None = None
+
+
 class ReauthRequest(BaseModel):
     password: str | None = None
     mfa_code: str | None = None
@@ -218,6 +227,48 @@ class DeviceTrustRequest(BaseModel):
     device_fingerprint: str
     device_name: str | None = None
     trust_device: bool = True
+
+
+class InvitationCreateRequest(BaseModel):
+    email: str
+    org_id: str
+    role: str = "member"
+    expires_in_days: int = 7
+
+
+class InvitationResponse(BaseModel):
+    token: str
+    email: str
+    org_id: str
+    role: str
+    expires_at: str
+
+
+class InvitationAcceptRequest(BaseModel):
+    token: str
+    password: str | None = None
+    display_name: str | None = None
+
+
+class OrgMembershipResponse(BaseModel):
+    org_id: str
+    role: str
+    created_at: str
+
+
+class SwitchOrgRequest(BaseModel):
+    org_id: str
+
+
+class SecurityEventResponse(BaseModel):
+    id: str
+    user_id: str
+    timestamp: str
+    provider: str
+    ip_address: str
+    user_agent: str
+    suspicious: bool
+    details: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +385,7 @@ class SCIMMeta(BaseModel):
     created: str | None = None
     lastModified: str | None = None
     location: str | None = None
+    version: str | None = None
 
 
 class SCIMUserSchema(BaseModel):
