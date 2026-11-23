@@ -38,6 +38,9 @@ class AuthSettings(BaseDomainSettings):
     saml_sp_entity_id: str = "https://auth.travelbrain.ai/saml/metadata"
     saml_acs_url: str = "https://auth.travelbrain.ai/api/v1/auth/saml/acs"
     scim_token_secret: str = "dev-scim-token-secret-32chars-key"
+    identity_encryption_key: str | None = (
+        None  # Fernet base64 key; separate from JWT signing key
+    )
     # Security & Auth Policies
     min_password_length: int = 12
     require_mfa_for_admins: bool = True
@@ -70,6 +73,7 @@ class AuthSettings(BaseDomainSettings):
             "saml_sp_entity_id": "SAML_SP_ENTITY_ID",
             "saml_acs_url": "SAML_ACS_URL",
             "scim_token_secret": "SCIM_TOKEN_SECRET",
+            "identity_encryption_key": "IDENTITY_ENCRYPTION_KEY",
             "min_password_length": "MIN_PASSWORD_LENGTH",
             "require_mfa_for_admins": "REQUIRE_MFA_FOR_ADMINS",
             "max_failed_login_attempts": "MAX_FAILED_LOGIN_ATTEMPTS",

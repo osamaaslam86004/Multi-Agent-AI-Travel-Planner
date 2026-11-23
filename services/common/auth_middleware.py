@@ -13,17 +13,16 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
 from services.auth_service.security import verify_sudo_token
+from services.auth_service.security_state import digest
 from services.core.config import get_settings
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth_middleware")
 _s = get_settings()
-
 AUTH_SERVICE_JWKS_URL = _s.auth.auth_service_jwks_url
 EXPECTED_ISSUER = _s.auth.jwt_issuer
 EXPECTED_AUDIENCE = _s.auth.jwt_audience
 ENVIRONMENT = _s.app.environment
-
 _jwks_client: PyJWKClient | None = None
 security_scheme = HTTPBearer(auto_error=False)
 CredentialsDep = Annotated[
@@ -81,14 +80,12 @@ async def get_current_user(
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
-
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
     try:
         client = get_jwks_client()
         signing_key = await asyncio.to_thread(client.get_signing_key_from_jwt, token)
@@ -112,18 +109,15 @@ async def get_current_user(
                 detail="Invalid token type: access token required.",
                 headers={"WWW-Authenticate": "Bearer error='invalid_token_type'"},
             )
-
         jti = payload.get("jti")
         sid = payload.get("sid")
         user_id = payload.get("sub")
-
         r = await get_redis_client()
         if r is None and ENVIRONMENT == "production":
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Security validation unavailable. Redis connection required.",
             )
-
         if r:
             if jti and await r.get(f"revoked:{jti}"):
                 raise HTTPException(
@@ -146,7 +140,6 @@ async def get_current_user(
                         detail="Session invalidated by recent security event.",
                         headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
                     )
-
         return AuthenticatedUser(payload)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -220,6 +213,30 @@ def require_reauth():
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid, expired, or user-mismatched reauthentication token.",
+            )
+        redis_client = await get_redis_client()
+        if redis_client is None:
+            raise HTTPException(
+                status_code=503, detail="Step-up token validation unavailable."
+            )
+        token_record = await redis_client.getdel(f"sudo_token:{digest(sudo_hdr)}")
+        if not token_record:
+            raise HTTPException(
+                status_code=401, detail="Step-up token expired or already consumed."
+            )
+        import json
+
+        try:
+            record = json.loads(token_record)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Invalid step-up token record.")
+        if (
+            record.get("user_id") != user.user_id
+            or record.get("sid") != user.session_id
+            or record.get("action") != request.url.path
+        ):
+            raise HTTPException(
+                status_code=403, detail="Step-up token context mismatch."
             )
         return user
 

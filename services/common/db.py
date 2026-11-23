@@ -9,13 +9,18 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from typing import Any
 
-import psycopg
-from psycopg_pool import AsyncConnectionPool
+try:
+    import psycopg
+    from psycopg_pool import AsyncConnectionPool
 
-_PSYCOPG_ERRORS = (psycopg.Error,)
-
+    _PSYCOPG_ERRORS = (psycopg.Error,)
+except ImportError:
+    psycopg = None
+    AsyncConnectionPool = None
+    _PSYCOPG_ERRORS = ()
 from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.db")
@@ -32,7 +37,6 @@ _DB_ERRORS: tuple[type[Exception], ...] = _PSYCOPG_ERRORS + (
     ValueError,
     json.JSONDecodeError,
 )
-
 _pool: Any = None
 _in_memory_db: dict[str, Any] = {
     "trips": {},
@@ -258,6 +262,10 @@ async def init_db_pool() -> Any:
         return _pool
     if psycopg is None or AsyncConnectionPool is None:
         _pool = None
+        if get_settings().app.environment.lower() in ("production", "staging"):
+            raise RuntimeError(
+                "PostgreSQL driver unavailable; identity persistence cannot fall back to memory in production/staging."
+            )
         return None
     try:
         db_cfg = _get_db_settings()
@@ -274,8 +282,19 @@ async def init_db_pool() -> Any:
             await init_identity_schema(conn)
         return _pool
     except (ImportError, OSError, RuntimeError, ValueError, Exception) as exc:
+        environment = get_settings().app.environment.lower()
+        if environment in ("production", "staging"):
+            logger.exception(
+                "PostgreSQL initialization failed; refusing ephemeral identity persistence in %s",
+                environment,
+            )
+            _pool = None
+            raise RuntimeError(
+                "PostgreSQL unavailable; fail-closed identity persistence required."
+            ) from exc
         logger.warning(
-            f"Postgres pool initialization unavailable: {exc}. Using fallback in-memory database store."
+            "Postgres pool initialization unavailable: %s. Development-only memory fallback enabled.",
+            exc,
         )
         _pool = None
         return None
@@ -304,8 +323,6 @@ async def get_tenant_conn(tenant_id: str = "default") -> AsyncGenerator[Any, Non
 
 
 # --- User Profile & Credential Repository ---
-
-
 async def db_get_user_by_email(email: str) -> dict[str, Any] | None:
     email_clean = email.lower().strip()
     pool = await init_db_pool()
@@ -398,7 +415,6 @@ async def db_upsert_user_profile(user_dict: dict[str, Any]) -> None:
     email_verified = user_dict.get("email_verified", False)
     mfa_enabled = user_dict.get("mfa_enabled", False)
     org_id = user_dict.get("org_id")
-
     pool = await init_db_pool()
     if pool is not None:
         async with get_tenant_conn(tenant_id) as conn:
@@ -465,8 +481,6 @@ async def db_get_user_password(user_id: str) -> str | None:
 
 
 # --- Federated Identities Repository ---
-
-
 async def db_link_federated_identity(
     user_id: str,
     provider: str,
@@ -502,6 +516,26 @@ async def db_link_federated_identity(
     return fed_id
 
 
+async def db_unlink_federated_identity(user_id: str, provider: str) -> int:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM federated_identities WHERE user_id = %s AND provider = %s;",
+                        (user_id, provider),
+                    )
+                    return cur.rowcount
+    before = len(_in_memory_db["federated_identities"])
+    _in_memory_db["federated_identities"] = [
+        f
+        for f in _in_memory_db["federated_identities"]
+        if not (f.get("user_id") == user_id and f.get("provider") == provider)
+    ]
+    return before - len(_in_memory_db["federated_identities"])
+
+
 async def db_get_federated_identity(
     provider: str, issuer: str, sub: str
 ) -> dict[str, Any] | None:
@@ -534,6 +568,65 @@ async def db_get_federated_identity(
 
 
 # --- SCIM Tokens Repository ---
+async def db_assign_role(
+    user_id: str, role: str, scope_type: str, scope_id: str | None, assigned_by: str
+) -> str:
+    assignment_id = f"role_{uuid.uuid4().hex[:16]}"
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO role_assignments (id, user_id, role, scope_type, scope_id, assigned_by) VALUES (%s,%s,%s,%s,%s,%s);",
+                        (
+                            assignment_id,
+                            user_id,
+                            role,
+                            scope_type,
+                            scope_id,
+                            assigned_by,
+                        ),
+                    )
+                return assignment_id
+    _in_memory_db["role_assignments"].append(
+        {
+            "id": assignment_id,
+            "user_id": user_id,
+            "role": role,
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "assigned_by": assigned_by,
+        }
+    )
+    return assignment_id
+
+
+async def db_revoke_role(
+    user_id: str, role: str, scope_type: str, scope_id: str | None
+) -> int:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn() as conn:
+            if conn:
+                async with conn.transaction(), conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM role_assignments WHERE user_id=%s AND role=%s AND scope_type=%s AND scope_id IS NOT DISTINCT FROM %s;",
+                        (user_id, role, scope_type, scope_id),
+                    )
+                    return cur.rowcount
+    before = len(_in_memory_db["role_assignments"])
+    _in_memory_db["role_assignments"] = [
+        a
+        for a in _in_memory_db["role_assignments"]
+        if not (
+            a.get("user_id") == user_id
+            and a.get("role") == role
+            and a.get("scope_type") == scope_type
+            and a.get("scope_id") == scope_id
+        )
+    ]
+    return before - len(_in_memory_db["role_assignments"])
 
 
 async def db_save_scim_token(org_id: str, token_hash: str) -> str:
@@ -581,8 +674,6 @@ async def db_get_scim_token_by_hash(token_hash: str) -> dict[str, Any] | None:
 
 
 # --- IdP Config Repository ---
-
-
 async def db_get_idp_config(org_id: str) -> dict[str, Any] | None:
     pool = await init_db_pool()
     if pool is not None:
@@ -689,8 +780,6 @@ async def db_list_all_idp_configs() -> list[dict[str, Any]]:
 
 
 # --- SCIM Users & Groups Repository ---
-
-
 async def db_save_scim_user(
     user_data: dict[str, Any], org_id: str | None = None
 ) -> None:
@@ -900,8 +989,6 @@ async def db_list_scim_groups(org_id: str | None = None) -> list[dict[str, Any]]
 
 
 # --- Delegated Permissions & Trip Sharing Repository ---
-
-
 async def db_save_delegated_permission(delegation_dict: dict[str, Any]) -> str:
     del_id = delegation_dict.get("id") or f"del_{uuid.uuid4().hex[:12]}"
     delegation_dict["id"] = del_id
@@ -955,8 +1042,6 @@ async def db_save_trip_share(share_dict: dict[str, Any]) -> str:
 
 
 # --- Trips & Usage Repository ---
-
-
 async def upsert_trip_result(
     tenant_id: str,
     user_id: str,
@@ -1023,6 +1108,83 @@ async def upsert_trip_result(
         "weather_degraded": weather_degraded,
         "status": status,
     }
+
+
+async def db_can_access_trip(
+    user_id: str, trip_id: str, tenant_id: str, action: str = "read"
+) -> bool:
+    trip = await get_trip_by_id(trip_id, tenant_id=tenant_id)
+    if not trip:
+        return False
+    if trip.get("user_id") == user_id:
+        return True
+    pool = await init_db_pool()
+    if pool is not None:
+        async with get_tenant_conn(tenant_id) as conn:
+            if conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT permission_level FROM trip_shares WHERE trip_id=%s AND grantee_id=%s AND (expires_at IS NULL OR expires_at > NOW());",
+                        (trip_id, user_id),
+                    )
+                    share = await cur.fetchone()
+                    allowed_levels = {
+                        "read": {"read", "write", "admin"},
+                        "write": {"write", "admin"},
+                        "share": {"admin"},
+                    }
+                    if share and share[0] in allowed_levels.get(action, set()):
+                        return True
+                    await cur.execute(
+                        "SELECT permissions FROM delegated_permissions WHERE delegate_user_id=%s AND resource_type='trip' AND resource_id=%s AND expires_at > NOW();",
+                        (user_id, trip_id),
+                    )
+                    for row in await cur.fetchall():
+                        permissions = (
+                            row[0] if isinstance(row[0], list) else json.loads(row[0])
+                        )
+                        if (
+                            action in permissions
+                            or (action == "read" and "write" in permissions)
+                            or "manage" in permissions
+                        ):
+                            return True
+                return False
+    for share in _in_memory_db["trip_shares"].values():
+        if share.get("trip_id") == trip_id and share.get("grantee_id") == user_id:
+            expiry = share.get("expires_at")
+            if not expiry or str(expiry) > datetime.now(UTC).isoformat():
+                level = share.get("permission_level", "read")
+                if level in {"admin", "write", "read"} and action == "read":
+                    return True
+                if level in {"admin", "write"} and action == "write":
+                    return True
+                if level == "admin" and action == "share":
+                    return True
+    for delegation in _in_memory_db["delegated_permissions"].values():
+        if (
+            delegation.get("resource_type") == "trip"
+            and delegation.get("resource_id") == trip_id
+            and delegation.get("delegate_user_id") == user_id
+        ):
+            expiry = delegation.get("expires_at")
+            try:
+                expires_at = (
+                    datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    if expiry
+                    else None
+                )
+            except ValueError:
+                expires_at = None
+            if expires_at and expires_at > datetime.now(UTC):
+                permissions = delegation.get("permissions", [])
+                if (
+                    action in permissions
+                    or (action == "read" and "write" in permissions)
+                    or "manage" in permissions
+                ):
+                    return True
+    return False
 
 
 async def get_trip_by_id(
@@ -1178,8 +1340,6 @@ async def record_llm_usage(
 
 
 # --- Outbox Relay Functions ---
-
-
 async def write_outbox(
     tenant_id: str,
     correlation_id: str,

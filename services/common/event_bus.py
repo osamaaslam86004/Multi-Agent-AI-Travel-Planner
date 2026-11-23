@@ -6,8 +6,10 @@ import json
 import logging
 from typing import Any
 
-import redis.asyncio as aioredis
-
+try:
+    import redis.asyncio as aioredis
+except ImportError:
+    aioredis = None
 from services.common.schemas import CloudEvent
 from services.core.config import get_settings
 

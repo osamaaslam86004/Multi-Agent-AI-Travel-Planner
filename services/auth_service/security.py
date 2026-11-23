@@ -313,19 +313,22 @@ def issue_magic_link_token(email: str) -> str:
 
 
 def verify_magic_link_token(token: str) -> str | None:
+    """Validate signed magic token format and expiry; one-time use is enforced by Redis at route level."""
     try:
         raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
         parts = raw.split(":")
-        if len(parts) != 5 or parts[0] != "magic":
+        if len(parts) != 6 or parts[0] != "magic":
             return None
         _, email, iat, exp, nonce, sig = parts
-        if int(exp) < time.time():
+        issued, expires = int(iat), int(exp)
+        now = int(time.time())
+        if issued > now + 60 or expires <= now or expires - issued > 900:
             return None
         payload = f"magic:{email}:{iat}:{exp}:{nonce}"
         expected_sig = hmac.new(
             _SECRET_HMAC_KEY, payload.encode("utf-8"), hashlib.sha256
         ).hexdigest()
-        return email if hmac.compare_digest(expected_sig, sig) else None
+        return email.lower().strip() if hmac.compare_digest(expected_sig, sig) else None
     except Exception:
         return None
 
@@ -353,3 +356,72 @@ def assess_suspicious_login(
     if known_fps and current_fp not in known_fps:
         return True, "Login from an unrecognized device/IP fingerprint."
     return False, None
+
+
+def decode_refresh_token(refresh_token: str) -> dict[str, Any]:
+    """Cryptographically validate a refresh JWT before any rotation state is touched."""
+    _initialize_rsa_keys()
+    if _primary_private_key is None:
+        raise RuntimeError("JWT verification key unavailable")
+    public_key = _primary_private_key.public_key()
+    return jwt.decode(
+        refresh_token,
+        public_key,
+        algorithms=["RS256"],
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        options={
+            "require": ["exp", "iat", "jti", "sub", "sid", "token_use", "iss", "aud"],
+            "verify_signature": True,
+            "verify_exp": True,
+            "verify_iat": True,
+            "verify_nbf": True,
+            "verify_iss": True,
+            "verify_aud": True,
+        },
+    )
+
+
+def decode_signed_token(
+    token: str, allowed_uses: tuple[str, ...] = ("access", "refresh")
+) -> dict[str, Any]:
+    _initialize_rsa_keys()
+    if _primary_private_key is None:
+        raise RuntimeError("JWT verification key unavailable")
+    claims = jwt.decode(
+        token,
+        _primary_private_key.public_key(),
+        algorithms=["RS256"],
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        options={
+            "require": ["exp", "iat", "jti", "sub", "sid", "token_use", "iss", "aud"],
+            "verify_signature": True,
+            "verify_exp": True,
+            "verify_iss": True,
+            "verify_aud": True,
+        },
+    )
+    if claims.get("token_use") not in allowed_uses:
+        raise jwt.InvalidTokenError("Unexpected token use")
+    return claims
+
+
+def decode_signed_token_allow_expired(token: str) -> dict[str, Any]:
+    _initialize_rsa_keys()
+    if _primary_private_key is None:
+        raise RuntimeError("JWT verification key unavailable")
+    return jwt.decode(
+        token,
+        _primary_private_key.public_key(),
+        algorithms=["RS256"],
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        options={
+            "require": ["exp", "iat", "jti", "sub", "sid", "token_use", "iss", "aud"],
+            "verify_signature": True,
+            "verify_exp": False,
+            "verify_iss": True,
+            "verify_aud": True,
+        },
+    )

@@ -9,7 +9,6 @@ Integrates Phase 2 Enterprise Identity OIDC login/callback, /auth/me, profile/se
 import asyncio
 import json
 import logging
-import secrets
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -31,7 +30,7 @@ from services.bff_gateway.session_manager import (
     SESSION_COOKIE_NAME,
     SessionManager,
 )
-from services.common.db import relay_outbox, write_outbox
+from services.common.db import db_can_access_trip, relay_outbox, write_outbox
 from services.common.event_bus import EventBus
 from services.common.pii_redactor import redact_pii
 from services.common.schemas import CloudEvent, PlanningInitiatedPayload
@@ -47,7 +46,6 @@ from services.common.telemetry import (
 from services.core.config import get_settings
 from services.core.lifecycle import lifespan_manager
 from services.shared.exceptions import register_exception_handlers
-from services.shared.redis_client import get_redis_client
 
 configure_structured_logging()
 logger = logging.getLogger("travelbrain.gateway")
@@ -238,40 +236,58 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
     }
 
 
-# Step 8 (C-9): OIDC Login Initiation Route
+# OIDC authorization transaction is created and stored by Auth Service (Redis-backed).
 @app.get("/api/v1/auth/{provider}/login")
-async def oidc_login_initiate(provider: str, redirect_uri: str | None = None):
-    state = secrets.token_urlsafe(32)
-    verifier = secrets.token_urlsafe(32)
-    r = await get_redis_client()
-    if r:
-        await r.setex(
-            f"oidc:state:{state}",
-            600,
-            json.dumps({"provider": provider, "code_verifier": verifier}),
-        )
-    target_redirect = redirect_uri or f"/api/v1/auth/{provider}/callback"
-    auth_url = f"{AUTH_SERVICE_URL}/api/v1/auth/oidc/login?provider={provider}&state={state}&redirect_uri={target_redirect}"
-    return RedirectResponse(url=auth_url)
+async def oidc_login_initiate(
+    provider: str,
+    request: Request,
+    redirect_uri: str | None = None,
+    org_id: str | None = None,
+):
+    if provider not in {"google", "entra", "github", "generic_oidc"}:
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+    callback_uri = redirect_uri or str(
+        request.url_for("oidc_callback", provider=provider)
+    )
+    parsed_callback = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(
+        callback_uri
+    )
+    parsed_origin = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(
+        str(request.base_url)
+    )
+    if (
+        parsed_callback.scheme not in ("https", "http")
+        or parsed_callback.netloc != parsed_origin.netloc
+    ):
+        raise HTTPException(status_code=400, detail="Redirect URI must be same-origin")
+    async with httpx.AsyncClient() as client:
+        try:
+            auth_response = await client.get(
+                f"{AUTH_SERVICE_URL}/api/v1/auth/oidc/authorize-url",
+                params={
+                    "provider": provider,
+                    "redirect_uri": callback_uri,
+                    "org_id": org_id or "",
+                },
+                timeout=8.0,
+            )
+            auth_response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Auth service authorization initiation unavailable",
+            ) from exc
+    return RedirectResponse(url=auth_response.json()["authorization_url"])
 
 
-# Step 8 (C-9): OIDC Callback Route
 @app.get("/api/v1/auth/{provider}/callback")
 async def oidc_callback(provider: str, code: str, state: str, request: Request):
-    r = await get_redis_client()
-    verifier = None
-    if r:
-        raw_meta = await r.getdel(f"oidc:state:{state}")
-        if raw_meta:
-            meta = json.loads(raw_meta)
-            verifier = meta.get("code_verifier")
-    redirect_uri = str(request.url.remove_query_params(["code", "state"]))
+    redirect_uri = str(request.url_for("oidc_callback", provider=provider))
     exchange_payload = {
         "provider": provider,
         "code": code,
         "redirect_uri": redirect_uri,
         "state": state,
-        "code_verifier": verifier,
     }
     async with httpx.AsyncClient() as client:
         try:
@@ -282,13 +298,12 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
             )
         except httpx.HTTPError as exc:
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Auth service error: {exc}",
-            )
+                status_code=503, detail="Auth service unavailable"
+            ) from exc
     if resp.status_code != 200:
         raise HTTPException(
             status_code=resp.status_code,
-            detail=resp.json().get("detail", "OIDC Login failed"),
+            detail=resp.json().get("detail", "OIDC login failed"),
         )
     token_data = resp.json()
     old_sid = request.cookies.get(COOKIE_NAME)
@@ -315,9 +330,26 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
 
 @app.post("/api/v1/auth/logout")
 async def bff_logout(request: Request, response: Response):
+    session = await session_manager.validate_request(request, check_csrf=True)
     sid = request.cookies.get(COOKIE_NAME)
     if sid:
-        await session_manager.destroy_session(sid)
+        async with httpx.AsyncClient() as client:
+            try:
+                upstream = await client.post(
+                    f"{AUTH_SERVICE_URL}/api/v1/users/me/sessions/revoke",
+                    json={"session_id": sid},
+                    headers={"Authorization": f"Bearer {session.get('jwt')}"},
+                    timeout=5.0,
+                )
+                upstream.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Upstream revocation failed; session remains active",
+                ) from exc
+        await session_manager.destroy_session(
+            sid, tenant_id=session.get("tenant_id", "default")
+        )
     response.delete_cookie(key=COOKIE_NAME)
     return {"status": "logged_out"}
 
@@ -326,18 +358,36 @@ async def bff_logout(request: Request, response: Response):
 @app.get("/api/v1/users/me/sessions")
 async def proxy_list_sessions(request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
-    jwt_token = session.get("jwt")
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{AUTH_SERVICE_URL}/api/v1/users/me/sessions",
-            headers={"Authorization": f"Bearer {jwt_token}"},
-        )
-    return JSONResponse(status_code=resp.status_code, content=resp.json())
+    sessions = await session_manager.list_user_sessions(
+        session.get("user_id"), session.get("tenant_id", "default")
+    )
+    return {
+        "sessions": sessions,
+        "current_session_id": request.cookies.get(COOKIE_NAME),
+    }
 
 
 @app.delete("/api/v1/users/me/sessions/{sid}")
 async def proxy_revoke_session(sid: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
+    target = await session_manager.get_session(
+        sid, tenant_id=session.get("tenant_id", "default")
+    )
+    if not target or target.get("user_id") != session.get("user_id"):
+        raise HTTPException(status_code=404, detail="Session not found")
+    async with httpx.AsyncClient() as client:
+        try:
+            upstream = await client.post(
+                f"{AUTH_SERVICE_URL}/api/v1/users/me/sessions/revoke",
+                json={"session_id": sid},
+                headers={"Authorization": f"Bearer {session.get('jwt')}"},
+                timeout=5.0,
+            )
+            upstream.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503, detail="Upstream token revocation unavailable"
+            ) from exc
     await session_manager.revoke_session(
         sid, tenant_id=session.get("tenant_id", "default")
     )
@@ -347,9 +397,21 @@ async def proxy_revoke_session(sid: str, request: Request):
 @app.post("/api/v1/users/me/logout-all")
 async def proxy_logout_all(request: Request, response: Response):
     session = await session_manager.validate_request(request, check_csrf=True)
-    user_id = session.get("user_id")
+    async with httpx.AsyncClient() as client:
+        try:
+            upstream = await client.post(
+                f"{AUTH_SERVICE_URL}/api/v1/users/me/logout-all",
+                headers={"Authorization": f"Bearer {session.get('jwt')}"},
+                timeout=5.0,
+            )
+            upstream.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Upstream logout-all unavailable; local sessions preserved",
+            ) from exc
     await session_manager.logout_user_all_devices(
-        user_id, tenant_id=session.get("tenant_id", "default")
+        session.get("user_id"), tenant_id=session.get("tenant_id", "default")
     )
     response.delete_cookie(key=COOKIE_NAME)
     return {"status": "logged_out_all"}
@@ -407,8 +469,9 @@ async def initiate_trip_plan(
 @app.get("/api/v1/events/stream/{correlation_id}")
 async def stream_planning_events(correlation_id: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
-    _ = session["user_id"]
-    _ = session.get("tenant_id", "default")
+    user_id, tenant_id = session["user_id"], session.get("tenant_id", "default")
+    if not await db_can_access_trip(user_id, correlation_id, tenant_id, action="read"):
+        raise HTTPException(status_code=404, detail="Trip not found or access denied")
 
     async def event_generator() -> AsyncGenerator[str, None]:
         ACTIVE_SSE_CONNECTIONS_GAUGE.inc()

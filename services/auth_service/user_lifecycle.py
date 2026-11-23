@@ -5,6 +5,7 @@ login history tracking, active sessions, and multi-device logout with database p
 """
 
 import logging
+import os
 import time
 import uuid
 from datetime import UTC, datetime
@@ -20,15 +21,18 @@ from services.auth_service.models import (
 from services.auth_service.security import generate_user_id
 from services.common.db import (
     db_get_federated_identity,
+    db_get_login_history,
     db_get_user_by_email,
     db_get_user_by_id,
+    db_get_user_password,
     db_link_federated_identity,
+    db_record_login_history,
+    db_unlink_federated_identity,
     db_upsert_user_profile,
 )
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.auth.user_lifecycle")
-
 _in_memory_profiles: dict[str, UserProfile] = {}
 _in_memory_login_history: dict[str, list[LoginHistoryEntry]] = {}
 _in_memory_sessions: dict[str, list[dict[str, Any]]] = {}
@@ -52,21 +56,17 @@ class UserLifecycleService:
         email_clean = email.lower().strip()
         now_str = datetime.now(UTC).isoformat()
         iss_val = issuer or auth_provider
-
         # Step 6: Query federated identity record using verified (provider, issuer, sub)
         existing_fed = None
         if provider_sub:
             existing_fed = await db_get_federated_identity(
                 auth_provider, iss_val, provider_sub
             )
-
         existing_user_dict = None
         if existing_fed:
             existing_user_dict = await db_get_user_by_id(existing_fed["user_id"])
-
         if not existing_user_dict:
             existing_user_dict = await db_get_user_by_email(email_clean)
-
         if existing_user_dict:
             user_id = existing_user_dict["user_id"]
             profile = UserProfile(
@@ -101,7 +101,6 @@ class UserLifecycleService:
                 created_at=now_str,
                 updated_at=now_str,
             )
-
         if auth_provider != "direct":
             sub_val = provider_sub or user_id
             await db_link_federated_identity(
@@ -125,7 +124,6 @@ class UserLifecycleService:
                         linked_at=now_str,
                     )
                 )
-
         # Step 1: Persist profile to DB
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
@@ -242,11 +240,16 @@ class UserLifecycleService:
         profile = await self.get_profile(user_id)
         if not profile:
             raise ValueError(f"User profile '{user_id}' not found")
-        if len(profile.linked_providers) <= 1 and not profile.email_verified:
-            raise ValueError("Cannot unlink sole authentication provider.")
-        profile.linked_providers = [
+        provider_links = [
             lp for lp in profile.linked_providers if lp.provider != provider
         ]
+        password_hash = await db_get_user_password(user_id)
+        if not provider_links and not password_hash:
+            raise ValueError("Cannot unlink the user's only authentication method.")
+        removed = await db_unlink_federated_identity(user_id, provider)
+        if removed == 0:
+            raise ValueError("No federated identity record exists for this provider.")
+        profile.linked_providers = provider_links
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
@@ -273,6 +276,7 @@ class UserLifecycleService:
             suspicious=suspicious,
             details=details,
         )
+        await db_record_login_history(entry.model_dump())
         if user_id not in _in_memory_login_history:
             _in_memory_login_history[user_id] = []
         _in_memory_login_history[user_id].insert(0, entry)
@@ -282,6 +286,9 @@ class UserLifecycleService:
     async def get_login_history(
         self, user_id: str, limit: int = 20
     ) -> list[LoginHistoryEntry]:
+        rows = await db_get_login_history(user_id, limit=limit)
+        if rows:
+            return [LoginHistoryEntry(**row) for row in rows]
         return _in_memory_login_history.get(user_id, [])[:limit]
 
     async def list_active_sessions(
@@ -320,6 +327,11 @@ class UserLifecycleService:
         count = len(_in_memory_sessions.get(user_id, []))
         _in_memory_sessions[user_id] = []
         r = await get_redis_client()
+        if r is None and os.getenv("ENVIRONMENT", "development").lower() in (
+            "production",
+            "staging",
+        ):
+            raise RuntimeError("Distributed revocation state unavailable")
         if r:
             await r.set(f"tokens_valid_after:{user_id}", str(time.time()))
         logger.info(f"User '{user_id}' logged out from all {count} devices.")

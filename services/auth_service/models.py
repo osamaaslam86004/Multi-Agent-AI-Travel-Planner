@@ -51,6 +51,10 @@ class TokenRevokeRequest(BaseModel):
     token: str
 
 
+class SessionRevokeRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=128)
+
+
 class JWKKey(BaseModel):
     kty: str = "RSA"
     use: str = "sig"
@@ -126,9 +130,9 @@ class AccountRecoveryConfirmRequest(BaseModel):
 
 class LinkProviderRequest(BaseModel):
     provider: str
-    provider_user_id: str | None = None
-    email: str | None = None
-    provider_token: str | None = None
+    code: str = Field(..., min_length=1, max_length=4096)
+    state: str = Field(..., min_length=16, max_length=256)
+    redirect_uri: str = Field(..., min_length=8, max_length=2048)
 
 
 class LoginHistoryEntry(BaseModel):
@@ -202,6 +206,7 @@ class MFAChallengeRequest(BaseModel):
 class ReauthRequest(BaseModel):
     password: str | None = None
     mfa_code: str | None = None
+    action: str = Field(..., min_length=3, max_length=128)
 
 
 class ReauthResponse(BaseModel):
@@ -303,6 +308,7 @@ class IdPConfigResponse(BaseModel):
     enforce_sso: bool
     allowed_domains: list[str]
     group_role_mappings: dict[str, str]
+    metadata_xml: str | None = None
 
 
 class SAMLACSRequest(BaseModel):
@@ -374,3 +380,10 @@ class SCIMPatchOperation(BaseModel):
     op: str  # add, replace, remove
     path: str | None = None
     value: Any = None
+
+
+class SCIMPatchRequest(BaseModel):
+    schemas: list[str] = Field(
+        default_factory=lambda: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+    )
+    Operations: list[SCIMPatchOperation] = Field(min_length=1, max_length=100)

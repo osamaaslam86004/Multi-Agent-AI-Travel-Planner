@@ -24,7 +24,6 @@ class BaseDomainSettings(BaseModel):
     }
 
     @classmethod
-    @classmethod
     def load_from_env(
         cls, prefix: str = "", aliases: dict[str, str] | None = None
     ) -> Self:

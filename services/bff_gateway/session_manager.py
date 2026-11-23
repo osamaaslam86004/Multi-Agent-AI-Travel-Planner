@@ -10,7 +10,10 @@ import secrets
 import time
 from typing import Any
 
-import redis.asyncio as aioredis
+try:
+    import redis.asyncio as aioredis
+except ImportError:
+    aioredis = None
 from fastapi import HTTPException, Request, status
 
 logger = logging.getLogger("travelbrain.session_manager")
@@ -44,13 +47,7 @@ class SessionManager:
                     decode_responses=True,
                 )
                 await self._redis.ping()
-            except (
-                aioredis.RedisError,
-                OSError,
-                RuntimeError,
-                TimeoutError,
-                ValueError,
-            ):
+            except Exception:
                 self._redis = None
         return self._redis
 
@@ -82,6 +79,13 @@ class SessionManager:
             "created_at": str(now),
             "expires_at": str(absolute_expires_at),
         }
+        if r is None and os.getenv("ENVIRONMENT", "development").lower() in (
+            "production",
+            "staging",
+        ):
+            raise HTTPException(
+                status_code=503, detail="Distributed session storage unavailable."
+            )
         _in_memory_sessions[session_id] = session_data
         if r:
             session_key = f"session:{tenant_id}:{session_id}"
@@ -98,6 +102,12 @@ class SessionManager:
             return None
         r = await self.get_redis()
         if not r:
+            if os.getenv(
+                "APP_ENV", os.getenv("ENVIRONMENT", "development")
+            ).lower() in ("production", "staging"):
+                raise HTTPException(
+                    status_code=503, detail="Distributed session storage unavailable."
+                )
             s = _in_memory_sessions.get(session_id)
             if s and float(s.get("expires_at", time.time() + 100)) > time.time():
                 return s
@@ -125,10 +135,14 @@ class SessionManager:
         _in_memory_sessions.pop(session_id, None)
         r = await self.get_redis()
         if r:
-            await r.delete(f"session:{tenant_id}:{session_id}")
             keys = await r.keys(f"session:*:{session_id}")
             for k in keys:
+                data = await r.hgetall(k)
+                uid = data.get("user_id")
+                tenant = data.get("tenant_id", tenant_id)
                 await r.delete(k)
+                if uid:
+                    await r.srem(f"user_sessions:{tenant}:{uid}", session_id)
 
     async def validate_request(
         self, request: Request, tenant_id: str = "default", check_csrf: bool = True
@@ -163,6 +177,31 @@ class SessionManager:
         await self.destroy_session(session_id, tenant_id=tenant_id)
         return True
 
+    async def list_user_sessions(
+        self, user_id: str, tenant_id: str = "default", include_tokens: bool = False
+    ) -> list[dict[str, Any]]:
+        r = await self.get_redis()
+        if not r:
+            if os.getenv(
+                "APP_ENV", os.getenv("ENVIRONMENT", "development")
+            ).lower() in ("production", "staging"):
+                raise HTTPException(
+                    status_code=503, detail="Distributed session storage unavailable."
+                )
+            return [
+                s for s in _in_memory_sessions.values() if s.get("user_id") == user_id
+            ]
+        sids = await r.smembers(f"user_sessions:{tenant_id}:{user_id}")
+        output = []
+        for sid in sids:
+            data = await r.hgetall(f"session:{tenant_id}:{sid}")
+            if data and data.get("user_id") == user_id:
+                if not include_tokens:
+                    data.pop("jwt", None)
+                data.pop("csrf_token", None)
+                output.append(data)
+        return output
+
     async def logout_user_all_devices(
         self, user_id: str, tenant_id: str = "default"
     ) -> int:
@@ -172,13 +211,22 @@ class SessionManager:
         for sid in to_del:
             await self.destroy_session(sid, tenant_id=tenant_id)
         r = await self.get_redis()
+        if r is None and os.getenv(
+            "APP_ENV", os.getenv("ENVIRONMENT", "development")
+        ).lower() in ("production", "staging"):
+            raise HTTPException(
+                status_code=503, detail="Distributed session storage unavailable."
+            )
+        count = len(to_del)
         if r:
             user_idx_key = f"user_sessions:{tenant_id}:{user_id}"
             sids = await r.smembers(user_idx_key)
+            count = max(count, len(sids))
             for sid in sids:
                 await r.delete(f"session:{tenant_id}:{sid}")
+                _in_memory_sessions.pop(sid, None)
             await r.delete(user_idx_key)
-        return len(to_del)
+        return count
 
     async def check_tenant_budget(
         self,
@@ -188,6 +236,13 @@ class SessionManager:
     ) -> tuple[bool, int]:
         r = await self.get_redis()
         if not r:
+            if os.getenv("ENVIRONMENT", "development").lower() in (
+                "production",
+                "staging",
+            ):
+                raise HTTPException(
+                    status_code=503, detail="Distributed rate/budget state unavailable."
+                )
             return True, 0
         current_str = await r.get(f"tenant:budget:{tenant_id}")
         current = int(current_str) if current_str else 0
@@ -205,6 +260,10 @@ async def check_rate_limit(
 ) -> bool:
     r = await self.get_redis()
     if not r:
+        if os.getenv("ENVIRONMENT", "development").lower() in ("production", "staging"):
+            raise HTTPException(
+                status_code=503, detail="Distributed rate-limit state unavailable."
+            )
         return True
     now = time.time()
     key = f"ratelimit:{tenant_id}:{client_identifier}"

@@ -56,6 +56,11 @@ spec:
                 secretKeyRef:
                   name: travelbrain-secrets
                   key: SCIM_TOKEN_SECRET
+            - name: IDENTITY_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: travelbrain-secrets
+                  key: IDENTITY_ENCRYPTION_KEY
             - name: JWT_PRIVATE_KEY_PEM
               valueFrom:
                 secretKeyRef:
