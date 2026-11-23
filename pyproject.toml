@@ -5,6 +5,9 @@ description = "Enterprise Distributed Multi-Agent Travel Planning System"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "python-multipart>=0.0.9",
+    "aiohttp>=3.9.0",
+    "lxml>=5.1.0",
     "airportsdata>=20260803",
     "cryptography>=44.0.0",
     "defusedxml>=0.7.1",
