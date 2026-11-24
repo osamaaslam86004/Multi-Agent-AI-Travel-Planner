@@ -2,7 +2,6 @@
 Unified Centralized Settings Aggregator.
 Combines domain settings with backward-compatible legacy property access.
 """
-
 from pydantic import BaseModel, Field
 
 from services.core.config.app import ApplicationSettings
@@ -34,68 +33,50 @@ class Settings(BaseModel):
     rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings.load)
     deployment: DeploymentSettings = Field(default_factory=DeploymentSettings.load)
     feature_flags: FeatureFlagSettings = Field(default_factory=FeatureFlagSettings.load)
-
     # Legacy Backward-Compatible Alias Properties
     @property
     def ENVIRONMENT(self) -> str:
         return self.app.environment
-
     @property
     def PORT(self) -> int:
         return self.app.port
-
     @property
     def REDIS_URL(self) -> str:
         return self.redis.url
-
     @property
     def REDIS_CACHE_URL(self) -> str:
         return self.redis.cache_url
-
     @property
     def REDIS_PASSWORD(self) -> str | None:
         return self.redis.password or ""
-
     @property
     def POSTGRES_HOST(self) -> str:
         return self.db.host
-
     @property
     def POSTGRES_PORT(self) -> int:
         return self.db.port
-
     @property
     def POSTGRES_DB(self) -> str:
         return self.db.db_name
-
     @property
     def POSTGRES_USER(self) -> str:
         return self.db.user
-
     @property
     def POSTGRES_PASSWORD(self) -> str:
         return self.db.password
-
     @property
     def AUTH_SERVICE_URL(self) -> str:
         return self.auth.auth_service_url
-
     @property
     def AUTH_SERVICE_JWKS_URL(self) -> str:
         return self.auth.auth_service_jwks_url
-
     @property
     def JWT_ISSUER(self) -> str:
         return self.auth.jwt_issuer
-
     @property
     def JWT_AUDIENCE(self) -> str:
         return self.auth.jwt_audience
-
-
 _settings_instance: Settings | None = None
-
-
 def get_settings(force_reload: bool = False) -> Settings:
     global _settings_instance
     if _settings_instance is None or force_reload:
@@ -103,7 +84,5 @@ def get_settings(force_reload: bool = False) -> Settings:
         validate_profile_settings(settings)
         _settings_instance = settings
     return _settings_instance
-
-
 def reload_settings() -> Settings:
     return get_settings(force_reload=True)

@@ -1,7 +1,6 @@
 """
 Authentication & Enterprise Identity Domain Settings.
 """
-
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -18,13 +17,11 @@ class AuthSettings(BaseDomainSettings):
     access_token_expire_seconds: int = 3600
     refresh_token_expire_seconds: int = 604800
     sudo_token_expire_seconds: int = 900
-
     # Core Auth Service URLs & Rotation
     auth_service_url: str = "http://auth-service:8001"
     auth_service_jwks_url: str = "http://auth-service:8001/.well-known/jwks.json"
     jwt_previous_private_key_path: str | None = None
     jwt_previous_private_key_pem: str | None = None
-
     # OAuth / OIDC Providers Config
     google_client_id: str | None = None
     google_client_secret: str | None = None
@@ -36,13 +33,11 @@ class AuthSettings(BaseDomainSettings):
     generic_oidc_issuer: str | None = None
     generic_oidc_client_id: str | None = None
     generic_oidc_client_secret: str | None = None
-
     # Enterprise Identity & SAML 2.0
     saml_sp_entity_id: str = "https://auth.travelbrain.ai/saml/metadata"
     saml_acs_url: str = "https://auth.travelbrain.ai/api/v1/auth/saml/acs"
     scim_token_secret: str = "dev-scim-token-secret-32chars-key"
     identity_encryption_key: str | None = None
-
     # Transactional Mail & Public URL Settings
     smtp_host: str = "smtp.travelbrain.ai"
     smtp_port: int = 587
@@ -51,7 +46,6 @@ class AuthSettings(BaseDomainSettings):
     smtp_from_email: str = "noreply@travelbrain.ai"
     smtp_sender_email: str = "noreply@travelbrain.ai"
     public_base_url: str = "https://app.travelbrain.ai"
-
     # Security & Auth Policies
     min_password_length: int = 12
     require_mfa_for_admins: bool = True
@@ -60,7 +54,6 @@ class AuthSettings(BaseDomainSettings):
     enforce_device_trust: bool = False
     enable_suspicious_login_detection: bool = True
     enable_dev_login: bool = True
-
     @classmethod
     def load(cls) -> "AuthSettings":
         aliases = {

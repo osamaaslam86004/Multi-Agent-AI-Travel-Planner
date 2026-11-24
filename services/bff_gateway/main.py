@@ -5,7 +5,6 @@ rate limiting per user/tenant, secure HTTP-only cookie sessions with rotation, a
 Idempotency-Key verification, trip access ACLs, Prometheus /metrics endpoint, and resilient SSE streaming.
 Integrates Phase 2 Enterprise Identity MFA challenges, provider linking, invitations, soft-deletion, and security events.
 """
-
 import asyncio
 import json
 import logging
@@ -63,8 +62,6 @@ REDIS_PASSWORD = _settings.redis.password or ""
 COOKIE_NAME = _settings.security.session_cookie_name or SESSION_COOKIE_NAME
 session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
-
-
 async def periodic_outbox_relay():
     while True:
         try:
@@ -72,8 +69,6 @@ async def periodic_outbox_relay():
         except Exception as exc:
             logger.debug(f"Outbox relay background loop iteration trace: {exc}")
         await asyncio.sleep(1.0)
-
-
 @asynccontextmanager
 async def bff_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with lifespan_manager(app):
@@ -88,8 +83,6 @@ async def bff_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         finally:
             relay_task.cancel()
             await event_bus.close()
-
-
 app = FastAPI(
     lifespan=bff_lifespan,
     title="TravelBrain API Gateway & BFF",
@@ -108,8 +101,6 @@ if FRONTEND_DIR.exists():
     templates = Jinja2Templates(directory=str(FRONTEND_DIR / "templates"))
 else:
     templates = None
-
-
 class TripPlanRequest(BaseModel):
     message: str = Field(
         ..., max_length=2000, description="User query bounded to max 2000 characters"
@@ -119,38 +110,26 @@ class TripPlanRequest(BaseModel):
     start_date: str | None = Field(None, max_length=50)
     end_date: str | None = Field(None, max_length=50)
     dates: str | None = Field(None, max_length=100)
-
-
 class LoginRequest(BaseModel):
     email: str
     password: str | None = None
     tenant_id: str = "default"
-
-
 class MFAVerifyRequest(BaseModel):
     mfa_challenge_token: str
     totp_code: str | None = None
     backup_code: str | None = None
-
-
 class TripShareWebRequest(BaseModel):
     grantee_id: str
     permission_level: str = "read"
     expires_at: str | None = None
-
-
 class InvitationWebRequest(BaseModel):
     email: str
     org_id: str
     role: str = "member"
-
-
 class InvitationAcceptWebRequest(BaseModel):
     token: str
     password: str | None = None
     display_name: str | None = None
-
-
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request):
     if templates:
@@ -158,13 +137,9 @@ async def index_page(request: Request):
     return HTMLResponse(
         content="<h1>TravelBrain AI Planner API Gateway Active</h1>", status_code=200
     )
-
-
 @app.get("/health/live")
 async def liveness_probe():
     return {"status": "UP", "service": "bff-gateway"}
-
-
 @app.get("/health/ready")
 async def readiness_probe():
     return {
@@ -172,14 +147,10 @@ async def readiness_probe():
         "service": "bff-gateway",
         "event_bus": event_bus.is_connected,
     }
-
-
 @app.get("/metrics")
 async def metrics_endpoint():
     payload, content_type = get_metrics_payload()
     return Response(content=payload, media_type=content_type)
-
-
 @app.get("/api/v1/auth/me")
 async def get_current_session_user(request: Request):
     try:
@@ -197,8 +168,6 @@ async def get_current_session_user(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"authenticated": False, "detail": "Unauthenticated"},
         )
-
-
 # Direct Login Route with MFA challenge support
 @app.post("/api/v1/auth/login")
 async def bff_login(req: LoginRequest, request: Request, response: Response):
@@ -274,15 +243,13 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
         "csrf_token": csrf_token,
         "expires_in": 86400,
     }
-
-
 # MFA Verification Route
 @app.post("/api/v1/auth/mfa/verify")
 async def bff_mfa_verify(req: MFAVerifyRequest, request: Request, response: Response):
     async with httpx.AsyncClient() as client:
         try:
             auth_resp = await client.post(
-                f"{AUTH_SERVICE_URL}/api/v1/auth/mfa/verify-login",
+                f"{AUTH_SERVICE_URL}/api/v1/auth/mfa/verify-login", headers={"X-Forwarded-For": request.client.host if request.client else "127.0.0.1", "X-Client-User-Agent": request.headers.get("User-Agent", "")},
                 json=req.model_dump(),
                 timeout=5.0,
             )
@@ -329,8 +296,6 @@ async def bff_mfa_verify(req: MFAVerifyRequest, request: Request, response: Resp
         "csrf_token": csrf_token,
         "expires_in": 86400,
     }
-
-
 # OIDC authorization transaction
 @app.get("/api/v1/auth/{provider}/login")
 async def oidc_login_initiate(
@@ -373,8 +338,6 @@ async def oidc_login_initiate(
                 detail="Auth service authorization initiation unavailable",
             ) from exc
     return RedirectResponse(url=auth_response.json()["authorization_url"])
-
-
 @app.get("/api/v1/auth/{provider}/callback")
 async def oidc_callback(provider: str, code: str, state: str, request: Request):
     redirect_uri = str(request.url_for("oidc_callback", provider=provider))
@@ -425,34 +388,27 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
         max_age=86400,
     )
     return redirect_resp
-
-
 @app.post("/api/v1/auth/logout")
 async def bff_logout(request: Request, response: Response):
     session = await session_manager.validate_request(request, check_csrf=True)
     sid = request.cookies.get(COOKIE_NAME)
     if sid:
-        async with httpx.AsyncClient() as client:
-            try:
-                upstream = await client.post(
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
                     f"{AUTH_SERVICE_URL}/api/v1/users/me/sessions/revoke",
                     json={"session_id": sid},
                     headers={"Authorization": f"Bearer {session.get('jwt')}"},
-                    timeout=5.0,
+                    timeout=3.0,
                 )
-                upstream.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Upstream revocation failed; session remains active",
-                ) from exc
+        except Exception as exc:
+            logger.warning(f"Upstream auth service session revoke warning: {exc}")
+        
         await session_manager.destroy_session(
             sid, tenant_id=session.get("tenant_id", "default")
         )
-    response.delete_cookie(key=COOKIE_NAME)
+    response.delete_cookie(COOKIE_NAME)
     return {"status": "logged_out"}
-
-
 # Provider Linking Proxies
 @app.post("/api/v1/users/me/providers/link")
 async def proxy_link_provider(request: Request):
@@ -470,8 +426,6 @@ async def proxy_link_provider(request: Request):
             status_code=resp.status_code, detail=resp.json().get("detail")
         )
     return resp.json()
-
-
 @app.delete("/api/v1/users/me/providers/unlink/{provider}")
 async def proxy_unlink_provider(provider: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -486,8 +440,6 @@ async def proxy_unlink_provider(provider: str, request: Request):
             status_code=resp.status_code, detail=resp.json().get("detail")
         )
     return resp.json()
-
-
 # Account Soft-Deletion Proxies
 @app.post("/api/v1/users/me/delete-account")
 async def proxy_delete_account(request: Request):
@@ -503,8 +455,6 @@ async def proxy_delete_account(request: Request):
             status_code=resp.status_code, detail=resp.json().get("detail")
         )
     return resp.json()
-
-
 @app.post("/api/v1/users/me/cancel-deletion")
 async def proxy_cancel_deletion(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -519,16 +469,12 @@ async def proxy_cancel_deletion(request: Request):
             status_code=resp.status_code, detail=resp.json().get("detail")
         )
     return resp.json()
-
-
 # Security Events & Device Management Proxies
 @app.get("/api/v1/users/me/security-events")
 async def proxy_security_events(request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
     history = await db_get_login_history(session.get("user_id"), limit=50)
     return {"security_events": history}
-
-
 @app.get("/api/v1/users/me/sessions")
 async def proxy_list_sessions(request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
@@ -539,8 +485,6 @@ async def proxy_list_sessions(request: Request):
         "sessions": sessions,
         "current_session_id": request.cookies.get(COOKIE_NAME),
     }
-
-
 @app.delete("/api/v1/users/me/sessions/{sid}")
 async def proxy_revoke_session(sid: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -566,8 +510,6 @@ async def proxy_revoke_session(sid: str, request: Request):
         sid, tenant_id=session.get("tenant_id", "default")
     )
     return {"status": "revoked", "session_id": sid}
-
-
 @app.post("/api/v1/users/me/logout-all")
 async def proxy_logout_all(request: Request, response: Response):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -589,8 +531,6 @@ async def proxy_logout_all(request: Request, response: Response):
     )
     response.delete_cookie(key=COOKIE_NAME)
     return {"status": "logged_out_all"}
-
-
 # Trip Planning & Outbox
 @app.post("/api/v1/trips/plan")
 @app.post("/api/v1/plan")
@@ -636,8 +576,6 @@ async def initiate_trip_plan(
         "sse_url": f"/api/v1/events/stream/{correlation_id}",
         "stream_url": f"/api/v1/events/stream/{correlation_id}",
     }
-
-
 # Trip CRUD & Access Control Routes
 @app.get("/api/v1/trips")
 async def list_trips(request: Request):
@@ -645,8 +583,6 @@ async def list_trips(request: Request):
     user_id, tenant_id = session["user_id"], session.get("tenant_id", "default")
     trips = await db_list_user_trips(user_id, tenant_id=tenant_id)
     return {"trips": trips}
-
-
 @app.get("/api/v1/trips/{correlation_id}")
 async def get_trip(correlation_id: str, request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
@@ -655,8 +591,6 @@ async def get_trip(correlation_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Trip not found or access denied")
     trip = await get_trip_by_id(correlation_id, tenant_id=tenant_id)
     return trip
-
-
 @app.post("/api/v1/trips/{correlation_id}/share")
 async def share_trip(correlation_id: str, req: TripShareWebRequest, request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -680,8 +614,6 @@ async def share_trip(correlation_id: str, req: TripShareWebRequest, request: Req
             status_code=resp.status_code, detail=resp.json().get("detail")
         )
     return resp.json()
-
-
 # SSE Streaming Route
 @app.get("/api/v1/trips/{correlation_id}/stream")
 @app.get("/api/v1/events/stream/{correlation_id}")
@@ -690,7 +622,6 @@ async def stream_planning_events(correlation_id: str, request: Request):
     user_id, tenant_id = session["user_id"], session.get("tenant_id", "default")
     if not await db_can_access_trip(user_id, correlation_id, tenant_id, action="read"):
         raise HTTPException(status_code=404, detail="Trip not found or access denied")
-
     async def event_generator() -> AsyncGenerator[str, None]:
         ACTIVE_SSE_CONNECTIONS_GAUGE.inc()
         try:
@@ -714,7 +645,6 @@ async def stream_planning_events(correlation_id: str, request: Request):
             yield f"data: {json.dumps({'stage': 'error', 'message': str(exc)})}\n\n"
         finally:
             ACTIVE_SSE_CONNECTIONS_GAUGE.dec()
-
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -724,8 +654,6 @@ async def stream_planning_events(correlation_id: str, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
-
-
 # --- Added P0 Comprehensive Identity & Auth BFF Proxies ---
 @app.get("/api/v1/auth/profile")
 async def bff_get_profile(request: Request):
@@ -740,8 +668,6 @@ async def bff_get_profile(request: Request):
             detail=resp.json().get("detail", "Profile fetch failed"),
         )
     return resp.json()
-
-
 @app.put("/api/v1/auth/profile")
 async def bff_update_profile(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -758,8 +684,6 @@ async def bff_update_profile(request: Request):
             detail=resp.json().get("detail", "Profile update failed"),
         )
     return resp.json()
-
-
 @app.post("/api/v1/auth/magic-link")
 async def bff_magic_link_request(request: Request):
     body = await request.json()
@@ -771,8 +695,6 @@ async def bff_magic_link_request(request: Request):
         if resp.status_code == 200
         else Response(content=resp.content, status_code=resp.status_code)
     )
-
-
 @app.post("/api/v1/auth/magic-link/verify")
 async def bff_magic_link_verify(request: Request, response: Response):
     body = await request.json()
@@ -796,8 +718,6 @@ async def bff_magic_link_verify(request: Request, response: Response):
         status_code=resp.status_code,
         detail=resp.json().get("detail", "Magic link verification failed"),
     )
-
-
 @app.post("/api/v1/auth/password-reset/request")
 async def bff_password_reset_request(request: Request):
     body = await request.json()
@@ -805,8 +725,6 @@ async def bff_password_reset_request(request: Request):
         f"{AUTH_SERVICE_URL}/api/v1/users/recovery", json=body
     )
     return Response(content=resp.content, status_code=resp.status_code)
-
-
 @app.post("/api/v1/auth/password-reset/confirm")
 async def bff_password_reset_confirm(request: Request):
     body = await request.json()
@@ -814,8 +732,6 @@ async def bff_password_reset_confirm(request: Request):
         f"{AUTH_SERVICE_URL}/api/v1/users/recovery/confirm", json=body
     )
     return Response(content=resp.content, status_code=resp.status_code)
-
-
 @app.post("/api/v1/auth/verify-email/request")
 async def bff_verify_email_request(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -824,8 +740,6 @@ async def bff_verify_email_request(request: Request):
         f"{AUTH_SERVICE_URL}/api/v1/users/verify-email/request", headers=headers
     )
     return Response(content=resp.content, status_code=resp.status_code)
-
-
 @app.post("/api/v1/auth/verify-email/confirm")
 async def bff_verify_email_confirm(request: Request):
     body = await request.json()
@@ -833,8 +747,6 @@ async def bff_verify_email_confirm(request: Request):
         f"{AUTH_SERVICE_URL}/api/v1/users/verify-email/confirm", json=body
     )
     return Response(content=resp.content, status_code=resp.status_code)
-
-
 @app.post("/api/v1/auth/invitations")
 async def bff_create_invitation(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -853,8 +765,6 @@ async def bff_create_invitation(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/invitations/accept")
 async def bff_accept_invitation(request: Request):
     body = await request.json()
@@ -866,8 +776,6 @@ async def bff_accept_invitation(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/mfa/enroll")
 async def bff_mfa_enroll(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -880,8 +788,6 @@ async def bff_mfa_enroll(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/mfa/verify-enrollment")
 async def bff_mfa_verify_enrollment(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -895,8 +801,6 @@ async def bff_mfa_verify_enrollment(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/mfa/disable")
 async def bff_mfa_disable(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -912,8 +816,6 @@ async def bff_mfa_disable(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/reauthenticate")
 async def bff_reauthenticate(request: Request):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -927,8 +829,6 @@ async def bff_reauthenticate(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/refresh")
 async def bff_refresh_tokens(request: Request, response: Response):
     session = await session_manager.validate_request(request, check_csrf=False)
@@ -953,8 +853,6 @@ async def bff_refresh_tokens(request: Request, response: Response):
         )
         return {"status": "refreshed", "csrf_token": new_csrf}
     raise HTTPException(status_code=resp.status_code, detail="Token refresh failed")
-
-
 @app.get("/api/v1/auth/organizations")
 async def bff_list_orgs(request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
@@ -967,8 +865,6 @@ async def bff_list_orgs(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/organizations/switch")
 async def bff_switch_org(request: Request, response: Response):
     session = await session_manager.validate_request(request, check_csrf=True)
@@ -1001,8 +897,6 @@ async def bff_switch_org(request: Request, response: Response):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/sso/discover")
 async def bff_sso_discover(request: Request):
     body = await request.json()
@@ -1014,8 +908,6 @@ async def bff_sso_discover(request: Request):
         status_code=resp.status_code,
         media_type="application/json",
     )
-
-
 @app.post("/api/v1/auth/saml/acs")
 async def bff_saml_acs(request: Request, response: Response):
     form_data = await request.form()

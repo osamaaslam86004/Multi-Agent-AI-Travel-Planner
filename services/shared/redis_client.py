@@ -2,7 +2,6 @@
 Unified Redis Client Factory with Connection Pooling and Lifecycle Integration.
 Gracefully handles environments where redis is optional.
 """
-
 import logging
 from typing import Any
 
@@ -15,8 +14,6 @@ from services.core.lifecycle.teardown import get_teardown_registry
 
 logger = logging.getLogger("travelbrain.shared.redis")
 _redis_client: Any = None
-
-
 async def get_redis_client() -> Any:
     global _redis_client
     if aioredis is None:
@@ -39,8 +36,6 @@ async def get_redis_client() -> Any:
         registry = get_teardown_registry()
         registry.register("redis_client", close_redis_client)
     return _redis_client
-
-
 async def close_redis_client() -> None:
     global _redis_client
     if _redis_client is not None and aioredis is not None:

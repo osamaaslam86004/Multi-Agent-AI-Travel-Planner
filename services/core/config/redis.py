@@ -1,7 +1,6 @@
 """
 Redis Domain Settings.
 """
-
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -20,7 +19,6 @@ class RedisSettings(BaseDomainSettings):
     socket_connect_timeout_seconds: float = 5.0
     dlq_stream_name: str = "stream:travel:dlq"
     stream_maxlen: int = 10000
-
     @classmethod
     def load(cls) -> "RedisSettings":
         aliases = {

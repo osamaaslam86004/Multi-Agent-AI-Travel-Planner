@@ -1,7 +1,6 @@
 """
 MCP Integrations Domain Settings.
 """
-
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -15,7 +14,6 @@ class MCPSettings(BaseDomainSettings):
     )
     weather_mcp_command: str | None = Field(default="openweather-mcp")
     mcp_timeout_seconds: float = 15.0
-
     @classmethod
     def load(cls) -> "MCPSettings":
         aliases = {

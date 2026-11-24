@@ -44,18 +44,12 @@ event_bus = EventBus(redis_url=REDIS_URL)
 provider = HotelProvider(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
 is_healthy = True
-
-
 async def handle_liveness(request):
     return web.json_response({"status": "UP", "service": "hotel-worker"})
-
-
 async def handle_readiness(request):
     if is_healthy and not stop_event.is_set():
         return web.json_response({"status": "READY"})
     return web.json_response({"status": "DRAINING"}, status=503)
-
-
 async def start_health_server():
     app = web.Application()
     app.router.add_get("/health/live", handle_liveness)
@@ -65,8 +59,6 @@ async def start_health_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     logger.info("Hotel worker health probe server listening on port 8080")
-
-
 async def handle_planning_initiated(
     event: CloudEvent[PlanningInitiatedPayload],
 ) -> None:
@@ -168,16 +160,12 @@ async def handle_planning_initiated(
             await event_bus.publish(STREAM_OUT, out_event)
     finally:
         token.__exit__(None, None, None)
-
-
 async def main():
     await event_bus.connect()
     loop = asyncio.get_running_loop()
-
     def handle_shutdown():
         logger.info("SIGTERM/SIGINT received. Initiating hotel worker drain...")
         stop_event.set()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, handle_shutdown)
@@ -196,7 +184,5 @@ async def main():
         await provider.close()
         await event_bus.close()
         logger.info("Hotel worker shutdown complete.")
-
-
 if __name__ == "__main__":
     asyncio.run(main())

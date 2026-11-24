@@ -2,7 +2,6 @@
 Flight Provider with AviationStack REST / MCP, Redis Caching, Single-Flight Locks, and Resilience.
 Includes strict MCP tool allowlists, subprocess timeouts, structured cache keys, and non-caching of degraded results.
 """
-
 import asyncio
 import hashlib
 import json
@@ -39,17 +38,13 @@ APPROVED_FLIGHT_TOOLS = {
     "search_flight",
     "search",
 }
-
-
 class FlightProvider:
     """Manages flight lookup, caching with single-flight locking, MCP, and heuristic fallback."""
-
     def __init__(self, redis_url: str = REDIS_CACHE_URL):
         self.redis_url = redis_url
         self._redis: Any = None
         self._mcp_client: Any = None
         self._single_flight_locks: dict[str, asyncio.Lock] = {}
-
     async def get_redis(self) -> Any:
         if aioredis is None:
             return None
@@ -61,7 +56,6 @@ class FlightProvider:
                 decode_responses=True,
             )
         return self._redis
-
     async def get_mcp_client(self) -> Any:
         if MultiServerMCPClient is None:
             raise RuntimeError("langchain_mcp_adapters library not installed")
@@ -79,7 +73,6 @@ class FlightProvider:
             }
             self._mcp_client = MultiServerMCPClient(server_config)
         return self._mcp_client
-
     async def close(self) -> None:
         if self._mcp_client is not None:
             for method in ("close", "aclose"):
@@ -98,7 +91,6 @@ class FlightProvider:
             except (OSError, RuntimeError) as exc:
                 logger.debug("Ignoring Redis close error during shutdown: %s", exc)
             self._redis = None
-
     def _cache_key(
         self,
         departure_city: str | None = None,
@@ -113,7 +105,6 @@ class FlightProvider:
         raw = f"{tenant_id}:{dest}:{dep}:{dt}:{pax}"
         h = hashlib.sha256(raw.encode()).hexdigest()[:16]
         return f"flight:cache:{tenant_id}:{h}"
-
     async def search_flights(
         self,
         query: str,
@@ -154,7 +145,6 @@ class FlightProvider:
             if redis and not results.degraded:
                 await redis.setex(cache_key, 86400, json.dumps(results.model_dump()))
             return results
-
     async def _fetch_flights(
         self,
         query: str,
@@ -179,7 +169,6 @@ class FlightProvider:
             errors.append(f"MCP: {exc}")
             logger.warning("AviationStack MCP failed: %s", exc)
         raise RuntimeError("Flight provider tiers exhausted: " + "; ".join(errors))
-
     @staticmethod
     def _tool_fields(tool: Any) -> dict[str, Any]:
         schema = getattr(tool, "args_schema", None)
@@ -190,7 +179,6 @@ class FlightProvider:
             or getattr(schema, "__fields__", None)
             or {}
         )
-
     @staticmethod
     def _build_flight_tool_args(tool: Any, query: str) -> dict[str, Any]:
         fields = FlightProvider._tool_fields(tool)
@@ -229,7 +217,6 @@ class FlightProvider:
             elif field_lower in ("search", "query", "keywords", "search_query"):
                 args[field] = query
         return args
-
     @staticmethod
     def _normalize_mcp_output(output: Any) -> str:
         if output is None:
@@ -253,7 +240,6 @@ class FlightProvider:
         if hasattr(output, "text"):
             return FlightProvider._normalize_mcp_output(output.text)
         return str(output)
-
     async def _fetch_aviationstack_mcp(
         self,
         query: str,
@@ -287,7 +273,6 @@ class FlightProvider:
                     f"MCP tool '{getattr(tool, 'name', '')}' returned empty data"
                 )
             return normalized
-
     async def _fallback_flights(
         self,
         query: str,

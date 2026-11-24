@@ -3,7 +3,6 @@ CI Entrypoint Smoke Test.
 Verifies that every service entrypoint module (APIs, workers, auth, gateway) can be imported
 without syntax errors or import regressions.
 """
-
 import importlib
 
 import pytest
@@ -31,8 +30,6 @@ SERVICE_ENTRYPOINTS = [
     "services.common.db",
     "tools.dlq_replay",
 ]
-
-
 @pytest.mark.parametrize("module_name", SERVICE_ENTRYPOINTS)
 def test_entrypoint_import(module_name: str) -> None:
     """Smoke test importing each service entrypoint."""

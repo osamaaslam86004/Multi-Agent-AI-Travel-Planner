@@ -1,7 +1,6 @@
 """
 Unified Async HTTPX Client Factory with Connection Pooling and Lifecycle Integration.
 """
-
 import logging
 
 import httpx
@@ -11,8 +10,6 @@ from services.core.lifecycle.teardown import get_teardown_registry
 
 logger = logging.getLogger("travelbrain.shared.http")
 _http_client: httpx.AsyncClient | None = None
-
-
 async def get_httpx_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
@@ -24,8 +21,6 @@ async def get_httpx_client() -> httpx.AsyncClient:
         registry = get_teardown_registry()
         registry.register("httpx_client", close_httpx_client)
     return _http_client
-
-
 async def close_httpx_client() -> None:
     global _http_client
     if _http_client is not None:

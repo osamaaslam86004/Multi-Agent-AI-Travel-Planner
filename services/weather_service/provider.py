@@ -1,7 +1,6 @@
 """
 Weather Provider with OpenWeather API + MCP, Redis caching, and fallback resilience.
 """
-
 import asyncio
 import hashlib
 import json
@@ -21,17 +20,13 @@ REDIS_CACHE_URL = os.getenv(
 )
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 weather_breaker = CircuitBreaker("OpenWeatherBreaker", fail_max=4, reset_timeout=30.0)
-
-
 class WeatherProvider:
     """Manages weather lookups, caching, MCP, and heuristic fallback."""
-
     def __init__(self, redis_url: str = REDIS_CACHE_URL):
         self._single_flight_locks: dict[str, asyncio.Lock] = {}
         self.redis_url = redis_url
         self._redis: Any = None
         self._mcp_client: Any = None
-
     async def get_redis(self) -> Any:
         if aioredis is None:
             return None
@@ -43,7 +38,6 @@ class WeatherProvider:
                 decode_responses=True,
             )
         return self._redis
-
     async def close(self) -> None:
         if self._redis is not None:
             try:
@@ -51,7 +45,6 @@ class WeatherProvider:
             except Exception as exc:
                 logger.debug(f"Ignoring Redis close error during shutdown: {exc}")
             self._redis = None
-
     def _cache_key(
         self, city: str, dates: str | None = None, tenant_id: str = "default"
     ) -> str:
@@ -59,7 +52,6 @@ class WeatherProvider:
         raw = f"{tenant_id}:{city.strip().lower()}:{dt}"
         h = hashlib.sha256(raw.encode()).hexdigest()[:16]
         return f"weather:cache:{tenant_id}:{h}"
-
     async def get_weather(
         self,
         query: str,
@@ -94,7 +86,6 @@ class WeatherProvider:
             if redis and not results.degraded:
                 await redis.setex(cache_key, 21600, json.dumps(results.model_dump()))
             return results
-
     async def _fallback_weather(
         self, city: str, dates: str | None = None
     ) -> ProviderResult:

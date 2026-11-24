@@ -30,16 +30,12 @@ tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 # W3C traceparent regex: 00-{32 hex trace_id}-{16 hex parent_id}-{2 hex flags}
 TRACEPARENT_REGEX = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$")
-
-
 def generate_traceparent() -> str:
     """Generate a valid W3C traceparent header."""
     trace_id = f"{random.getrandbits(128):032x}"
     span_id = f"{random.getrandbits(64):016x}"
     trace_flags = "01"  # sampled
     return f"00-{trace_id}-{span_id}-{trace_flags}"
-
-
 def extract_traceparent(headers: dict[str, Any]) -> str:
     """Extract or generate a W3C traceparent header from headers."""
     for key, value in headers.items():
@@ -50,8 +46,6 @@ def extract_traceparent(headers: dict[str, Any]) -> str:
         ):
             return value
     return generate_traceparent()
-
-
 def inject_traceparent(
     carrier: dict[str, Any], traceparent: str | None = None
 ) -> dict[str, Any]:
@@ -60,16 +54,10 @@ def inject_traceparent(
     carrier["traceparent"] = tp
     TraceContextTextMapPropagator().inject(carrier)
     return carrier
-
-
 def extract_otel_context(carrier: dict[str, Any]):
     """Extract OpenTelemetry context from carrier dictionary."""
     return TraceContextTextMapPropagator().extract(carrier)
-
-
 _tracer_provider = None
-
-
 def setup_telemetry(service_name: str = "travelbrain", app=None):
     """
     Configures OpenTelemetry TracerProvider with OTLP Exporter
@@ -82,7 +70,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
         endpoint = os.getenv(
             "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces"
         )
@@ -97,7 +84,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                 OTLPSpanExporter,
             )
-
             exporter = OTLPSpanExporter(endpoint=endpoint)
             provider.add_span_processor(BatchSpanProcessor(exporter))
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
@@ -106,7 +92,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
             )
             try:
                 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
-
                 provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
             except (ImportError, OSError, RuntimeError, ValueError) as console_exc:
                 logging.getLogger("travelbrain.telemetry").debug(
@@ -117,7 +102,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
         if app is not None:
             try:
                 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-
                 FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
             except (ImportError, OSError, RuntimeError, ValueError) as e:
                 logging.getLogger("travelbrain.telemetry").debug(
@@ -125,7 +109,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
                 )
         try:
             from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-
             HTTPXClientInstrumentor().instrument()
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             logging.getLogger("travelbrain.telemetry").debug(
@@ -133,7 +116,6 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
             )
         try:
             from opentelemetry.instrumentation.redis import RedisInstrumentor
-
             RedisInstrumentor().instrument()
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             logging.getLogger("travelbrain.telemetry").debug(
@@ -145,15 +127,11 @@ def setup_telemetry(service_name: str = "travelbrain", app=None):
             "OpenTelemetry setup fallback: %s", e
         )
         return None
-
-
 def get_tracer(service_name: str = "travelbrain"):
     """Returns an OpenTelemetry tracer for the specified service name."""
     if OPENTELEMETRY_AVAILABLE and trace:
         return trace.get_tracer(service_name)
     return DummyTracer() if not OPENTELEMETRY_AVAILABLE else trace.NoOpTracer()
-
-
 # ============================================================================
 # Structured JSON Logger
 # ============================================================================
@@ -162,7 +140,6 @@ class JSONFormatter(logging.Formatter):
     Structured JSON Log Formatter outputting fields:
     timestamp, level, logger, message, trace_id, span_id, correlation_id, tenant_id.
     """
-
     def format(self, record: logging.LogRecord) -> str:
         trace_id = "0" * 32
         span_id = "0" * 16
@@ -185,8 +162,6 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_data)
-
-
 def configure_structured_logging(level: int = logging.INFO) -> None:
     """Applies structured JSON logging to the root logger."""
     root_logger = logging.getLogger()
@@ -196,14 +171,10 @@ def configure_structured_logging(level: int = logging.INFO) -> None:
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(console_handler)
-
-
 def set_log_context(correlation_id: str, tenant_id: str) -> None:
     """Helper to set correlation and tenant ID context for logging."""
     correlation_id_var.set(correlation_id)
     tenant_id_var.set(tenant_id)
-
-
 # ============================================================================
 # Bounded Metrics Collection (Prometheus / OTel compatible)
 # ============================================================================
@@ -215,7 +186,6 @@ try:
         Histogram,
         generate_latest,
     )
-
     OPERATION_DURATION_SECONDS = Histogram(
         "travelbrain_operation_duration_seconds",
         "Duration of service operations or HTTP requests in seconds",
@@ -280,8 +250,6 @@ except ImportError:
     ACTIVE_SSE_CONNECTIONS_GAUGE = None
     LLM_TOKENS_COUNTER = None
     LLM_COST_COUNTER = None
-
-
 def _record_observation(
     histogram: Histogram | None,
     service: str,
@@ -297,8 +265,6 @@ def _record_observation(
         operation=operation,
         status=status,
     ).observe(elapsed)
-
-
 @contextmanager
 def observe_duration(
     service: str,
@@ -316,8 +282,6 @@ def observe_duration(
         raise
     finally:
         _record_observation(histogram, service, operation, current_status, start)
-
-
 @asynccontextmanager
 async def observe_duration_async(
     service: str,
@@ -335,8 +299,6 @@ async def observe_duration_async(
         raise
     finally:
         _record_observation(histogram, service, operation, current_status, start)
-
-
 def record_llm_metrics(
     tenant_id: str,
     provider: str,
@@ -370,8 +332,6 @@ def record_llm_metrics(
     LLM_COST_COUNTER.labels(
         tenant_id=clean_tenant, provider=clean_provider, model=clean_model
     ).inc(cost_estimate)
-
-
 def update_breaker_metric(provider_name: str, state_str: str):
     """Record circuit breaker state metric (0=CLOSED, 1=HALF_OPEN, 2=OPEN)."""
     if not PROMETHEUS_AVAILABLE:
@@ -379,8 +339,6 @@ def update_breaker_metric(provider_name: str, state_str: str):
     val_map = {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}
     val = val_map.get(state_str.upper(), 0)
     CIRCUIT_BREAKER_STATE_GAUGE.labels(provider=provider_name).set(val)
-
-
 def get_metrics_payload() -> tuple[bytes, str]:
     """Returns Prometheus metrics payload and content type."""
     if PROMETHEUS_AVAILABLE:

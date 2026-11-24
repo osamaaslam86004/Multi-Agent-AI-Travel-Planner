@@ -1,7 +1,6 @@
 """
 Centralized Settings Package for TravelBrain AI.
 """
-
 from services.core.config.app import ApplicationSettings
 from services.core.config.auth import AuthSettings
 from services.core.config.db import DatabaseSettings

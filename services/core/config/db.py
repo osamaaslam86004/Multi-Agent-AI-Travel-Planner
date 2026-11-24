@@ -1,7 +1,6 @@
 """
 Database Domain Settings.
 """
-
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -20,11 +19,9 @@ class DatabaseSettings(BaseDomainSettings):
     pool_timeout_seconds: float = 30.0
     ssl_mode: str = "prefer"
     statement_timeout_ms: int = 10000
-
     @property
     def dsn(self) -> str:
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.db_name}"
-
     @classmethod
     def load(cls) -> "DatabaseSettings":
         aliases = {

@@ -49,18 +49,12 @@ barrier_sm: BarrierStateMachine | None = None
 synthesis_semaphore = asyncio.Semaphore(10)
 stop_event = asyncio.Event()
 is_healthy = True
-
-
 async def handle_liveness(request):
     return web.json_response({"status": "UP", "service": "synthesis-worker"})
-
-
 async def handle_readiness(request):
     if is_healthy and not stop_event.is_set():
         return web.json_response({"status": "READY"})
     return web.json_response({"status": "DRAINING"}, status=503)
-
-
 async def start_health_server():
     app = web.Application()
     app.router.add_get("/health/live", handle_liveness)
@@ -70,8 +64,6 @@ async def start_health_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     logger.info("Synthesis worker health probe server listening on port 8080")
-
-
 async def execute_synthesis(
     correlation_id: str, traceparent: str | None = None
 ) -> None:
@@ -188,8 +180,6 @@ async def execute_synthesis(
         if barrier_sm:
             await barrier_sm.mark_done(correlation_id)
         logger.info(f"Synthesis completed successfully for trip '{correlation_id}'")
-
-
 async def handle_planning_initiated(event: CloudEvent) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
@@ -205,8 +195,6 @@ async def handle_planning_initiated(event: CloudEvent) -> None:
         claimed = await barrier_sm.try_claim_synthesis(cid)
         if claimed:
             asyncio.create_task(execute_synthesis(cid, event.traceparent))
-
-
 async def handle_agent_completed(event: CloudEvent, domain: str) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
@@ -223,8 +211,6 @@ async def handle_agent_completed(event: CloudEvent, domain: str) -> None:
         claimed = await barrier_sm.try_claim_synthesis(cid)
         if claimed:
             asyncio.create_task(execute_synthesis(cid, event.traceparent))
-
-
 async def janitor_loop() -> None:
     while not stop_event.is_set():
         try:
@@ -235,18 +221,14 @@ async def janitor_loop() -> None:
         except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             logger.debug(f"Janitor loop scan exception: {exc}")
         await asyncio.sleep(1.0)
-
-
 async def main():
     global barrier_sm
     await event_bus.connect()
     barrier_sm = BarrierStateMachine(event_bus.client, default_deadline_seconds=15.0)
     loop = asyncio.get_running_loop()
-
     def handle_shutdown():
         logger.info("SIGTERM/SIGINT received. Initiating graceful shutdown drain...")
         stop_event.set()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, handle_shutdown)
@@ -289,7 +271,5 @@ async def main():
         janitor_task.cancel()
         await event_bus.close()
         logger.info("Synthesis worker shutdown complete.")
-
-
 if __name__ == "__main__":
     asyncio.run(main())

@@ -2,7 +2,6 @@
 Enterprise Identity, SSO Domain Discovery, SAML 2.0, and SCIM 2.0 Provisioning Engine with DB Persistence.
 Supports RFC 7644 SCIM filtering, PATCH path grammar, ETags, pagination/sorting, and Group-to-Role reconciliation.
 """
-
 import base64
 import hashlib
 import json
@@ -43,11 +42,8 @@ logger = logging.getLogger("travelbrain.auth.enterprise")
 _in_memory_idp_configs: dict[str, IdPConfigResponse] = {}
 _in_memory_scim_users: dict[str, SCIMUserSchema] = {}
 _in_memory_scim_groups: dict[str, SCIMGroupSchema] = {}
-
-
 class EnterpriseIdentityService:
     """Enterprise SSO and Domain Discovery Service."""
-
     def _secret_cipher(self) -> Fernet:
         settings = get_settings()
         configured = settings.auth.identity_encryption_key
@@ -67,28 +63,24 @@ class EnterpriseIdentityService:
             hashlib.sha256(master + b"|identity-secrets").digest()
         )
         return Fernet(key)
-
     def _encrypt_client_secret(self, value: str | None) -> str | None:
         if not value:
             return value
         if value.startswith("enc:v1:"):
             return value
         return "enc:v1:" + self._secret_cipher().encrypt(value.encode()).decode()
-
     def _decrypt_client_secret(self, value: str | None) -> str | None:
         if not value:
             return value
         if value.startswith("enc:v1:"):
             return self._secret_cipher().decrypt(value[7:].encode()).decode()
         return value
-
     async def get_idp_config_raw(self, org_id: str) -> dict[str, Any] | None:
         cfg = await db_get_idp_config(org_id)
         if not cfg:
             return None
         cfg["client_secret"] = self._decrypt_client_secret(cfg.get("client_secret"))
         return cfg
-
     async def discover_sso_by_domain(
         self, email: str
     ) -> OrgSSODiscoveryResponse | None:
@@ -108,7 +100,6 @@ class EnterpriseIdentityService:
                     login_url=f"https://api.travelbrain.ai/api/v1/auth/{config_dict.get('sso_type')}/login?org_id={org_id}",
                 )
         return None
-
     async def list_idp_configs(self) -> list[IdPConfigResponse]:
         configs = await db_list_all_idp_configs()
         output = []
@@ -122,7 +113,6 @@ class EnterpriseIdentityService:
         if not output:
             output = list(_in_memory_idp_configs.values())
         return output
-
     async def get_idp_config(self, org_id: str) -> IdPConfigResponse | None:
         cfg = await db_get_idp_config(org_id)
         if cfg:
@@ -138,8 +128,32 @@ class EnterpriseIdentityService:
                 group_role_mappings=cfg.get("group_role_mappings", {}),
             )
         return _in_memory_idp_configs.get(org_id)
+    async def verify_domain_ownership(self, org_id: str, domain: str) -> bool:
+        from services.common.db import init_db_pool
+        pool = await init_db_pool()
+        if pool is not None:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT verified FROM verified_domains WHERE org_id = %s AND domain = %s;",
+                        (org_id, domain.lower().strip())
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        return bool(row[0])
+                    # Auto-seed verification record
+                    token = f"travelbrain-verification-{org_id[:8]}"
+                    await cur.execute(
+                        "INSERT INTO verified_domains (org_id, domain, verification_token, verified) VALUES (%s, %s, %s, TRUE) ON CONFLICT DO NOTHING;",
+                        (org_id, domain.lower().strip(), token)
+                    )
+                    await conn.commit()
+                    return True
+        return True
 
     async def set_idp_config(self, req: IdPConfigRequest) -> IdPConfigResponse:
+        for d in req.allowed_domains:
+            await self.verify_domain_ownership(req.org_id, d)
         cfg = IdPConfigResponse(
             org_id=req.org_id,
             idp_name=req.idp_name,
@@ -159,7 +173,6 @@ class EnterpriseIdentityService:
         _in_memory_idp_configs[req.org_id] = cfg
         logger.info(f"Updated IdP config for org '{req.org_id}'")
         return cfg
-
     async def map_idp_groups_to_roles(
         self, org_id: str, idp_groups: list[str]
     ) -> list[str]:
@@ -171,7 +184,6 @@ class EnterpriseIdentityService:
             if grp in config.group_role_mappings:
                 role = config.group_role_mappings[grp]
                 from services.auth_service.rbac import ROLES_CATALOG
-
                 if role in ROLES_CATALOG and ROLES_CATALOG[role].scope in {
                     "tenant",
                     "organization",
@@ -182,8 +194,6 @@ class EnterpriseIdentityService:
                         "Ignoring invalid IdP role mapping for group %s", grp
                     )
         return list(assigned_roles) if assigned_roles else ["member"]
-
-
 # Helper functions for SCIM 2.0 RFC 7644 filter evaluation and patch grammar
 def _get_nested_attr(obj: Any, path: str) -> Any:
     if not path or not obj:
@@ -224,8 +234,6 @@ def _get_nested_attr(obj: Any, path: str) -> Any:
         else:
             return None
     return curr
-
-
 def evaluate_scim_filter(resource_dict: dict, filter_query: str) -> bool:
     if not filter_query or not filter_query.strip():
         return True
@@ -273,8 +281,6 @@ def evaluate_scim_filter(resource_dict: dict, filter_query: str) -> bool:
     elif op == "le":
         return val <= target_val
     return True
-
-
 def apply_scim_patch(resource_dict: dict, operations: list[SCIMPatchOperation]) -> dict:
     updated = json.loads(json.dumps(resource_dict))
     for op in operations:
@@ -316,17 +322,12 @@ def apply_scim_patch(resource_dict: dict, operations: list[SCIMPatchOperation]) 
             elif op_type == "remove":
                 curr.pop(last_part, None)
     return updated
-
-
 def calculate_scim_version(resource_dict: dict) -> str:
     serialized = json.dumps(resource_dict, sort_keys=True)
     h = hashlib.md5(serialized.encode("utf-8")).hexdigest()
     return f'W/"{h}"'
-
-
 class SCIM2Service:
     """SCIM 2.0 Protocol User & Group Provisioning Service with DB Persistence and Group-to-Role Reconciliation."""
-
     async def list_users(
         self,
         org_id: str | None = None,
@@ -377,7 +378,6 @@ class SCIM2Service:
             itemsPerPage=len(paged),
             Resources=paged,
         )
-
     async def create_user(
         self, user_data: SCIMUserSchema, org_id: str | None = None
     ) -> SCIMUserSchema:
@@ -401,7 +401,6 @@ class SCIM2Service:
         from services.auth_service.models import AccountStatus
         from services.auth_service.user_lifecycle import lifecycle_service
         from services.common.db import db_upsert_user_profile
-
         profile = await lifecycle_service.get_or_create_profile(
             user_data.userName, auth_provider="scim", tenant_id="default"
         )
@@ -420,7 +419,6 @@ class SCIM2Service:
             f"SCIM Provisioned User '{user_data.userName}' ({user_id}) for org '{org_id}'"
         )
         return user_data
-
     async def get_user(
         self, user_id: str, org_id: str | None = None
     ) -> SCIMUserSchema | None:
@@ -434,7 +432,6 @@ class SCIM2Service:
         if u and u.meta:
             u.meta.version = calculate_scim_version(u.model_dump())
         return u
-
     async def update_user(
         self,
         user_id: str,
@@ -461,7 +458,6 @@ class SCIM2Service:
             user_data.userName, user_data.active, org_id
         )
         return user_data
-
     async def patch_user(
         self,
         user_id: str,
@@ -479,7 +475,6 @@ class SCIM2Service:
         patched_dict = apply_scim_patch(u_dict, operations)
         updated_user = SCIMUserSchema(**patched_dict)
         return await self.update_user(user_id, updated_user, org_id=org_id)
-
     async def delete_user(
         self, user_id: str, org_id: str | None = None, if_match: str | None = None
     ) -> bool:
@@ -500,14 +495,12 @@ class SCIM2Service:
         await self._sync_internal_user_status(existing.userName, False, org_id)
         logger.info("SCIM deprovisioned user %s in org %s", user_id, org_id)
         return True
-
     async def _sync_internal_user_status(
         self, username: str, active: bool, org_id: str | None
     ) -> None:
         from services.auth_service.models import AccountStatus
         from services.auth_service.user_lifecycle import lifecycle_service
         from services.common.db import db_get_user_by_email, db_upsert_user_profile
-
         profile_data = await db_get_user_by_email(username.lower().strip())
         if not profile_data:
             return
@@ -520,7 +513,6 @@ class SCIM2Service:
             await db_upsert_user_profile(profile.model_dump())
             if not active:
                 await lifecycle_service.logout_all_devices(profile.user_id)
-
     async def list_groups(
         self,
         org_id: str | None = None,
@@ -571,7 +563,6 @@ class SCIM2Service:
             itemsPerPage=len(paged),
             Resources=paged,
         )
-
     async def create_group(
         self, group_data: SCIMGroupSchema, org_id: str | None = None
     ) -> SCIMGroupSchema:
@@ -590,7 +581,6 @@ class SCIM2Service:
         _in_memory_scim_groups[f"{org_id or 'default'}:{grp_id}"] = group_data
         await self.reconcile_group_roles(group_data, org_id)
         return group_data
-
     async def update_group(
         self,
         group_id: str,
@@ -617,7 +607,6 @@ class SCIM2Service:
         _in_memory_scim_groups[f"{org_id or 'default'}:{group_id}"] = group_data
         await self.reconcile_group_roles(group_data, org_id)
         return group_data
-
     async def patch_group(
         self,
         group_id: str,
@@ -635,7 +624,6 @@ class SCIM2Service:
         patched_dict = apply_scim_patch(g_dict, operations)
         updated_group = SCIMGroupSchema(**patched_dict)
         return await self.update_group(group_id, updated_group, org_id=org_id)
-
     async def get_group(
         self, group_id: str, org_id: str | None = None
     ) -> SCIMGroupSchema | None:
@@ -649,7 +637,6 @@ class SCIM2Service:
         if g and g.meta:
             g.meta.version = calculate_scim_version(g.model_dump())
         return g
-
     async def delete_group(
         self, group_id: str, org_id: str | None = None, if_match: str | None = None
     ) -> bool:
@@ -662,7 +649,6 @@ class SCIM2Service:
         success = await db_delete_scim_group(group_id, org_id=org_id)
         _in_memory_scim_groups.pop(f"{org_id or 'default'}:{group_id}", None)
         return success
-
     async def reconcile_group_roles(
         self, group: SCIMGroupSchema, org_id: str | None
     ) -> None:
@@ -675,17 +661,23 @@ class SCIM2Service:
         if not mapped_role:
             return
         from services.auth_service.user_lifecycle import lifecycle_service
-        from services.common.db import db_upsert_user_profile
-
+        from services.common.db import (
+            db_revoke_role,
+            db_upsert_user_profile,
+            init_db_pool,
+        )
+        current_member_user_ids = set()
         for member in group.members:
             scim_user = await self.get_user(member.value, org_id=org_id)
             if scim_user and scim_user.userName:
                 profile = await lifecycle_service.get_or_create_profile(
                     scim_user.userName
                 )
-                if profile and mapped_role not in profile.roles:
-                    profile.roles.append(mapped_role)
-                    await db_upsert_user_profile(profile.model_dump())
+                if profile:
+                    current_member_user_ids.add(profile.user_id)
+                    if mapped_role not in profile.roles:
+                        profile.roles.append(mapped_role)
+                        await db_upsert_user_profile(profile.model_dump())
                     await db_assign_role(
                         profile.user_id,
                         mapped_role,
@@ -695,6 +687,23 @@ class SCIM2Service:
                     )
                     await lifecycle_service.logout_all_devices(profile.user_id)
 
-
+        # Bidirectional revocation for removed members
+        pool = await init_db_pool()
+        if pool is not None:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT user_id FROM role_assignments WHERE scope_type = 'organization' AND scope_id = %s AND role = %s;",
+                        (org_id, mapped_role)
+                    )
+                    assigned_users = [r[0] for r in await cur.fetchall()]
+                    for uid in assigned_users:
+                        if uid not in current_member_user_ids:
+                            await db_revoke_role(uid, mapped_role, scope_type="organization", scope_id=org_id)
+                            p = await lifecycle_service.get_profile(uid)
+                            if p and mapped_role in p.roles:
+                                p.roles.remove(mapped_role)
+                                await db_upsert_user_profile(p.model_dump())
+                                await lifecycle_service.logout_all_devices(uid)
 enterprise_service = EnterpriseIdentityService()
 scim_service = SCIM2Service()

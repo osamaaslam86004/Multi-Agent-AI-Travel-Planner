@@ -2,7 +2,6 @@
 Resilience utilities: Shared Redis Circuit Breakers, Non-Transient Error Filtering,
 Bounded HALF_OPEN Trial Concurrency, Retry-After Header Handling, and Exponential Backoff.
 """
-
 import asyncio
 import json
 import logging
@@ -17,18 +16,12 @@ import httpx
 from services.common.telemetry import update_breaker_metric
 
 logger = logging.getLogger("travelbrain.resilience")
-
-
 class CircuitState(str, Enum):
     CLOSED = "CLOSED"
     OPEN = "OPEN"
     HALF_OPEN = "HALF_OPEN"
-
-
 class CircuitBreakerOpenException(Exception):
     """Raised when an operation is attempted on an open circuit breaker."""
-
-
 def is_transient_error(exc: Exception) -> bool:
     """
     Classifies errors into transient (network/timeout/5xx) vs non-transient (config/validation/4xx).
@@ -57,8 +50,6 @@ def is_transient_error(exc: Exception) -> bool:
             ),
         )
     )
-
-
 def parse_retry_after(exc: Exception) -> float | None:
     """Extract Retry-After header value in seconds from exception if present."""
     if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
@@ -71,14 +62,11 @@ def parse_retry_after(exc: Exception) -> float | None:
     if hasattr(exc, "retry_after") and isinstance(exc.retry_after, (int, float)):
         return float(exc.retry_after)
     return None
-
-
 class CircuitBreaker:
     """
     Production-grade Asynchronous Circuit Breaker with optional Redis shared state backend,
     strictly bounded HALF_OPEN trial concurrency, non-transient exception filtering, and Retry-After support.
     """
-
     def __init__(
         self,
         name: str,
@@ -99,7 +87,6 @@ class CircuitBreaker:
         self.dynamic_reset_timeout = reset_timeout
         self._lock = asyncio.Lock()
         self._half_open_trial_active = False
-
     async def _get_redis_state(self) -> tuple[CircuitState, int, int, float]:
         if not self.redis:
             return (
@@ -130,7 +117,6 @@ class CircuitBreaker:
                 self.success_count,
                 self.last_state_change,
             )
-
     async def _set_redis_state(
         self, state: CircuitState, failures: int, successes: int, last_change: float
     ) -> None:
@@ -145,7 +131,6 @@ class CircuitBreaker:
             await pipe.execute()
         except (OSError, RuntimeError, TimeoutError, ValueError) as e:
             logger.debug("Redis state set exception for breaker '%s': %s", self.name, e)
-
     async def _transition(
         self, new_state: CircuitState, custom_reset_timeout: float | None = None
     ) -> None:
@@ -173,7 +158,6 @@ class CircuitBreaker:
                 now,
             )
             update_breaker_metric(self.name, new_state.value)
-
     async def call(
         self,
         func: Callable[..., Coroutine[Any, Any, Any]],
@@ -241,8 +225,6 @@ class CircuitBreaker:
             raise
         finally:
             self._half_open_trial_active = False
-
-
 async def retry_with_backoff(
     func: Callable[..., Coroutine[Any, Any, Any]],
     *args: Any,
@@ -275,8 +257,6 @@ async def retry_with_backoff(
             await asyncio.sleep(sleep_duration)
             delay *= backoff_factor
     raise last_exception or RuntimeError("Unexpected retry termination")
-
-
 async def resilient_execute(
     breaker: CircuitBreaker,
     primary_func: Callable[..., Coroutine[Any, Any, Any]],

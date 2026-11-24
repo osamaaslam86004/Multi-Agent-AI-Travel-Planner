@@ -1,4 +1,3 @@
-
 /* TravelBrain AI Frontend — Multi-Agent Planning, Session & Security Management */
 (function () {
   "use strict";
@@ -223,4 +222,3 @@
     });
   }
   initSession();
-  

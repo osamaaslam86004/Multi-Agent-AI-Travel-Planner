@@ -2,7 +2,6 @@
 PII Redaction utility for sanitizing user queries, tool outputs, and telemetry streams.
 Redacts emails, phone numbers, credit card numbers, and government identification numbers.
 """
-
 import re
 
 # Regex patterns for common PII formats
@@ -13,8 +12,6 @@ PHONE_REGEX = re.compile(
 CREDIT_CARD_REGEX = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
 SSN_REGEX = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 PASSPORT_REGEX = re.compile(r"\b[A-PR-WYa-pr-wy][0-9]{7,8}\b")
-
-
 def redact_pii(text: str | None) -> str:
     """
     Sanitizes untrusted text by stripping sensitive PII before provider processing
@@ -29,8 +26,6 @@ def redact_pii(text: str | None) -> str:
     sanitized = CREDIT_CARD_REGEX.sub("[REDACTED_CARD]", sanitized)
     sanitized = PASSPORT_REGEX.sub("[REDACTED_ID]", sanitized)
     return sanitized
-
-
 def sanitize_tool_output(text: str | None, max_length: int = 3000) -> str:
     """
     Sanitizes tool/MCP text output by redacting PII, stripping URLs/HTML,

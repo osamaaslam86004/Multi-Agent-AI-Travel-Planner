@@ -1,4 +1,3 @@
-
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -173,4 +172,3 @@ spec:
     - name: redis
       port: 6379
       targetPort: 6379
-

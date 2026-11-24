@@ -3,7 +3,6 @@
 Production Data Migration Tool: Backfill Multi-Organization Memberships & Roles.
 Backfills org_memberships and role_assignments tables from legacy single-org profiles.
 """
-
 import asyncio
 import logging
 
@@ -15,8 +14,6 @@ from services.common.db import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tools.migrate_multi_org")
-
-
 async def migrate_multi_org_memberships():
     logger.info("Starting Multi-Organization Memberships and Roles backfill...")
     pool = await init_db_pool()
@@ -41,7 +38,5 @@ async def migrate_multi_org_memberships():
     logger.info(
         f"Multi-Org Migration complete. Backfilled {count} organization memberships."
     )
-
-
 if __name__ == "__main__":
     asyncio.run(migrate_multi_org_memberships())

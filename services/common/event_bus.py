@@ -16,23 +16,18 @@ from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.event_bus")
 DLQ_STREAM = "stream:travel:dlq"
-
-
 class EventBus:
     """Production Redis Streams Event Bus supporting Consumer Groups & CloudEvents."""
-
     def __init__(self, redis_url: str | None = None, password: str | None = None):
         settings = get_settings()
         self.redis_url = redis_url or settings.redis.url
         self.password = password if password is not None else settings.redis.password
         self.client: Any = None
         self._last_percentages: dict[str, int] = {}
-
     @property
     def is_connected(self) -> bool:
         """Step 1 (A-3): Read-only property returning connection readiness."""
         return self.client is not None
-
     async def connect(self) -> None:
         if aioredis is None:
             logger.warning("redis-py not installed; EventBus running in dummy mode.")
@@ -46,13 +41,11 @@ class EventBus:
             )
             await self.client.ping()
             logger.info(f"Connected to EventBus Redis at {self.redis_url}")
-
     async def close(self) -> None:
         if self.client:
             await self.client.aclose()
             self.client = None
             logger.info("Closed EventBus connection.")
-
     async def publish(
         self, stream_name: str, event: CloudEvent[Any], maxlen: int = 10000
     ) -> str:
@@ -72,7 +65,6 @@ class EventBus:
             approximate=True,
         )
         return message_id
-
     async def subscribe(self, channel_name: str) -> Any:
         """Step 1 (A-3): Subscribe to PubSub channel for real-time SSE streaming."""
         if not self.client:
@@ -82,7 +74,6 @@ class EventBus:
         pubsub = self.client.pubsub()
         await pubsub.subscribe(channel_name)
         return pubsub
-
     async def publish_progress(
         self, correlation_id: str, update: dict[str, Any]
     ) -> str:
@@ -109,7 +100,6 @@ class EventBus:
         pubsub_channel = f"events:{cid}"
         await self.client.publish(pubsub_channel, msg_payload)
         return msg_id
-
     async def consume(
         self,
         stream_name: str,
@@ -155,7 +145,6 @@ class EventBus:
                                     else raw_event
                                 )
                                 from services.common.schemas import CloudEvent
-
                                 if (
                                     isinstance(event_dict, dict)
                                     and "specversion" in event_dict

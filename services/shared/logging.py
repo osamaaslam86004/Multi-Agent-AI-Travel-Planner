@@ -1,7 +1,6 @@
 """
 Structured Logging Utilities.
 """
-
 from services.common.telemetry import configure_structured_logging
 
 

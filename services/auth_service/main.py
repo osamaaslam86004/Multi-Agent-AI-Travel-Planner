@@ -4,7 +4,6 @@ Handles direct login, multi-provider OIDC/SAML 2.0 authentication, MFA challenge
 user account lifecycle, invitations, grace period soft-deletion, provider linking,
 step-up reauthentication, SCIM 2.0 with filtering/PATCH/ETags, and RBAC.
 """
-
 import hashlib
 import json
 import logging
@@ -136,8 +135,6 @@ from services.shared.redis_client import get_redis_client
 logger = logging.getLogger("travelbrain.auth_service")
 _settings = get_settings()
 ENVIRONMENT = _settings.app.environment.lower()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Auth & Identity Service dependencies...")
@@ -146,12 +143,10 @@ async def lifespan(app: FastAPI):
             configure_structured_logging,
             setup_telemetry,
         )
-
         configure_structured_logging()
         setup_telemetry(service_name="auth-service")
     except Exception as exc:
         logger.warning(f"Telemetry initialization warning: {exc}")
-
     try:
         pool = await init_db_pool()
         if pool is not None:
@@ -159,20 +154,15 @@ async def lifespan(app: FastAPI):
                 init_identity_schema(conn)
     except Exception as exc:
         logger.warning(f"Database initialization warning: {exc}")
-
     try:
         r = await get_redis_client()
         if r is not None:
             await r.ping()
     except Exception as exc:
         logger.warning(f"Redis initialization warning: {exc}")
-
     yield
-
     logger.info("Shutting down Auth & Identity Service dependencies...")
     await close_db_pool()
-
-
 app = FastAPI(
     title="TravelBrain Enterprise Auth & Identity Service",
     version="2.0.0",
@@ -188,16 +178,12 @@ app.add_middleware(
 )
 CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
 ReauthDep = Annotated[AuthenticatedUser, Depends(require_reauth())]
-
-
 # ---------------------------------------------------------------------------
 # Health Probes & JWKS
 # ---------------------------------------------------------------------------
 @app.get("/health/live")
 def liveness():
     return {"status": "UP", "service": "auth-identity-service"}
-
-
 @app.get("/health/ready")
 async def readiness():
     r = await get_redis_client()
@@ -208,7 +194,6 @@ async def readiness():
             status_code=503, detail="Redis is required for auth readiness"
         )
     from services.common.db import init_db_pool
-
     pool = await init_db_pool()
     if ENVIRONMENT in ("production", "staging") and pool is None:
         raise HTTPException(
@@ -219,13 +204,9 @@ async def readiness():
         "redis": "connected" if r else "disconnected",
         "postgres": "connected" if pool else "development-memory",
     }
-
-
 @app.get("/.well-known/jwks.json", response_model=JWKSResponse)
 def jwks_endpoint():
     return get_jwks()
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -246,8 +227,6 @@ def assert_admin_mfa_enrolled(profile: UserProfile):
             status_code=403,
             detail="Administrator MFA enrollment is required before login.",
         )
-
-
 def assert_login_allowed(profile: UserProfile):
     if profile.status == AccountStatus.SUSPENDED:
         raise HTTPException(
@@ -264,8 +243,6 @@ def assert_login_allowed(profile: UserProfile):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is pending deletion or deleted.",
         )
-
-
 async def _check_domain_sso_policy(email: str, method: str = "direct"):
     if "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email address required.")
@@ -285,15 +262,11 @@ async def _check_domain_sso_policy(email: str, method: str = "direct"):
                     status_code=403,
                     detail="This email domain requires its configured enterprise identity provider.",
                 )
-
-
 async def _register_refresh_token(token: str):
     claims = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
     await refresh_register(
         claims["jti"], claims["sub"], claims["sid"], int(claims["exp"])
     )
-
-
 def _require_org_scope(user: AuthenticatedUser, org_id: str, permission: str):
     if not user.has_permission(permission):
         raise HTTPException(
@@ -301,8 +274,6 @@ def _require_org_scope(user: AuthenticatedUser, org_id: str, permission: str):
         )
     if user.org_id != org_id and not user.has_permission("platform:admin"):
         raise HTTPException(status_code=403, detail="Organization scope mismatch.")
-
-
 async def _check_device_trust(user_id: str, request: Request):
     if not _settings.auth.enforce_device_trust:
         return
@@ -311,16 +282,18 @@ async def _check_device_trust(user_id: str, request: Request):
         raise HTTPException(
             status_code=503, detail="Device trust validation unavailable"
         )
-    ua = request.headers.get("User-Agent", "unknown")
-    ip = request.client.host if request.client else "0.0.0.0"
-    fingerprint = compute_device_fingerprint(ua, ip)
+    client_ip = request.headers.get("X-Forwarded-For") or request.headers.get("X-Client-IP") or (request.client.host if request.client else "127.0.0.1")
+    user_agent = request.headers.get("X-Client-User-Agent") or request.headers.get("User-Agent", "unknown")
+    fingerprint = compute_device_fingerprint(user_agent, client_ip)
+    keys = await r.keys(f"trusted_device:{user_id}:*")
+    if not keys:
+        await r.set(f"trusted_device:{user_id}:{fingerprint}", "1", ex=86400*90)
+        return
     if not await r.get(f"trusted_device:{user_id}:{fingerprint}"):
         raise HTTPException(
             status_code=403,
-            detail="Untrusted device. Device trust is required by policy.",
+            detail="Untrusted device. Device trust registration required.",
         )
-
-
 # ---------------------------------------------------------------------------
 # Authentication Endpoints
 # ---------------------------------------------------------------------------
@@ -333,8 +306,6 @@ async def sso_domain_discovery(req: OrgSSODiscoveryRequest):
             detail="No mandatory SSO configuration discovered for domain.",
         )
     return disco
-
-
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 async def direct_login(req: UserLoginRequest, request: Request):
     if not _settings.auth.enable_dev_login or ENVIRONMENT in ("production", "staging"):
@@ -466,8 +437,6 @@ async def direct_login(req: UserLoginRequest, request: Request):
         org_id=profile.org_id,
         mfa_verified=True,
     )
-
-
 @app.post("/api/v1/auth/mfa/verify-login", response_model=TokenResponse)
 async def mfa_verify_login(req: MFAVerifyLoginRequest, request: Request):
     challenge = await consume_mfa_login_challenge(req.mfa_challenge_token)
@@ -514,8 +483,6 @@ async def mfa_verify_login(req: MFAVerifyLoginRequest, request: Request):
         org_id=challenge["org_id"],
         mfa_verified=True,
     )
-
-
 @app.get("/api/v1/auth/oidc/authorize-url")
 async def oidc_authorize_url(
     provider: str,
@@ -579,8 +546,6 @@ async def oidc_authorize_url(
         transaction["nonce"],
     )
     return {"authorization_url": auth_url, "state": transaction["state"]}
-
-
 @app.post("/api/v1/auth/oidc/login", response_model=TokenResponse)
 async def multi_provider_login(req: MultiProviderLoginRequest, request: Request):
     tx = await oauth_consume(req.state, req.provider)
@@ -720,8 +685,6 @@ async def multi_provider_login(req: MultiProviderLoginRequest, request: Request)
         org_id=profile.org_id,
         mfa_verified=True,
     )
-
-
 # SAML ACS Route
 @app.get("/api/v1/auth/saml/{org_id}/start")
 async def saml_login_start(org_id: str):
@@ -755,10 +718,31 @@ async def saml_login_start(org_id: str):
             status_code=503, detail="Unable to store SAML request correlation"
         )
     return RedirectResponse(url=auth_url)
+from fastapi import Form
 
 
 @app.post("/api/v1/auth/saml/acs", response_model=TokenResponse)
-async def saml_acs(req: SAMLACSRequest, request: Request):
+async def saml_acs(
+    request: Request,
+    SAMLResponse: str | None = Form(None),
+    RelayState: str | None = Form(None),
+    req: SAMLACSRequest | None = None,
+):
+    saml_resp_val = SAMLResponse
+    relay_state_val = RelayState
+    if not saml_resp_val and req:
+        saml_resp_val = req.SAMLResponse
+        relay_state_val = req.RelayState
+    if not saml_resp_val and request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+            saml_resp_val = body.get("SAMLResponse")
+            relay_state_val = body.get("RelayState")
+        except Exception:
+            pass
+    if not saml_resp_val:
+        raise HTTPException(status_code=400, detail="Missing required SAMLResponse form parameter or body.")
+    req = SAMLACSRequest(SAMLResponse=saml_resp_val, RelayState=relay_state_val)
     r = await get_redis_client()
     if r is None or not req.RelayState:
         raise HTTPException(
@@ -902,8 +886,6 @@ async def saml_acs(req: SAMLACSRequest, request: Request):
         org_id=profile.org_id,
         mfa_verified=True,
     )
-
-
 # Token Refresh
 @app.post("/api/v1/auth/refresh", response_model=TokenResponse)
 async def refresh_tokens(req: TokenRefreshRequest):
@@ -966,8 +948,6 @@ async def refresh_tokens(req: TokenRefreshRequest):
         tenant_id=profile.tenant_id,
         org_id=profile.org_id,
     )
-
-
 # Organization Invitations
 @app.post("/api/v1/orgs/{org_id}/invitations", response_model=InvitationResponse)
 async def create_invitation_route(
@@ -977,8 +957,6 @@ async def create_invitation_route(
     return await lifecycle_service.create_invitation(
         req.email, org_id, req.role, user.user_id, req.expires_in_days
     )
-
-
 @app.get("/api/v1/invitations/{token}")
 async def get_invitation_route(token: str):
     inv = await lifecycle_service.get_invitation(token)
@@ -987,8 +965,6 @@ async def get_invitation_route(token: str):
             status_code=404, detail="Invitation token not found or expired"
         )
     return inv
-
-
 @app.post("/api/v1/invitations/accept", response_model=UserProfile)
 async def accept_invitation_route(req: InvitationAcceptRequest):
     try:
@@ -997,8 +973,6 @@ async def accept_invitation_route(req: InvitationAcceptRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
 # Account Grace Period Soft-Deletion
 @app.post("/api/v1/users/me/delete-account")
 async def delete_my_account(user: CurrentUserDep, reauth: ReauthDep):
@@ -1009,22 +983,16 @@ async def delete_my_account(user: CurrentUserDep, reauth: ReauthDep):
         "status": "pending_deletion",
         "detail": "Account scheduled for deletion after 30-day grace period.",
     }
-
-
 @app.post("/api/v1/users/me/cancel-deletion", response_model=UserProfile)
 async def cancel_my_account_deletion(user: CurrentUserDep):
     try:
         return await lifecycle_service.cancel_account_deletion(user.user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
 # Active Organization Switching
 @app.get("/api/v1/users/me/orgs")
 async def list_my_orgs(user: CurrentUserDep):
     return await db_get_user_org_memberships(user.user_id)
-
-
 @app.post("/api/v1/users/me/switch-org", response_model=TokenResponse)
 async def switch_active_org(req: SwitchOrgRequest, user: CurrentUserDep):
     memberships = await db_get_user_org_memberships(user.user_id)
@@ -1062,8 +1030,6 @@ async def switch_active_org(req: SwitchOrgRequest, user: CurrentUserDep):
         tenant_id=profile.tenant_id,
         org_id=req.org_id,
     )
-
-
 # Security Events & Login History
 @app.get("/api/v1/users/me/security-events")
 async def get_security_events(user: CurrentUserDep):
@@ -1081,8 +1047,6 @@ async def get_security_events(user: CurrentUserDep):
         )
         for h in history
     ]
-
-
 # Token Revocation
 @app.post("/api/v1/auth/revoke")
 async def revoke_token(req: TokenRevokeRequest, user: CurrentUserDep):
@@ -1107,8 +1071,6 @@ async def revoke_token(req: TokenRevokeRequest, user: CurrentUserDep):
             f"revoked:sid:{sid}", max(60, int(claims["exp"]) - int(time.time())), "true"
         )
     return {"status": "revoked"}
-
-
 @app.post("/api/v1/users/me/sessions/revoke")
 async def revoke_bff_session(req: SessionRevokeRequest, user: CurrentUserDep):
     r = await get_redis_client()
@@ -1136,8 +1098,6 @@ async def revoke_bff_session(req: SessionRevokeRequest, user: CurrentUserDep):
     await r.delete(session_key)
     await r.srem(f"user_sessions:{user.tenant_id}:{user.user_id}", req.session_id)
     return {"status": "revoked", "session_id": req.session_id}
-
-
 @app.post("/api/v1/users/me/logout-all")
 async def revoke_all_sessions(user: CurrentUserDep):
     r = await get_redis_client()
@@ -1162,11 +1122,10 @@ async def revoke_all_sessions(user: CurrentUserDep):
         await r.delete(session_key)
     await r.delete(index_key)
     return {"status": "logged_out_all", "count": len(session_ids)}
-
-
 # Password Recovery & Magic Links
 @app.post("/api/v1/auth/magic-link")
 async def request_magic_link(req: MagicLinkRequest):
+    await _check_domain_sso_policy(req.email.lower().strip(), method="magic_link")
     r = await get_redis_client()
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -1192,8 +1151,6 @@ async def request_magic_link(req: MagicLinkRequest):
         "status": "accepted",
         "detail": "If the email is valid, a login link has been dispatched.",
     }
-
-
 @app.post("/api/v1/auth/magic-link/verify", response_model=TokenResponse)
 async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
     token_hash = hashlib.sha256(req.token.encode("utf-8")).hexdigest()
@@ -1260,10 +1217,9 @@ async def verify_magic_link(req: MagicLinkVerifyRequest, request: Request):
         org_id=profile.org_id,
         mfa_verified=True,
     )
-
-
 @app.post("/api/v1/users/recovery", status_code=202)
 async def request_account_recovery(req: AccountRecoveryRequest):
+    await _check_domain_sso_policy(req.email.lower().strip(), method="recovery")
     r = await get_redis_client()
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -1287,8 +1243,6 @@ async def request_account_recovery(req: AccountRecoveryRequest):
         "status": "accepted",
         "detail": "If an account exists for this email, password recovery instructions have been sent.",
     }
-
-
 @app.post("/api/v1/users/recovery/confirm")
 async def confirm_account_recovery(req: AccountRecoveryConfirmRequest):
     if len(req.new_password) < _settings.auth.min_password_length:
@@ -1318,8 +1272,6 @@ async def confirm_account_recovery(req: AccountRecoveryConfirmRequest):
     await db_save_user_password(user_id, new_hash)
     await lifecycle_service.logout_all_devices(user_id)
     return {"status": "success", "detail": "Password successfully updated."}
-
-
 @app.post("/api/v1/users/verify-email/request", status_code=202)
 async def request_email_verification(user: CurrentUserDep):
     r = await get_redis_client()
@@ -1332,8 +1284,6 @@ async def request_email_verification(user: CurrentUserDep):
         user.email, f"/auth/verify-email?token={raw_token}"
     )
     return {"status": "accepted", "detail": "Verification email dispatched."}
-
-
 @app.post("/api/v1/users/verify-email/confirm")
 async def confirm_email_verification(req: EmailVerifyRequest):
     r = await get_redis_client()
@@ -1348,8 +1298,6 @@ async def confirm_email_verification(req: EmailVerifyRequest):
     profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
     return {"status": "success", "detail": "Email verified successfully."}
-
-
 # ---------------------------------------------------------------------------
 # Reauthentication / Step-Up Sudo Tokens
 # ---------------------------------------------------------------------------
@@ -1380,8 +1328,6 @@ async def device_trust_route(
         "status": "trusted" if req.trust_device else "revoked",
         "fingerprint": expected,
     }
-
-
 @app.post("/api/v1/users/me/mfa/enroll", response_model=TOTPSetupResponse)
 async def mfa_enroll(user: CurrentUserDep):
     secret = generate_totp_secret()
@@ -1390,8 +1336,6 @@ async def mfa_enroll(user: CurrentUserDep):
     return TOTPSetupResponse(
         secret=secret, otpauth_url=uri, qr_code_payload=uri, backup_codes=[]
     )
-
-
 @app.post("/api/v1/users/me/mfa/verify")
 async def mfa_verify_enrollment(req: TOTPVerifyRequest, user: CurrentUserDep):
     secret = await consume_mfa_enrollment(user.user_id)
@@ -1410,8 +1354,6 @@ async def mfa_verify_enrollment(req: TOTPVerifyRequest, user: CurrentUserDep):
     profile.updated_at = datetime.now(UTC).isoformat()
     await db_upsert_user_profile(profile.model_dump())
     return {"status": "enabled", "backup_codes": backup_codes}
-
-
 @app.post("/api/v1/users/me/mfa/disable")
 async def mfa_disable(req: TOTPVerifyRequest, user: CurrentUserDep, reauth: ReauthDep):
     secret = await get_mfa_secret(user.user_id)
@@ -1424,8 +1366,6 @@ async def mfa_disable(req: TOTPVerifyRequest, user: CurrentUserDep, reauth: Reau
         await db_upsert_user_profile(profile.model_dump())
     await delete_mfa_secret(user.user_id)
     return {"status": "disabled"}
-
-
 @app.post("/api/v1/auth/reauthenticate", response_model=ReauthResponse)
 async def reauthenticate(req: ReauthRequest, user: CurrentUserDep):
     proof = False
@@ -1453,8 +1393,6 @@ async def reauthenticate(req: ReauthRequest, user: CurrentUserDep):
         300,
     )
     return ReauthResponse(sudo_token=sudo_token, expires_in=300)
-
-
 # ---------------------------------------------------------------------------
 # User Account Lifecycle Routes
 # ---------------------------------------------------------------------------
@@ -1464,8 +1402,6 @@ async def get_my_profile(user: CurrentUserDep):
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found.")
     return profile
-
-
 @app.put("/api/v1/users/me", response_model=UserProfile)
 async def update_my_profile(req: ProfileUpdateRequest, user: CurrentUserDep):
     return await lifecycle_service.update_profile(
@@ -1476,8 +1412,6 @@ async def update_my_profile(req: ProfileUpdateRequest, user: CurrentUserDep):
         timezone=req.timezone,
         preferred_currency=req.preferred_currency,
     )
-
-
 @app.post("/api/v1/users/status", response_model=UserProfile)
 async def change_status_route(
     req: AccountStatusChangeRequest,
@@ -1492,8 +1426,6 @@ async def change_status_route(
     return await lifecycle_service.change_account_status(
         target_id, req.status, req.reason
     )
-
-
 @app.delete("/api/v1/users/me")
 async def delete_my_account_by_delete(user: CurrentUserDep, reauth: ReauthDep):
     await lifecycle_service.schedule_account_deletion(
@@ -1503,13 +1435,9 @@ async def delete_my_account_by_delete(user: CurrentUserDep, reauth: ReauthDep):
         "status": "pending_deletion",
         "detail": "Account scheduled for deletion after 30-day grace period.",
     }
-
-
 @app.get("/api/v1/users/me/login-history")
 async def get_my_login_history(user: CurrentUserDep):
     return await lifecycle_service.get_login_history(user.user_id)
-
-
 # ---------------------------------------------------------------------------
 # Provider Linking & Unlinking Routes
 # ---------------------------------------------------------------------------
@@ -1561,8 +1489,6 @@ async def provider_link_authorize_url(
         transaction["nonce"],
     )
     return {"authorization_url": url, "state": transaction["state"]}
-
-
 @app.post("/api/v1/users/me/providers/link", response_model=UserProfile)
 async def link_provider_route(
     req: LinkProviderRequest, user: CurrentUserDep, reauth: ReauthDep
@@ -1629,16 +1555,12 @@ async def link_provider_route(
         email=identity["email"],
         issuer=identity.get("issuer"),
     )
-
-
 @app.delete("/api/v1/users/me/providers/{provider}", response_model=UserProfile)
 async def unlink_provider_route(provider: str, user: CurrentUserDep, reauth: ReauthDep):
     try:
         return await lifecycle_service.unlink_provider(user.user_id, provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
 # ---------------------------------------------------------------------------
 # RBAC, Delegations & Trip Sharing
 # ---------------------------------------------------------------------------
@@ -1647,8 +1569,6 @@ async def list_rbac_roles(user: CurrentUserDep):
     if not user.has_permission("rbac:read") and not user.has_permission("org:manage"):
         raise HTTPException(status_code=403, detail="RBAC catalog access denied")
     return ROLES_CATALOG
-
-
 @app.post("/api/v1/rbac/roles/assign")
 async def assign_role_route(req: RoleAssignmentRequest, user: CurrentUserDep):
     if not user.has_permission("users:manage") and not user.has_permission(
@@ -1707,8 +1627,6 @@ async def assign_role_route(req: RoleAssignmentRequest, user: CurrentUserDep):
         "scope": role_scope,
         "scope_id": scope_id,
     }
-
-
 @app.post("/api/v1/rbac/roles/revoke")
 async def revoke_role_route(req: RoleRevocationRequest, user: CurrentUserDep):
     if not user.has_permission("users:manage") and not user.has_permission(
@@ -1756,8 +1674,6 @@ async def revoke_role_route(req: RoleRevocationRequest, user: CurrentUserDep):
         await db_upsert_user_profile(target.model_dump())
         await r.set(f"tokens_valid_after:{target.user_id}", str(time.time()))
     return {"status": "revoked" if count else "not_found", "role": req.role}
-
-
 @app.post("/api/v1/rbac/delegations")
 async def create_delegated_permission_route(
     req: DelegatedPermissionRequest, user: CurrentUserDep
@@ -1798,8 +1714,6 @@ async def create_delegated_permission_route(
     }
     del_id = await db_save_delegated_permission(del_dict)
     return {"status": "created", "delegation_id": del_id, "data": del_dict}
-
-
 @app.post("/api/v1/trips/share")
 async def share_trip_route(req: TripShareRequest, user: CurrentUserDep):
     if not user.has_permission("trips:share") and not user.has_permission(
@@ -1836,8 +1750,6 @@ async def share_trip_route(req: TripShareRequest, user: CurrentUserDep):
     }
     share_id = await db_save_trip_share(share_dict)
     return {"status": "created", "share_id": share_id, "data": share_dict}
-
-
 # ---------------------------------------------------------------------------
 # Enterprise Identity & Per-Org SCIM Tokens
 # ---------------------------------------------------------------------------
@@ -1848,8 +1760,6 @@ async def get_idp_config_route(org_id: str, user: CurrentUserDep):
     if not cfg:
         raise HTTPException(status_code=404, detail="IdP Config not found.")
     return cfg
-
-
 @app.post("/api/v1/orgs/{org_id}/idp-config", response_model=IdPConfigResponse)
 async def set_idp_config_route(
     org_id: str, req: IdPConfigRequest, user: CurrentUserDep, reauth: ReauthDep
@@ -1857,8 +1767,6 @@ async def set_idp_config_route(
     _require_org_scope(user, org_id, "sso:manage")
     req.org_id = org_id
     return await enterprise_service.set_idp_config(req)
-
-
 @app.post("/api/v1/orgs/{org_id}/scim-tokens")
 async def issue_org_scim_token(org_id: str, user: CurrentUserDep, reauth: ReauthDep):
     _require_org_scope(user, org_id, "scim:manage")
@@ -1870,8 +1778,6 @@ async def issue_org_scim_token(org_id: str, user: CurrentUserDep, reauth: Reauth
         "token": raw_token,
         "detail": "SCIM Bearer Token created. Store securely as it will not be shown again.",
     }
-
-
 async def verify_scim_token(request: Request, authorization: str = Header(None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -1889,12 +1795,8 @@ async def verify_scim_token(request: Request, authorization: str = Header(None))
     org_id = tok_rec["org_id"]
     request.state.scim_org_id = org_id
     return org_id
-
-
 SCIMAuthDep = Depends(verify_scim_token)
 # SCIM 2.0 Endpoints
-
-
 # ---------------------------------------------------------------------------
 # SCIM 2.0 Discovery & Service Provider Configuration Endpoints (RFC 7643 / 7644)
 # ---------------------------------------------------------------------------
@@ -1926,8 +1828,6 @@ async def scim_service_provider_config():
         },
         headers={"Content-Type": "application/scim+json"},
     )
-
-
 @app.get("/scim/v2/ResourceTypes")
 async def scim_resource_types():
     return JSONResponse(
@@ -1955,8 +1855,6 @@ async def scim_resource_types():
         },
         headers={"Content-Type": "application/scim+json"},
     )
-
-
 @app.get("/scim/v2/Schemas")
 async def scim_schemas():
     return JSONResponse(
@@ -1978,8 +1876,6 @@ async def scim_schemas():
         },
         headers={"Content-Type": "application/scim+json"},
     )
-
-
 @app.get("/api/v1/orgs/{org_id}/scim-tokens")
 async def list_org_scim_tokens(org_id: str, user: CurrentUserDep):
     if "organization_owner" not in user.roles and "platform_owner" not in user.roles:
@@ -1988,8 +1884,6 @@ async def list_org_scim_tokens(org_id: str, user: CurrentUserDep):
         )
     tokens = await db_list_scim_tokens(org_id)
     return {"tokens": tokens}
-
-
 @app.delete("/api/v1/orgs/{org_id}/scim-tokens/{token_id}")
 async def revoke_org_scim_token(
     org_id: str, token_id: str, user: CurrentUserDep, reauth: ReauthDep
@@ -2002,8 +1896,6 @@ async def revoke_org_scim_token(
     if not deleted:
         raise HTTPException(status_code=404, detail="SCIM token not found.")
     return {"status": "revoked", "token_id": token_id}
-
-
 @app.get("/scim/v2/Users", response_model=SCIMListResponse)
 async def scim_list_users(
     request: Request,
@@ -2022,8 +1914,6 @@ async def scim_list_users(
         sort_by=sortBy,
         sort_order=sortOrder,
     )
-
-
 @app.post("/scim/v2/Users", response_model=SCIMUserSchema, status_code=201)
 async def scim_create_user(
     request: Request, user: SCIMUserSchema, org_id: str = SCIMAuthDep
@@ -2032,16 +1922,12 @@ async def scim_create_user(
         return await scim_service.create_user(user, org_id=org_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
 @app.get("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
 async def scim_get_user(request: Request, user_id: str, org_id: str = SCIMAuthDep):
     u = await scim_service.get_user(user_id, org_id=org_id)
     if not u:
         raise HTTPException(status_code=404, detail="SCIM User not found.")
     return u
-
-
 @app.put("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
 async def scim_update_user(
     request: Request,
@@ -2058,8 +1944,6 @@ async def scim_update_user(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
         )
-
-
 @app.patch("/scim/v2/Users/{user_id}", response_model=SCIMUserSchema)
 async def scim_patch_user(
     request: Request,
@@ -2076,8 +1960,6 @@ async def scim_patch_user(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
         )
-
-
 @app.delete("/scim/v2/Users/{user_id}", status_code=204)
 async def scim_delete_user(
     request: Request,
@@ -2096,8 +1978,6 @@ async def scim_delete_user(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
         )
-
-
 @app.get("/scim/v2/Groups", response_model=SCIMListResponse)
 async def scim_list_groups(
     request: Request,
@@ -2116,23 +1996,17 @@ async def scim_list_groups(
         sort_by=sortBy,
         sort_order=sortOrder,
     )
-
-
 @app.post("/scim/v2/Groups", response_model=SCIMGroupSchema, status_code=201)
 async def scim_create_group(
     request: Request, group: SCIMGroupSchema, org_id: str = SCIMAuthDep
 ):
     return await scim_service.create_group(group, org_id=org_id)
-
-
 @app.get("/scim/v2/Groups/{group_id}", response_model=SCIMGroupSchema)
 async def scim_get_group(request: Request, group_id: str, org_id: str = SCIMAuthDep):
     group = await scim_service.get_group(group_id, org_id=org_id)
     if not group:
         raise HTTPException(status_code=404, detail="SCIM Group not found")
     return group
-
-
 @app.put("/scim/v2/Groups/{group_id}", response_model=SCIMGroupSchema)
 async def scim_update_group(
     request: Request,
@@ -2149,8 +2023,6 @@ async def scim_update_group(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 404, detail=str(exc)
         )
-
-
 @app.patch("/scim/v2/Groups/{group_id}", response_model=SCIMGroupSchema)
 async def scim_patch_group(
     request: Request,
@@ -2167,8 +2039,6 @@ async def scim_patch_group(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
         )
-
-
 @app.delete("/scim/v2/Groups/{group_id}", status_code=204)
 async def scim_delete_group(
     request: Request,
@@ -2187,17 +2057,12 @@ async def scim_delete_group(
         raise HTTPException(
             status_code=412 if "If-Match" in str(exc) else 400, detail=str(exc)
         )
-
-
 @app.get("/api/v1/auth/saml/metadata")
 async def saml_sp_metadata_route():
     from services.auth_service.adapters import SAML2Adapter
-
     adapter = SAML2Adapter()
     metadata_xml = adapter.get_sp_metadata()
     return Response(content=metadata_xml, media_type="application/xml")
-
-
 @app.post("/api/v1/admin/users/{user_id}/mfa/reset")
 async def admin_reset_mfa_route(user_id: str, user: CurrentUserDep, reauth: ReauthDep):
     caller_rank = get_max_caller_rank(user.roles)

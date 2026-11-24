@@ -1,7 +1,6 @@
 """
 Service Lifecycle Standardization Package.
 """
-
 from services.core.lifecycle.manager import WorkerLifespan, lifespan_manager
 from services.core.lifecycle.teardown import (
     ServiceTeardownRegistry,

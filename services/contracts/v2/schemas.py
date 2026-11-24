@@ -1,7 +1,6 @@
 """
 Version 2 REST API Transport Schemas.
 """
-
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -13,8 +12,6 @@ class TripPlanRequestV2(BaseModel):
     departure_city: Optional["str"] = None
     start_date: Optional["str"] = None
     end_date: Optional["str"] = None
-
-
 class TripResponseV2(BaseModel):
     id: str
     correlation_id: str

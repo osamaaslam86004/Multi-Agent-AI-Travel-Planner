@@ -3,7 +3,6 @@ User Account Lifecycle Management Service.
 Handles user profiles, account state transitions, identity provider linking,
 login history tracking, active sessions, invitations, grace period soft-deletion, and multi-device logout with database persistence.
 """
-
 import logging
 import os
 import secrets
@@ -45,14 +44,10 @@ logger = logging.getLogger("travelbrain.auth.user_lifecycle")
 _in_memory_profiles: dict[str, UserProfile] = {}
 _in_memory_login_history: dict[str, list[LoginHistoryEntry]] = {}
 _in_memory_sessions: dict[str, list[dict[str, Any]]] = {}
-
-
 class UserLifecycleService:
     """Core User Profile and Account Lifecycle Service with Postgres persistence."""
-
     def __init__(self, redis_client: Any = None):
         self.redis = redis_client
-
     async def get_or_create_profile(
         self,
         email: str,
@@ -147,7 +142,6 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
-
     async def get_profile(
         self, user_id: str, tenant_id: str | None = None
     ) -> UserProfile | None:
@@ -182,7 +176,6 @@ class UserLifecycleService:
                 updated_at=user_dict.get("updated_at"),
             )
         return _in_memory_profiles.get(user_id)
-
     async def update_profile(
         self,
         user_id: str,
@@ -209,7 +202,6 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
-
     async def change_account_status(
         self, user_id: str, new_status: AccountStatus, reason: str | None = None
     ) -> UserProfile:
@@ -231,7 +223,6 @@ class UserLifecycleService:
             f"User '{user_id}' status changed to '{new_status.value}': {reason}"
         )
         return profile
-
     async def schedule_account_deletion(
         self, user_id: str, grace_period_days: int = 30
     ) -> UserProfile:
@@ -252,7 +243,6 @@ class UserLifecycleService:
             f"Scheduled soft-deletion for user '{user_id}' at {sched.isoformat()}"
         )
         return profile
-
     async def cancel_account_deletion(self, user_id: str) -> UserProfile:
         profile = await self.get_profile(user_id)
         if not profile:
@@ -268,7 +258,6 @@ class UserLifecycleService:
         _in_memory_profiles[user_id] = profile
         logger.info(f"Cancelled soft-deletion for user '{user_id}'")
         return profile
-
     async def cleanup_expired_deleted_accounts(self) -> int:
         """Background worker step: hard-deletes & anonymizes accounts past their grace period."""
         datetime.now(UTC).isoformat()
@@ -309,7 +298,6 @@ class UserLifecycleService:
                 p.linked_providers = []
                 cleaned_count += 1
         return cleaned_count
-
     async def link_provider(
         self,
         user_id: str,
@@ -345,7 +333,6 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
-
     async def unlink_provider(self, user_id: str, provider: str) -> UserProfile:
         profile = await self.get_profile(user_id)
         if not profile:
@@ -364,7 +351,6 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
-
     async def create_invitation(
         self,
         email: str,
@@ -385,7 +371,6 @@ class UserLifecycleService:
         # Optionally send invitation email if mailer configured
         try:
             from services.common.mailer import send_invitation_email
-
             await send_invitation_email(email, token, org_id, role)
         except Exception as e:
             logger.warning(f"Could not send invitation email to {email}: {e}")
@@ -396,7 +381,6 @@ class UserLifecycleService:
             role=role,
             expires_at=expires_at,
         )
-
     async def get_invitation(self, token: str) -> dict[str, Any] | None:
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         inv = await db_get_invitation(token_hash)
@@ -411,7 +395,6 @@ class UserLifecycleService:
         if exp and datetime.fromisoformat(str(exp)) < datetime.now(UTC):
             raise ValueError("Invitation token has expired")
         return inv
-
     async def accept_invitation(
         self, token: str, password: str | None = None, display_name: str | None = None
     ) -> UserProfile:
@@ -434,7 +417,6 @@ class UserLifecycleService:
                 )
             else:
                 from services.auth_service.security import hash_password
-
                 await db_save_user_password(profile.user_id, hash_password(password))
         profile.org_id = org_id
         if role not in profile.roles:
@@ -446,7 +428,6 @@ class UserLifecycleService:
         await db_accept_invitation(token_hash)
         await db_accept_invitation(token)
         return profile
-
     async def schedule_account_deletion(self, user_id: str) -> tuple[UserProfile, str]:
         profile = await self.get_profile(user_id)
         if not profile:
@@ -462,10 +443,8 @@ class UserLifecycleService:
         cancel_token = secrets.token_urlsafe(32)
         c_hash = hashlib.sha256(cancel_token.encode("utf-8")).hexdigest()
         from services.common.db import db_save_cancellation_token
-
         await db_save_cancellation_token(c_hash, user_id, scheduled_at.isoformat())
         return profile, cancel_token
-
     async def cancel_account_deletion(
         self, user_id: str | None = None, cancellation_token: str | None = None
     ) -> UserProfile:
@@ -476,7 +455,6 @@ class UserLifecycleService:
                 db_delete_cancellation_token,
                 db_get_cancellation_token,
             )
-
             c_rec = await db_get_cancellation_token(c_hash)
             if not c_rec:
                 raise ValueError(
@@ -497,7 +475,6 @@ class UserLifecycleService:
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         return profile
-
     async def cleanup_expired_deleted_accounts(self) -> int:
         """Background worker step: hard-deletes & anonymizes accounts past their 30-day grace period."""
         now_iso = datetime.now(UTC).isoformat()
@@ -539,7 +516,6 @@ class UserLifecycleService:
                     p.linked_providers = []
                     cleaned_count += 1
         return cleaned_count
-
     async def record_login_attempt(
         self,
         user_id: str,
@@ -567,7 +543,6 @@ class UserLifecycleService:
         _in_memory_login_history[user_id].insert(0, entry)
         _in_memory_login_history[user_id] = _in_memory_login_history[user_id][:50]
         return entry
-
     async def get_login_history(
         self, user_id: str, limit: int = 20
     ) -> list[LoginHistoryEntry]:
@@ -575,7 +550,6 @@ class UserLifecycleService:
         if rows:
             return [LoginHistoryEntry(**row) for row in rows]
         return _in_memory_login_history.get(user_id, [])[:limit]
-
     async def list_active_sessions(
         self, user_id: str, current_session_id: str | None = None
     ) -> list[ActiveSessionResponse]:
@@ -597,7 +571,6 @@ class UserLifecycleService:
                 )
             )
         return res
-
     async def revoke_session(self, user_id: str, session_id: str) -> bool:
         if user_id in _in_memory_sessions:
             _in_memory_sessions[user_id] = [
@@ -607,7 +580,6 @@ class UserLifecycleService:
         if r:
             await r.setex(f"revoked:sid:{session_id}", 86400, "true")
         return True
-
     async def logout_all_devices(self, user_id: str) -> int:
         count = len(_in_memory_sessions.get(user_id, []))
         _in_memory_sessions[user_id] = []
@@ -621,6 +593,4 @@ class UserLifecycleService:
             await r.set(f"tokens_valid_after:{user_id}", str(time.time()))
         logger.info(f"User '{user_id}' logged out from all {count} devices.")
         return count
-
-
 lifecycle_service = UserLifecycleService()

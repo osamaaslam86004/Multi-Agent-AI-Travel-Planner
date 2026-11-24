@@ -2,7 +2,6 @@
 Configuration Profile Validators & Fail-Fast Startup Checks.
 Role-aware validation for background workers vs. API/Auth services.
 """
-
 import logging
 import os
 import sys
@@ -11,15 +10,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from services.core.config.settings import Settings
 logger = logging.getLogger("travelbrain.config.validators")
-
-
 def _is_worker_process() -> bool:
     role = os.getenv("SERVICE_ROLE", "").lower()
     name = os.getenv("SERVICE_NAME", "").lower()
     cmd = " ".join(sys.argv).lower()
     return role == "worker" or "worker" in name or "worker" in cmd
-
-
 def validate_profile_settings(settings: "Settings") -> None:
     env = settings.app.environment.lower()
     if env not in ("development", "staging", "production"):
@@ -33,8 +28,6 @@ def validate_profile_settings(settings: "Settings") -> None:
         _validate_staging(settings)
     else:
         _validate_development(settings)
-
-
 def _validate_production(settings: "Settings") -> None:
     errors = []
     if settings.app.debug:
@@ -71,8 +64,6 @@ def _validate_production(settings: "Settings") -> None:
         logger.error(error_msg)
         raise ValueError(error_msg)
     logger.info("Production configuration profile successfully validated.")
-
-
 def _validate_staging(settings: "Settings") -> None:
     errors = []
     if settings.app.debug:
@@ -87,7 +78,5 @@ def _validate_staging(settings: "Settings") -> None:
         logger.error(error_msg)
         raise ValueError(error_msg)
     logger.info("Staging configuration profile successfully validated.")
-
-
 def _validate_development(settings: "Settings") -> None:
     logger.debug("Development configuration profile loaded with local defaults.")

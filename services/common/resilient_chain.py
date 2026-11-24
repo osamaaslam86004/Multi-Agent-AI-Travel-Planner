@@ -2,7 +2,6 @@
 Resilient Multi-Provider Fallback Chain Orchestrator with OpenTelemetry Instrumentation,
 Shared Redis Circuit Breakers, and Priority-Ordered Failover (Groq -> Gemini -> Local Hugging Face).
 """
-
 import logging
 import time
 from collections.abc import Sequence
@@ -27,8 +26,6 @@ from services.common.telemetry import get_tracer, record_llm_metrics
 
 logger = logging.getLogger("travelbrain.resilient_chain")
 tracer = get_tracer("travelbrain.llm")
-
-
 def calculate_cost_estimate(
     provider_name: str, model_name: str, prompt_tokens: int, completion_tokens: int
 ) -> float:
@@ -43,8 +40,6 @@ def calculate_cost_estimate(
             completion_tokens * 0.60 / 1_000_000.0
         )
     return 0.0
-
-
 class ResilientLLMChain:
     """
     Orchestrates a 3-tier resilient fallback chain:
@@ -52,7 +47,6 @@ class ResilientLLMChain:
     2. Cloud Fallback: GeminiLLMProvider (Google Cloud AI)
     3. Air-Gapped Fallback: LocalHuggingFaceProvider (<12GB VRAM consumer footprint)
     """
-
     def __init__(
         self,
         providers: Sequence[BaseLLMProvider] | None = None,
@@ -89,7 +83,6 @@ class ResilientLLMChain:
                 redis_client=redis_client,
             ),
         }
-
     async def generate(
         self,
         messages: list[BaseMessage],
@@ -207,7 +200,6 @@ class ResilientLLMChain:
             raise RuntimeError(
                 f"ResilientLLMChain exhausted all providers without success. Attempt summary: [{summary}]"
             ) from last_error
-
     async def generate_structured(
         self,
         messages: list[BaseMessage],

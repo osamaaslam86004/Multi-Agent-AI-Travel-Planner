@@ -1,7 +1,6 @@
 """
 Security Domain Settings.
 """
-
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -15,7 +14,6 @@ class SecuritySettings(BaseDomainSettings):
     cookie_samesite: str = "lax"
     allowed_hosts: list[str] = Field(default_factory=lambda: ["*"])
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
-
     @classmethod
     def load(cls) -> "SecuritySettings":
         aliases = {

@@ -1,7 +1,6 @@
 """
 Comprehensive Unit & Integration Test Suite for Phase 2 Gap Remediation.
 """
-
 import unittest
 
 from services.auth_service.enterprise import (
@@ -50,7 +49,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(consumed["user_id"], "usr_mfa_test")
         consumed_again = await consume_mfa_login_challenge(jti)
         self.assertIsNone(consumed_again)
-
     async def test_gap2_tenant_isolation(self):
         """Gap 2: Verify tenant isolation across profile lookups and trip access queries."""
         email = "isolated_user@example.com"
@@ -61,7 +59,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         await upsert_trip_result("tenant_x", "usr_tx", cid, "Tokyo Trip")
         self.assertTrue(await db_can_access_trip("usr_tx", cid, "tenant_x", "read"))
         self.assertFalse(await db_can_access_trip("usr_tx", cid, "tenant_y", "read"))
-
     async def test_gap3_scim2_filter_patch_and_reconciliation(self):
         """Gap 3: Verify SCIM 2.0 RFC 7644 filtering, PATCH, ETags, and group-to-role reconciliation."""
         user_data = {
@@ -89,7 +86,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             members=[SCIMMember(value="usr_scim_1", display="Jane Doe")],
         )
         await scim_service.reconcile_group_roles(group, "org_acme")
-
     async def test_gap5_provider_linking_and_unlinking(self):
         """Gap 5: Verify provider identity linking and last-method unlinking protection."""
         profile = await lifecycle_service.get_or_create_profile(
@@ -102,7 +98,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(lp.provider == "github" for lp in updated.linked_providers))
         with self.assertRaises(ValueError):
             await lifecycle_service.unlink_provider(user_id, "github")
-
     async def test_gap6_invitation_and_account_lifecycle(self):
         """Gap 6: Verify account invitations and grace-period lifecycle."""
         inv = await lifecycle_service.create_invitation(
@@ -119,7 +114,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(del_profile.status, AccountStatus.PENDING_DELETION)
         recovered = await lifecycle_service.cancel_account_deletion(p_created.user_id)
         self.assertEqual(recovered.status, AccountStatus.ACTIVE)
-
     async def test_gap7_comprehensive_trip_access_enforcement(self):
         """Gap 7: Verify trip read, write, share, and delete access enforcement."""
         cid = "trip_acl_test_202"
@@ -147,7 +141,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             await db_can_access_trip("usr_reader_acl", cid, "tenant_a", "write")
         )
-
     async def test_gap8_multi_org_roles(self):
         """Gap 8: Verify multi-organization role assignments and membership queries."""
         await db_assign_role(
@@ -164,7 +157,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             "usr_multi_org", "travel_planner", "organization", "org_2"
         )
         self.assertEqual(count, 1)
-
     async def test_gap9_suspicious_login_risk_detection(self):
         """Gap 9: Verify suspicious login risk assessment calculation."""
         history = [
@@ -189,12 +181,9 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             "usr_risk_test", "203.0.113.99", "UnknownBot/1.0", history
         )
         self.assertTrue(suspicious_anom)
-
     async def test_gap10_migration_tooling(self):
         """Gap 10: Verify idempotent IdP secret encryption and multi-org migration tools."""
         await migrate_idp_secrets()
         await migrate_multi_org_memberships()
-
-
 if __name__ == "__main__":
     unittest.main()

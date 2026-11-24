@@ -3,7 +3,6 @@ Comprehensive Unit & Integration Test Suite for Phase 3 Architecture.
 Validates Postgres DB schema & Outbox relay, Barrier State Machine & Janitor,
 Single-call synthesis, per-trip event streams, structured cache keys, and DLQ replay.
 """
-
 import time
 from unittest.mock import AsyncMock
 
@@ -46,8 +45,6 @@ async def test_cloudevent_v1_schemas():
     assert event.type == "com.travelbrain.planning.initiated.v1"
     assert event.subject == "trip_test123"
     assert event.data.user_id == "usr_999"
-
-
 @pytest.mark.asyncio
 async def test_outbox_write_and_relay():
     """Verify Outbox write and async relay mechanism."""
@@ -70,8 +67,6 @@ async def test_outbox_write_and_relay():
     relayed = await relay_outbox(mock_bus)
     assert relayed >= 1
     assert mock_bus.publish.called
-
-
 @pytest.mark.asyncio
 async def test_barrier_state_machine_and_janitor():
     """Verify Scatter-Gather Barrier State Machine transitions and Janitor expiration."""
@@ -94,8 +89,6 @@ async def test_barrier_state_machine_and_janitor():
     ready_cids = await barrier.check_expired_barriers()
     assert "trip_rome_123" in ready_cids
     assert mock_redis.hset.called
-
-
 @pytest.mark.asyncio
 async def test_single_call_synthesis():
     """Verify single-call synthesis pass produces itinerary and final response with 1 LLM call."""
@@ -113,8 +106,6 @@ async def test_single_call_synthesis():
         or "Seattle" in final_resp
         or "Proposal" in itin
     )
-
-
 @pytest.mark.asyncio
 async def test_structured_cache_keys_and_single_flight_lock():
     """Verify structured cache key generation and single-flight locking in providers."""
@@ -138,8 +129,6 @@ async def test_structured_cache_keys_and_single_flight_lock():
     fallback_res = await fp._fallback_flights("NYC to LON")
     assert fallback_res.degraded is True
     assert fallback_res.source == "fallback"
-
-
 @pytest.mark.asyncio
 async def test_trip_store_upsert_and_retrieval():
     """Verify trip store persistence and retrieval with tenant isolation."""

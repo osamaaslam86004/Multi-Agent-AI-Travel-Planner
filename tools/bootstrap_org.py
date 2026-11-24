@@ -2,7 +2,6 @@
 CLI & Seed Tool: Bootstrap Organization & Initial Platform Owner.
 Creates the default org row and assigns initial platform owner privileges.
 """
-
 import asyncio
 import logging
 
@@ -15,8 +14,6 @@ from services.common.db import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tools.bootstrap_org")
-
-
 async def bootstrap_org(
     org_id: str = "org_default",
     org_name: str = "Default Organization",
@@ -60,7 +57,5 @@ async def bootstrap_org(
         f"Successfully bootstrapped platform owner '{user_id}' ({owner_email}) for org '{org_id}'"
     )
     return {"org_id": org_id, "user_id": user_id, "email": owner_email}
-
-
 if __name__ == "__main__":
     asyncio.run(bootstrap_org())

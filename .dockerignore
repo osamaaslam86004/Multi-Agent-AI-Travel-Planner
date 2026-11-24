@@ -1,4 +1,3 @@
-
 ````
 # Virtualenv - rebuilt inside the image, and 130MB we never want in build context
 .venv/
@@ -53,4 +52,3 @@ docker-compose*.yml
 LICENSE
 README.md
 ````
-
