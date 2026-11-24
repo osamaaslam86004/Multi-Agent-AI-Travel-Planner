@@ -1,14 +1,17 @@
 """
 Authorization Architecture, Role-Based Access Control (RBAC), and Policy Registry.
 Defines platform, organization, tenant, and resource-level roles, permission inheritance,
-and trip resource access control.
+role rank hierarchy, escalation ceiling checks, and trip resource access control.
 """
 
 import logging
 
+from fastapi import HTTPException, status
+
 from services.auth_service.models import RoleDefinition
 
 logger = logging.getLogger("travelbrain.auth.rbac")
+
 ROLES_CATALOG: dict[str, RoleDefinition] = {
     "platform_owner": RoleDefinition(
         name="Platform Owner",
@@ -105,6 +108,99 @@ ROLES_CATALOG: dict[str, RoleDefinition] = {
     ),
 }
 
+ROLE_RANKS: dict[str, int] = {
+    "platform_owner": 100,
+    "platform_administrator": 80,
+    "admin": 80,
+    "organization_owner": 70,
+    "organization_administrator": 60,
+    "travel_manager": 50,
+    "travel_planner": 40,
+    "member": 20,
+    "traveler": 20,
+    "viewer": 10,
+    "google_verified": 10,
+}
+
+
+def get_role_rank(role_name: str) -> int:
+    r_clean = role_name.lower().strip().replace(" ", "_")
+    return ROLE_RANKS.get(r_clean, 0)
+
+
+def get_max_caller_rank(caller_roles: list[str]) -> int:
+    if not caller_roles:
+        return 0
+    return max([get_role_rank(r) for r in caller_roles])
+
+
+def validate_role_assignment(
+    caller_roles: list[str],
+    target_role: str,
+    caller_org_id: str | None = None,
+    target_org_id: str | None = None,
+) -> None:
+    """
+    Enforces role catalog, role scope, caller scope, target rank, and escalation ceiling.
+    Raises HTTPException(400) if role invalid, or HTTPException(403) if authorization check fails.
+    """
+    r_clean = target_role.lower().strip().replace(" ", "_")
+    if r_clean not in ROLES_CATALOG:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Role '{target_role}' does not exist in the role catalog.",
+        )
+
+    caller_max_rank = get_max_caller_rank(caller_roles)
+    target_rank = get_role_rank(r_clean)
+
+    # Escalation ceiling check
+    if caller_max_rank < target_rank:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Privilege escalation blocked: caller rank ({caller_max_rank}) is lower than target role rank ({target_rank}).",
+        )
+
+    role_def = ROLES_CATALOG[r_clean]
+    # Scope check
+    if role_def.scope == "platform":
+        is_platform_admin = any(
+            r.lower() in ("platform_owner", "platform_administrator", "admin")
+            for r in caller_roles
+        )
+        if not is_platform_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Assigning platform-scoped roles requires platform administrator privileges.",
+            )
+    elif role_def.scope == "organization":
+        is_org_admin = any(
+            r.lower()
+            in (
+                "platform_owner",
+                "platform_administrator",
+                "admin",
+                "organization_owner",
+                "organization_administrator",
+            )
+            for r in caller_roles
+        )
+        if not is_org_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Assigning organization-scoped roles requires organization administrator privileges.",
+            )
+        if caller_org_id and target_org_id and caller_org_id != target_org_id:
+            is_platform_admin = any(
+                r.lower() in ("platform_owner", "platform_administrator", "admin")
+                for r in caller_roles
+            )
+            if not is_platform_admin:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cross-organization role assignment is prohibited.",
+                )
+
 
 class AuthorizationPolicyRegistry:
     """Policy engine for role hierarchy, permission expansion, and resource access evaluation."""
@@ -164,6 +260,3 @@ class AuthorizationPolicyRegistry:
             elif required_action == "admin":
                 return perm_level == "admin"
         return False
-
-
-policy_registry = AuthorizationPolicyRegistry()

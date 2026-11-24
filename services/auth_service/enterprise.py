@@ -40,7 +40,6 @@ from services.common.db import (
 from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.auth.enterprise")
-
 _in_memory_idp_configs: dict[str, IdPConfigResponse] = {}
 _in_memory_scim_users: dict[str, SCIMUserSchema] = {}
 _in_memory_scim_groups: dict[str, SCIMGroupSchema] = {}
@@ -106,7 +105,7 @@ class EnterpriseIdentityService:
                     org_name=f"Enterprise Org ({domain})",
                     sso_enforced=config_dict.get("enforce_sso", False),
                     sso_type=config_dict.get("sso_type", "oidc"),
-                    login_url=f"https://auth.travelbrain.ai/api/v1/auth/{config_dict.get('sso_type')}/login?org_id={org_id}",
+                    login_url=f"https://api.travelbrain.ai/api/v1/auth/{config_dict.get('sso_type')}/login?org_id={org_id}",
                 )
         return None
 
@@ -239,7 +238,6 @@ def evaluate_scim_filter(resource_dict: dict, filter_query: str) -> bool:
         return any(evaluate_scim_filter(resource_dict, p) for p in parts)
     if q.lower().startswith("not "):
         return not evaluate_scim_filter(resource_dict, q[4:])
-
     tokens = q.split(None, 2)
     if len(tokens) == 2 and tokens[1].lower() == "pr":
         val = _get_nested_attr(resource_dict, tokens[0])
@@ -254,7 +252,6 @@ def evaluate_scim_filter(resource_dict: dict, filter_query: str) -> bool:
         return len(val) > 0
     if val is None:
         return op == "ne"
-
     s_val = str(val).lower()
     t_val = str(target_val).lower()
     if op == "eq":
@@ -353,32 +350,27 @@ class SCIM2Service:
                 for key, value in _in_memory_scim_users.items()
                 if not prefix or key.startswith(prefix)
             ]
-
         if filter_query:
             user_objects = [
                 u
                 for u in user_objects
                 if evaluate_scim_filter(u.model_dump(), filter_query)
             ]
-
         if sort_by:
             rev = sort_order.lower() == "descending"
             user_objects.sort(
                 key=lambda u: str(_get_nested_attr(u.model_dump(), sort_by) or ""),
                 reverse=rev,
             )
-
         total_results = len(user_objects)
         idx = max(0, start_index - 1)
         cnt = max(0, count)
         paged = user_objects[idx : idx + cnt]
-
         for u in paged:
             u_dict = u.model_dump()
             ver = calculate_scim_version(u_dict)
             if u.meta:
                 u.meta.version = ver
-
         return SCIMListResponse(
             totalResults=total_results,
             startIndex=start_index,
@@ -454,7 +446,6 @@ class SCIM2Service:
         if if_match and existing and existing.meta and existing.meta.version:
             if if_match.strip() != existing.meta.version.strip():
                 raise ValueError("SCIM ETag version mismatch (If-Match failure)")
-
         user_data.id = user_id
         now_str = datetime.now(UTC).isoformat()
         ver = calculate_scim_version(user_data.model_dump())
@@ -484,7 +475,6 @@ class SCIM2Service:
         if if_match and existing.meta and existing.meta.version:
             if if_match.strip() != existing.meta.version.strip():
                 raise ValueError("SCIM ETag version mismatch (If-Match failure)")
-
         u_dict = existing.model_dump()
         patched_dict = apply_scim_patch(u_dict, operations)
         updated_user = SCIMUserSchema(**patched_dict)
@@ -499,7 +489,6 @@ class SCIM2Service:
         if if_match and existing.meta and existing.meta.version:
             if if_match.strip() != existing.meta.version.strip():
                 raise ValueError("SCIM ETag version mismatch (If-Match failure)")
-
         existing.active = False
         existing.meta = SCIMMeta(
             resourceType="User",
@@ -555,32 +544,27 @@ class SCIM2Service:
                 for key, value in _in_memory_scim_groups.items()
                 if not prefix or key.startswith(prefix)
             ]
-
         if filter_query:
             grp_objects = [
                 g
                 for g in grp_objects
                 if evaluate_scim_filter(g.model_dump(), filter_query)
             ]
-
         if sort_by:
             rev = sort_order.lower() == "descending"
             grp_objects.sort(
                 key=lambda g: str(_get_nested_attr(g.model_dump(), sort_by) or ""),
                 reverse=rev,
             )
-
         total = len(grp_objects)
         idx = max(0, start_index - 1)
         cnt = max(0, count)
         paged = grp_objects[idx : idx + cnt]
-
         for g in paged:
             g_dict = g.model_dump()
             ver = calculate_scim_version(g_dict)
             if g.meta:
                 g.meta.version = ver
-
         return SCIMListResponse(
             totalResults=total,
             startIndex=start_index,
@@ -620,7 +604,6 @@ class SCIM2Service:
         if if_match and current.meta and current.meta.version:
             if if_match.strip() != current.meta.version.strip():
                 raise ValueError("SCIM ETag version mismatch (If-Match failure)")
-
         group_data.id = group_id
         now_str = datetime.now(UTC).isoformat()
         ver = calculate_scim_version(group_data.model_dump())
@@ -648,7 +631,6 @@ class SCIM2Service:
         if if_match and existing.meta and existing.meta.version:
             if if_match.strip() != existing.meta.version.strip():
                 raise ValueError("SCIM ETag version mismatch (If-Match failure)")
-
         g_dict = existing.model_dump()
         patched_dict = apply_scim_patch(g_dict, operations)
         updated_group = SCIMGroupSchema(**patched_dict)
@@ -677,7 +659,6 @@ class SCIM2Service:
         if if_match and existing.meta and existing.meta.version:
             if if_match.strip() != existing.meta.version.strip():
                 raise ValueError("SCIM ETag version mismatch (If-Match failure)")
-
         success = await db_delete_scim_group(group_id, org_id=org_id)
         _in_memory_scim_groups.pop(f"{org_id or 'default'}:{group_id}", None)
         return success

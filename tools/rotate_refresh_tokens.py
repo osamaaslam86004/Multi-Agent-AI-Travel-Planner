@@ -19,7 +19,6 @@ async def rotate_refresh_tokens():
     if r is None:
         logger.error("Redis client unavailable for token rotation.")
         return
-
     now_ts = time.time()
     logger.info("Setting global tokens_valid_after timestamp to current time...")
     await r.set("global_tokens_valid_after", str(now_ts))

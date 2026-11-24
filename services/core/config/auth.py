@@ -43,7 +43,10 @@ class AuthSettings(BaseDomainSettings):
     )
     smtp_host: str = "smtp.travelbrain.ai"
     smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
     smtp_from_email: str = "noreply@travelbrain.ai"
+    smtp_sender_email: str = "noreply@travelbrain.ai"
     public_base_url: str = "https://app.travelbrain.ai"
     # Security & Auth Policies
     min_password_length: int = 12
@@ -89,5 +92,12 @@ class AuthSettings(BaseDomainSettings):
             "auth_service_jwks_url": "AUTH_SERVICE_JWKS_URL",
             "jwt_previous_private_key_path": "JWT_PREVIOUS_PRIVATE_KEY_PATH",
             "jwt_previous_private_key_pem": "JWT_PREVIOUS_PRIVATE_KEY_PEM",
+            "smtp_host": "SMTP_HOST",
+            "smtp_port": "SMTP_PORT",
+            "smtp_username": "SMTP_USERNAME",
+            "smtp_password": "SMTP_PASSWORD",
+            "smtp_from_email": "SMTP_FROM_EMAIL",
+            "smtp_sender_email": "SMTP_SENDER_EMAIL",
+            "public_base_url": "PUBLIC_BASE_URL",
         }
         return cls.load_from_env(prefix="AUTH", aliases=aliases)

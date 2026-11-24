@@ -61,7 +61,6 @@ AUTH_SERVICE_URL = _settings.auth.auth_service_url
 REDIS_URL = _settings.redis.url
 REDIS_PASSWORD = _settings.redis.password or ""
 COOKIE_NAME = _settings.security.session_cookie_name or SESSION_COOKIE_NAME
-
 session_manager = SessionManager(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 event_bus = EventBus(redis_url=REDIS_URL, password=REDIS_PASSWORD)
 
@@ -97,11 +96,9 @@ app = FastAPI(
     version="2.0.0",
     description="Edge Gateway, Multi-Tenant Session Barrier, OpenTelemetry Tracing, and Authenticated SSE Streaming",
 )
-
 setup_telemetry(service_name="bff-gateway", app=app)
 register_exception_handlers(app)
 tracer = get_tracer("travelbrain.gateway")
-
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 if FRONTEND_DIR.exists():
@@ -245,7 +242,6 @@ async def bff_login(req: LoginRequest, request: Request, response: Response):
                 "user_id": token_data.get("user_id"),
             },
         )
-
     jwt_token = token_data["access_token"]
     user_id = token_data["user_id"]
     email = token_data["email"]
@@ -409,9 +405,8 @@ async def oidc_callback(provider: str, code: str, state: str, request: Request):
         return RedirectResponse(
             url=f"/#mfa?token={token_data.get('mfa_challenge_token')}", status_code=302
         )
-
     old_sid = request.cookies.get(COOKIE_NAME)
-    session_id, csrf_token = await session_manager.create_session(
+    session_id, _csrf_token = await session_manager.create_session(
         jwt_token=token_data["access_token"],
         user_id=token_data["user_id"],
         email=token_data["email"],
@@ -621,7 +616,7 @@ async def initiate_trip_plan(
         end_date=plan_req.end_date,
         dates=plan_req.dates,
     )
-    cloud_event = CloudEvent(
+    CloudEvent(
         source="bff-gateway",
         type="travelbrain.planning.initiated",
         subject=user_id,
@@ -633,7 +628,7 @@ async def initiate_trip_plan(
         correlation_id=correlation_id,
         stream_name="stream:travel:planning:initiated",
         event_type="travelbrain.planning.initiated",
-        payload=cloud_event.model_dump(),
+        payload=event_payload.model_dump(),
     )
     return {
         "status": "accepted",
@@ -729,3 +724,321 @@ async def stream_planning_events(correlation_id: str, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# --- Added P0 Comprehensive Identity & Auth BFF Proxies ---
+
+
+@app.get("/api/v1/auth/profile")
+async def bff_get_profile(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    if "x-sudo-token" in request.headers:
+        headers["X-Sudo-Token"] = request.headers["x-sudo-token"]
+    resp = await http_client.get(f"{AUTH_SERVICE_URL}/api/v1/users/me", headers=headers)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.json().get("detail", "Profile fetch failed"),
+        )
+    return resp.json()
+
+
+@app.put("/api/v1/auth/profile")
+async def bff_update_profile(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    if "x-sudo-token" in request.headers:
+        headers["X-Sudo-Token"] = request.headers["x-sudo-token"]
+    resp = await http_client.put(
+        f"{AUTH_SERVICE_URL}/api/v1/users/me", json=body, headers=headers
+    )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.json().get("detail", "Profile update failed"),
+        )
+    return resp.json()
+
+
+@app.post("/api/v1/auth/magic-link")
+async def bff_magic_link_request(request: Request):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/auth/magic-link", json=body
+    )
+    return (
+        resp.json()
+        if resp.status_code == 200
+        else Response(content=resp.content, status_code=resp.status_code)
+    )
+
+
+@app.post("/api/v1/auth/magic-link/verify")
+async def bff_magic_link_verify(request: Request, response: Response):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/auth/magic-link/verify", json=body
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        sid, csrf = await session_manager.create_session(
+            jwt_token=data["access_token"],
+            refresh_token=data.get("refresh_token"),
+            user_id=data["user_id"],
+            email=data["email"],
+            roles=data.get("roles", []),
+        )
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME, value=sid, httponly=True, samesite="lax"
+        )
+        return {"authenticated": True, "csrf_token": csrf, "user_id": data["user_id"]}
+    raise HTTPException(
+        status_code=resp.status_code,
+        detail=resp.json().get("detail", "Magic link verification failed"),
+    )
+
+
+@app.post("/api/v1/auth/password-reset/request")
+async def bff_password_reset_request(request: Request):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/recovery", json=body
+    )
+    return Response(content=resp.content, status_code=resp.status_code)
+
+
+@app.post("/api/v1/auth/password-reset/confirm")
+async def bff_password_reset_confirm(request: Request):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/recovery/confirm", json=body
+    )
+    return Response(content=resp.content, status_code=resp.status_code)
+
+
+@app.post("/api/v1/auth/verify-email/request")
+async def bff_verify_email_request(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/verify-email/request", headers=headers
+    )
+    return Response(content=resp.content, status_code=resp.status_code)
+
+
+@app.post("/api/v1/auth/verify-email/confirm")
+async def bff_verify_email_confirm(request: Request):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/verify-email/confirm", json=body
+    )
+    return Response(content=resp.content, status_code=resp.status_code)
+
+
+@app.post("/api/v1/auth/invitations")
+async def bff_create_invitation(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    org_id = body.get("org_id", "default")
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    if "x-sudo-token" in request.headers:
+        headers["X-Sudo-Token"] = request.headers["x-sudo-token"]
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/orgs/{org_id}/invitations",
+        json=body,
+        headers=headers,
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/invitations/accept")
+async def bff_accept_invitation(request: Request):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/invitations/accept", json=body
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/mfa/enroll")
+async def bff_mfa_enroll(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/me/mfa/enroll", headers=headers
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/mfa/verify-enrollment")
+async def bff_mfa_verify_enrollment(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/me/mfa/verify", json=body, headers=headers
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/mfa/disable")
+async def bff_mfa_disable(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    if "x-sudo-token" in request.headers:
+        headers["X-Sudo-Token"] = request.headers["x-sudo-token"]
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/me/mfa/disable", json=body, headers=headers
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/reauthenticate")
+async def bff_reauthenticate(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/auth/reauthenticate", json=body, headers=headers
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/refresh")
+async def bff_refresh_tokens(request: Request, response: Response):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    refresh_token = session.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="No refresh token in session")
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/auth/refresh", json={"refresh_token": refresh_token}
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        new_sid, new_csrf = await session_manager.create_session(
+            jwt_token=data["access_token"],
+            refresh_token=data.get("refresh_token", refresh_token),
+            user_id=data["user_id"],
+            email=data["email"],
+            roles=data.get("roles", []),
+            old_session_id=session["session_id"],
+        )
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME, value=new_sid, httponly=True, samesite="lax"
+        )
+        return {"status": "refreshed", "csrf_token": new_csrf}
+    raise HTTPException(status_code=resp.status_code, detail="Token refresh failed")
+
+
+@app.get("/api/v1/auth/organizations")
+async def bff_list_orgs(request: Request):
+    session = await session_manager.validate_request(request, check_csrf=False)
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    resp = await http_client.get(
+        f"{AUTH_SERVICE_URL}/api/v1/users/me/orgs", headers=headers
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/organizations/switch")
+async def bff_switch_org(request: Request, response: Response):
+    session = await session_manager.validate_request(request, check_csrf=True)
+    body = await request.json()
+    headers = {"Authorization": f"Bearer {session['jwt']}"}
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/users/me/switch-org", json=body, headers=headers
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        new_sid, new_csrf = await session_manager.create_session(
+            jwt_token=data["access_token"],
+            refresh_token=data.get("refresh_token"),
+            user_id=data["user_id"],
+            email=data["email"],
+            tenant_id=body.get("org_id", "default"),
+            roles=data.get("roles", []),
+            old_session_id=session["session_id"],
+        )
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME, value=new_sid, httponly=True, samesite="lax"
+        )
+        return {
+            "status": "switched",
+            "csrf_token": new_csrf,
+            "roles": data.get("roles", []),
+        }
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/sso/discover")
+async def bff_sso_discover(request: Request):
+    body = await request.json()
+    resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/auth/sso/discover", json=body
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
+
+
+@app.post("/api/v1/auth/saml/acs")
+async def bff_saml_acs(request: Request, response: Response):
+    form_data = await request.form()
+    saml_resp = form_data.get("SAMLResponse")
+    relay_state = form_data.get("RelayState", "/")
+
+    upstream_resp = await http_client.post(
+        f"{AUTH_SERVICE_URL}/api/v1/auth/saml/acs",
+        data={"SAMLResponse": saml_resp, "RelayState": relay_state},
+    )
+    if upstream_resp.status_code == 200:
+        data = upstream_resp.json()
+        sid, _csrf = await session_manager.create_session(
+            jwt_token=data["access_token"],
+            refresh_token=data.get("refresh_token"),
+            user_id=data["user_id"],
+            email=data["email"],
+            roles=data.get("roles", []),
+        )
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME, value=sid, httponly=True, samesite="lax"
+        )
+        target_url = relay_state if relay_state and relay_state.startswith("/") else "/"
+        return RedirectResponse(url=target_url, status_code=302)

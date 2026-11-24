@@ -37,7 +37,6 @@ async def bootstrap_org(
                     (org_id, tenant_id, org_name, org_id.lower().replace(" ", "_")),
                 )
         logger.info(f"Created/verified organization '{org_id}' ({org_name})")
-
     # Create platform owner profile
     user_id = f"usr_admin_{org_id}"
     profile_dict = {
@@ -57,7 +56,6 @@ async def bootstrap_org(
     await db_assign_role(
         user_id, "organization_owner", "organization", org_id, "system_bootstrap"
     )
-
     logger.info(
         f"Successfully bootstrapped platform owner '{user_id}' ({owner_email}) for org '{org_id}'"
     )

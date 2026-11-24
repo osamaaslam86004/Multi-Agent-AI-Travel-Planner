@@ -124,18 +124,15 @@ class EventBus:
         if not self.client:
             logger.warning("Redis client unavailable; consume loop exiting.")
             return
-
         try:
             await self.client.xgroup_create(
                 stream_name, group_name, id="0", mkstream=True
             )
         except Exception:
             pass  # Group already exists
-
         logger.info(
             f"Consumer '{consumer_name}' started listening on '{stream_name}' (group: '{group_name}')"
         )
-
         while stop_event is None or not stop_event.is_set():
             try:
                 entries = await self.client.xreadgroup(
@@ -147,7 +144,6 @@ class EventBus:
                 )
                 if not entries:
                     continue
-
                 for _, messages in entries:
                     for msg_id, fields in messages:
                         raw_event = fields.get("event") or fields.get("data")

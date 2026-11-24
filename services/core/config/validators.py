@@ -77,9 +77,8 @@ def _validate_staging(settings: "Settings") -> None:
     errors = []
     if settings.app.debug:
         logger.warning("DEBUG mode is enabled in staging profile.")
-    if not _is_worker_process():
-        if settings.auth.enable_dev_login:
-            errors.append("ENABLE_DEV_LOGIN cannot be True in staging profile.")
+    if not _is_worker_process() and settings.auth.enable_dev_login:
+        errors.append("ENABLE_DEV_LOGIN cannot be True in staging profile.")
     if errors:
         error_msg = (
             "Fail-fast startup configuration check failed for STAGING profile:\n"

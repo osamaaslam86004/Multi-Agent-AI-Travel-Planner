@@ -232,20 +232,43 @@ async def store_mfa_secret(user_id: str, secret: str, ttl: int = 600) -> None:
 
 
 async def save_mfa_secret(user_id: str, secret: str) -> None:
+    enc_secret = _encrypt_secret(secret)
     r = await _redis()
     if r is not None:
-        await r.set(f"mfa_secret:{digest(user_id)}", _encrypt_secret(secret))
-        return
-    _in_memory_sec_state[f"mfa_secret:{digest(user_id)}"] = _encrypt_secret(secret)
+        await r.set(f"mfa_secret:{digest(user_id)}", enc_secret)
+    _in_memory_sec_state[f"mfa_secret:{digest(user_id)}"] = enc_secret
+
+    # Persist in DB
+    from services.common.db import db_get_mfa_factor, db_save_mfa_factor
+
+    existing = await db_get_mfa_factor(user_id)
+    backup_enc = existing.get("backup_codes_encrypted", "") if existing else ""
+    await db_save_mfa_factor(
+        user_id, enc_secret, backup_enc, mfa_type="totp", enabled=True
+    )
 
 
 async def get_mfa_secret(user_id: str) -> str | None:
     r = await _redis()
     if r is not None:
         raw = await r.get(f"mfa_secret:{digest(user_id)}")
-        return _decrypt_secret(raw) if raw else None
+        if raw:
+            return _decrypt_secret(raw)
     raw = _in_memory_sec_state.get(f"mfa_secret:{digest(user_id)}")
-    return _decrypt_secret(raw) if raw else None
+    if raw:
+        return _decrypt_secret(raw)
+
+    # Fallback to DB
+    from services.common.db import db_get_mfa_factor
+
+    fac = await db_get_mfa_factor(user_id)
+    if fac and fac.get("secret_encrypted"):
+        dec = _decrypt_secret(fac["secret_encrypted"])
+        if r is not None:
+            await r.set(f"mfa_secret:{digest(user_id)}", fac["secret_encrypted"])
+        _in_memory_sec_state[f"mfa_secret:{digest(user_id)}"] = fac["secret_encrypted"]
+        return dec
+    return None
 
 
 async def delete_mfa_secret(user_id: str) -> None:
@@ -256,19 +279,31 @@ async def delete_mfa_secret(user_id: str) -> None:
             f"mfa_backup:{digest(user_id)}",
             f"mfa_enrollment:{digest(user_id)}",
         )
-        return
     _in_memory_sec_state.pop(f"mfa_secret:{digest(user_id)}", None)
     _in_memory_sec_state.pop(f"mfa_backup:{digest(user_id)}", None)
     _in_memory_sec_state.pop(f"mfa_enrollment:{digest(user_id)}", None)
 
+    from services.common.db import db_delete_mfa_factor
+
+    await db_delete_mfa_factor(user_id)
+
 
 async def save_backup_codes(user_id: str, codes: list[str]) -> None:
-    r = await _redis()
     encoded = json.dumps([digest(c) for c in codes])
+    enc_codes = _encrypt_secret(encoded)
+    r = await _redis()
     if r is not None:
         await r.set(f"mfa_backup:{digest(user_id)}", encoded)
-        return
     _in_memory_sec_state[f"mfa_backup:{digest(user_id)}"] = [digest(c) for c in codes]
+
+    # Persist in DB
+    from services.common.db import db_get_mfa_factor, db_save_mfa_factor
+
+    existing = await db_get_mfa_factor(user_id)
+    secret_enc = existing.get("secret_encrypted", "") if existing else ""
+    await db_save_mfa_factor(
+        user_id, secret_enc, enc_codes, mfa_type="totp", enabled=True
+    )
 
 
 async def consume_backup_code(user_id: str, code: str) -> bool:
@@ -285,11 +320,35 @@ async def consume_backup_code(user_id: str, code: str) -> bool:
         end
         return 0
         """
-        return bool(await r.eval(script, 1, key, code_digest))
+        success = bool(await r.eval(script, 1, key, code_digest))
+        if success:
+            return True
+
     codes = _in_memory_sec_state.get(f"mfa_backup:{digest(user_id)}")
     if codes and isinstance(codes, list) and code_digest in codes:
         codes.remove(code_digest)
         return True
+
+    # Check DB fallback
+    from services.common.db import db_get_mfa_factor, db_save_mfa_factor
+
+    fac = await db_get_mfa_factor(user_id)
+    if fac and fac.get("backup_codes_encrypted"):
+        try:
+            raw_codes = json.loads(_decrypt_secret(fac["backup_codes_encrypted"]))
+            if code_digest in raw_codes:
+                raw_codes.remove(code_digest)
+                new_enc = _encrypt_secret(json.dumps(raw_codes))
+                await db_save_mfa_factor(
+                    user_id,
+                    fac.get("secret_encrypted", ""),
+                    new_enc,
+                    mfa_type="totp",
+                    enabled=True,
+                )
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -297,7 +356,6 @@ async def revoke_session(sid: str, user_id: str, ttl: int = 86400) -> None:
     r = await _redis()
     if r is not None:
         await r.set(f"revoked_sid:{digest(sid)}", user_id, ex=ttl)
-        return
     _in_memory_sec_state[f"revoked_sid:{digest(sid)}"] = user_id
 
 
@@ -305,4 +363,3 @@ async def is_session_revoked(sid: str) -> bool:
     r = await _redis()
     if r is not None:
         return bool(await r.get(f"revoked_sid:{digest(sid)}"))
-    return f"revoked_sid:{digest(sid)}" in _in_memory_sec_state

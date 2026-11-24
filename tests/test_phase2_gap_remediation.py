@@ -45,11 +45,9 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             ttl=300,
         )
         self.assertIsNotNone(jti)
-
         consumed = await consume_mfa_login_challenge(jti)
         self.assertIsNotNone(consumed)
         self.assertEqual(consumed["user_id"], "usr_mfa_test")
-
         consumed_again = await consume_mfa_login_challenge(jti)
         self.assertIsNone(consumed_again)
 
@@ -57,13 +55,10 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         """Gap 2: Verify tenant isolation across profile lookups and trip access queries."""
         email = "isolated_user@example.com"
         await lifecycle_service.get_or_create_profile(email, tenant_id="tenant_x")
-
         found = await db_get_user_by_email(email, tenant_id="tenant_x")
         self.assertIsNotNone(found)
-
         cid = "trip_tenant_iso_101"
         await upsert_trip_result("tenant_x", "usr_tx", cid, "Tokyo Trip")
-
         self.assertTrue(await db_can_access_trip("usr_tx", cid, "tenant_x", "read"))
         self.assertFalse(await db_can_access_trip("usr_tx", cid, "tenant_y", "read"))
 
@@ -76,7 +71,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             "name": {"givenName": "Jane", "familyName": "Doe"},
             "emails": [{"value": "scim_test@example.com", "type": "work"}],
         }
-
         self.assertTrue(
             evaluate_scim_filter(user_data, 'userName eq "scim_test@example.com"')
         )
@@ -84,14 +78,11 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             evaluate_scim_filter(user_data, 'userName eq "other@example.com"')
         )
-
         ops = [SCIMPatchOperation(op="replace", path="name.givenName", value="Janet")]
         patched = apply_scim_patch(user_data, ops)
         self.assertEqual(patched["name"]["givenName"], "Janet")
-
         version = calculate_scim_version(user_data)
         self.assertTrue(version.startswith('W/"'))
-
         group = SCIMGroupSchema(
             id="grp_admins",
             displayName="Admins",
@@ -105,12 +96,10 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             "provider_link@example.com"
         )
         user_id = profile.user_id
-
         updated = await lifecycle_service.link_provider(
             user_id, "github", "gh_sub_123", email="provider_link@example.com"
         )
         self.assertTrue(any(lp.provider == "github" for lp in updated.linked_providers))
-
         with self.assertRaises(ValueError):
             await lifecycle_service.unlink_provider(user_id, "github")
 
@@ -121,7 +110,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(inv.email, "invitee@example.com")
         self.assertEqual(inv.org_id, "org_inc")
-
         p_created = await lifecycle_service.get_or_create_profile(
             "usr_soft_del@example.com"
         )
@@ -129,7 +117,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             p_created.user_id, grace_period_days=30
         )
         self.assertEqual(del_profile.status, AccountStatus.PENDING_DELETION)
-
         recovered = await lifecycle_service.cancel_account_deletion(p_created.user_id)
         self.assertEqual(recovered.status, AccountStatus.ACTIVE)
 
@@ -137,18 +124,15 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         """Gap 7: Verify trip read, write, share, and delete access enforcement."""
         cid = "trip_acl_test_202"
         await upsert_trip_result("tenant_a", "usr_owner_acl", cid, "Kyoto Tour")
-
         self.assertTrue(
             await db_can_access_trip("usr_owner_acl", cid, "tenant_a", "read")
         )
         self.assertTrue(
             await db_can_access_trip("usr_owner_acl", cid, "tenant_a", "write")
         )
-
         self.assertFalse(
             await db_can_access_trip("usr_stranger_acl", cid, "tenant_a", "read")
         )
-
         await db_save_trip_share(
             {
                 "trip_id": cid,
@@ -176,7 +160,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
         await db_assign_role(
             "usr_multi_org", "travel_planner", "organization", "org_2", "admin_2"
         )
-
         count = await db_revoke_role(
             "usr_multi_org", "travel_planner", "organization", "org_2"
         )
@@ -202,7 +185,6 @@ class TestPhase2GapRemediation(unittest.IsolatedAsyncioTestCase):
             "usr_risk_test", "192.168.1.1", "Mozilla/5.0 (Macintosh)", history
         )
         self.assertFalse(suspicious)
-
         suspicious_anom, _ = assess_suspicious_login(
             "usr_risk_test", "203.0.113.99", "UnknownBot/1.0", history
         )

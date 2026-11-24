@@ -263,6 +263,35 @@ async def init_identity_schema(conn: Any) -> None:
         last_active_at TIMESTAMPTZ DEFAULT NOW(),
         expires_at TIMESTAMPTZ NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS user_mfa_factors (
+        user_id VARCHAR(64) PRIMARY KEY REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        secret_encrypted TEXT NOT NULL,
+        backup_codes_encrypted TEXT NOT NULL,
+        mfa_type VARCHAR(32) NOT NULL DEFAULT 'totp',
+        enabled BOOLEAN DEFAULT FALSE,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS verified_domains (
+        domain VARCHAR(255) PRIMARY KEY,
+        org_id VARCHAR(64) NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+        verification_token VARCHAR(128) NOT NULL,
+        verified BOOLEAN DEFAULT FALSE,
+        verified_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS deletion_cancellation_tokens (
+        token_hash VARCHAR(128) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_profiles_lower_email ON user_profiles (LOWER(email));
+    CREATE INDEX IF NOT EXISTS idx_login_history_user_ts ON login_history (user_id, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_federated_identities_user ON federated_identities (user_id);
+    CREATE INDEX IF NOT EXISTS idx_org_invitations_email ON org_invitations (LOWER(email));
+    CREATE INDEX IF NOT EXISTS idx_scim_users_org ON scim_users (org_id);
+    CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments (user_id);
+
     """
     async with conn.cursor() as cur:
         await cur.execute(ddl)
@@ -1383,7 +1412,7 @@ async def db_can_access_trip(
             expiry = delegation.get("expires_at")
             try:
                 expires_at = (
-                    datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    datetime.fromisoformat(str(expiry))
                     if expiry
                     else None
                 )
@@ -1632,7 +1661,6 @@ async def write_outbox(
                         (user_id, tenant_id, email),
                     )
                     trip_id = f"trip_{correlation_id}"
-
                     await cur.execute(
                         "INSERT INTO trips (trip_id, tenant_id, user_id, correlation_id, user_query, status) "
                         "VALUES (%s, %s, %s, %s, %s, 'GATHERING') "
@@ -1878,3 +1906,227 @@ async def db_delete_all_sessions(user_id: str) -> int:
     for sid in to_del:
         del _in_memory_db["active_sessions"][sid]
     return len(to_del)
+
+
+# --- Added P0 Identity & Session Helpers ---
+
+
+async def db_get_user_roles_for_org(
+    user_id: str, org_id: str, tenant_id: str = "default"
+) -> list[str]:
+    """
+    Resolves active roles for a user scoped specifically to org_id/tenant_id.
+    Includes platform_owner/platform_administrator roles if present, but excludes
+    roles belonging exclusively to other organizations.
+    """
+    roles = set()
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT role FROM org_memberships WHERE user_id = %s AND org_id = %s;",
+                    (user_id, org_id),
+                )
+                r = await cur.fetchone()
+                if r and r[0]:
+                    roles.add(r[0])
+                await cur.execute(
+                    "SELECT role, scope_type, scope_id FROM role_assignments WHERE user_id = %s;",
+                    (user_id,),
+                )
+                rows = await cur.fetchall()
+                for role_name, scope_type, scope_id in rows:
+                    if scope_type == "platform" or scope_type == "organization" and scope_id == org_id or scope_type == "tenant" and (
+                        scope_id == tenant_id or not scope_id
+                    ):
+                        roles.add(role_name)
+                await cur.execute(
+                    "SELECT roles FROM user_profiles WHERE user_id = %s;",
+                    (user_id,),
+                )
+                prof = await cur.fetchone()
+                if prof and prof[0]:
+                    prof_roles = (
+                        prof[0] if isinstance(prof[0], list) else json.loads(prof[0])
+                    )
+                    for pr in prof_roles:
+                        if pr.lower() in (
+                            "platform_owner",
+                            "platform_administrator",
+                            "admin",
+                        ):
+                            roles.add(pr)
+    else:
+        for om in _in_memory_db.get("org_memberships", []):
+            if om.get("user_id") == user_id and om.get("org_id") == org_id:
+                roles.add(om.get("role", "member"))
+        for ra in _in_memory_db.get("role_assignments", []):
+            if ra.get("user_id") == user_id:
+                st = ra.get("scope_type")
+                sid = ra.get("scope_id")
+                if st == "platform" or (st == "organization" and sid == org_id):
+                    roles.add(ra.get("role"))
+        p = _in_memory_db.get("profiles", {}).get(user_id)
+        if p and getattr(p, "roles", None):
+            for pr in p.roles:
+                if pr.lower() in ("platform_owner", "platform_administrator", "admin"):
+                    roles.add(pr)
+
+    if not roles:
+        roles.add("member")
+    return list(roles)
+
+
+async def db_verify_domain(
+    domain: str, org_id: str, verification_token: str = "verified_manual"
+) -> None:
+    domain_clean = domain.lower().strip()
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO verified_domains (domain, org_id, verification_token, verified, verified_at) "
+                    "VALUES (%s, %s, %s, TRUE, NOW()) "
+                    "ON CONFLICT (domain) DO UPDATE SET verified = TRUE, verified_at = NOW();",
+                    (domain_clean, org_id, verification_token),
+                )
+            await conn.commit()
+    else:
+        _in_memory_db.setdefault("verified_domains", {})[domain_clean] = {
+            "domain": domain_clean,
+            "org_id": org_id,
+            "verified": True,
+        }
+
+
+async def db_is_domain_verified(domain: str, org_id: str) -> bool:
+    domain_clean = domain.lower().strip()
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT verified FROM verified_domains WHERE domain = %s AND org_id = %s;",
+                    (domain_clean, org_id),
+                )
+                row = await cur.fetchone()
+                return bool(row and row[0])
+    vd = _in_memory_db.get("verified_domains", {}).get(domain_clean)
+    return bool(vd and vd.get("org_id") == org_id and vd.get("verified"))
+
+
+async def db_save_mfa_factor(
+    user_id: str,
+    secret_enc: str,
+    backup_codes_enc: str,
+    mfa_type: str = "totp",
+    enabled: bool = True,
+) -> None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO user_mfa_factors (user_id, secret_encrypted, backup_codes_encrypted, mfa_type, enabled, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, NOW()) "
+                    "ON CONFLICT (user_id) DO UPDATE SET secret_encrypted = EXCLUDED.secret_encrypted, "
+                    "backup_codes_encrypted = EXCLUDED.backup_codes_encrypted, mfa_type = EXCLUDED.mfa_type, "
+                    "enabled = EXCLUDED.enabled, updated_at = NOW();",
+                    (user_id, secret_enc, backup_codes_enc, mfa_type, enabled),
+                )
+            await conn.commit()
+    else:
+        _in_memory_db.setdefault("mfa_factors", {})[user_id] = {
+            "secret_encrypted": secret_enc,
+            "backup_codes_encrypted": backup_codes_enc,
+            "mfa_type": mfa_type,
+            "enabled": enabled,
+        }
+
+
+async def db_get_mfa_factor(user_id: str) -> dict[str, Any] | None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT user_id, secret_encrypted, backup_codes_encrypted, mfa_type, enabled "
+                    "FROM user_mfa_factors WHERE user_id = %s;",
+                    (user_id,),
+                )
+                r = await cur.fetchone()
+                if r:
+                    return {
+                        "user_id": r[0],
+                        "secret_encrypted": r[1],
+                        "backup_codes_encrypted": r[2],
+                        "mfa_type": r[3],
+                        "enabled": r[4],
+                    }
+                return None
+    return _in_memory_db.get("mfa_factors", {}).get(user_id)
+
+
+async def db_delete_mfa_factor(user_id: str) -> None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM user_mfa_factors WHERE user_id = %s;", (user_id,)
+                )
+            await conn.commit()
+    else:
+        _in_memory_db.get("mfa_factors", {}).pop(user_id, None)
+
+
+async def db_save_cancellation_token(
+    token_hash: str, user_id: str, expires_at: str
+) -> None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO deletion_cancellation_tokens (token_hash, user_id, expires_at) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (token_hash) DO NOTHING;",
+                    (token_hash, user_id, expires_at),
+                )
+            await conn.commit()
+    else:
+        _in_memory_db.setdefault("cancellation_tokens", {})[token_hash] = {
+            "user_id": user_id,
+            "expires_at": expires_at,
+        }
+
+
+async def db_get_cancellation_token(token_hash: str) -> dict[str, Any] | None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT token_hash, user_id, expires_at FROM deletion_cancellation_tokens WHERE token_hash = %s;",
+                    (token_hash,),
+                )
+                r = await cur.fetchone()
+                if r:
+                    return {"token_hash": r[0], "user_id": r[1], "expires_at": r[2]}
+                return None
+    return _in_memory_db.get("cancellation_tokens", {}).get(token_hash)
+
+
+async def db_delete_cancellation_token(token_hash: str) -> None:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM deletion_cancellation_tokens WHERE token_hash = %s;",
+                    (token_hash,),
+                )
+            await conn.commit()
+    else:
+        _in_memory_db.get("cancellation_tokens", {}).pop(token_hash, None)

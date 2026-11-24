@@ -52,7 +52,6 @@ TravelBrain AI has evolved from a single-process modular monolith into a product
 
 ### High-Level Topology
 
-```mermaid
 flowchart TD
     Client["Browser / Mobile Client"] -->|"HTTPS + Encrypted HttpOnly Cookie"| BFF["API Gateway / BFF Service\n(:8000)"]
     
@@ -98,7 +97,6 @@ flowchart TD
     SynthesisWorker -->|"Real-Time Progress / Final Payload"| RedisPubSub["Redis PubSub Channel\ntrip:stream:[id]"]
     RedisPubSub -->|"Server-Sent Events (SSE)"| BFF
     BFF -->|"Live Markdown & JSON Stream"| Client
-```
 
 ### Core Architectural Pillars
 
@@ -151,17 +149,12 @@ flowchart TD
 The easiest way to run the complete distributed microservices ecosystem (BFF Gateway, Auth Service, Domain Workers, Redis Streams, and PostgreSQL) is with Docker Compose:
 
 1. **Clone the repository**:
-   ```bash
    git clone https://github.com/KalyanM45/TravelBrain-Multi-Agent-AI-Travel-Planner.git
    cd TravelBrain-Multi-Agent-AI-Travel-Planner
-   ```
 
 2. **Create your environment configuration**:
-   ```bash
    cp .env.example .env
-   ```
    Add your keys in `.env`:
-   ```dotenv
    # LLM Providers (3-Tier Fallback Chain)
    GROQ_API_KEY=gsk_...
    GEMINI_API_KEY=AIzaSy...              # Optional: Tier 2 Cloud Fallback
@@ -176,17 +169,12 @@ The easiest way to run the complete distributed microservices ecosystem (BFF Gat
    # Enterprise Identity (Google OIDC)
    GOOGLE_CLIENT_ID=...
    GOOGLE_CLIENT_SECRET=...
-   ```
 
 3. **Start the microservices stack**:
-   ```bash
    docker compose up -d --build
-   ```
 
 4. **Verify running services**:
-   ```bash
    docker compose ps
-   ```
    - **BFF / API Gateway**: `http://localhost:8000`
    - **Auth Service & JWKS**: `http://localhost:8001/.well-known/jwks.json`
    - **Redis Streams & Cache**: `localhost:6379`
@@ -200,7 +188,6 @@ Open **<http://localhost:8000>** in your browser to start planning trips!
 
 Production Kubernetes manifests including Deployments, Services, Horizontal Pod Autoscalers (HPA), and NGINX Ingress are located in the `k8s/` directory.
 
-```bash
 # 1. Create dedicated namespace
 kubectl apply -f k8s/namespace.yaml
 
@@ -209,13 +196,10 @@ kubectl apply -f k8s/configmap.yaml
 
 # 3. Deploy all microservices and Ingress
 kubectl apply -f k8s/
-```
 
 Inspect the cluster rollout:
-```bash
 kubectl get pods -n travelbrain -w
 kubectl get hpa -n travelbrain
-```
 
 ---
 
@@ -245,20 +229,16 @@ The API Gateway provides a live Server-Sent Events (SSE) feed showing the status
 <summary><b>Microservices: Redis or Auth connection errors in worker logs</b></summary>
 
 Ensure the Redis and Auth containers are healthy:
-```bash
 docker compose ps
 docker compose logs -f bff-gateway auth-service
-```
 </details>
 
 <details>
 <summary><b>An error says GROQ_API_KEY is missing or model does not exist</b></summary>
 
 Verify your Groq API key in `.env`. You can test valid models with:
-```bash
 curl -s https://api.groq.com/openai/v1/models \
   -H "Authorization: Bearer $GROQ_API_KEY"
-```
 </details>
 
 <details>

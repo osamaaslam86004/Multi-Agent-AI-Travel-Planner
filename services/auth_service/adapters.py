@@ -239,7 +239,7 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
         if nonce and id_claims.get("nonce") != nonce:
             raise RuntimeError("OIDC nonce mismatch")
         email = id_claims.get("email") or id_claims.get("preferred_username") or ""
-        email_verified = bool(id_claims.get("email_verified", True if email else False))
+        email_verified = bool(id_claims.get("email_verified", bool(email)))
         return {
             "provider": "entra",
             "sub": id_claims.get("sub") or id_claims.get("oid"),
@@ -640,7 +640,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         if not response_issue:
             raise ValueError("SAML Response IssueInstant is required")
         try:
-            issue_time = datetime.fromisoformat(response_issue.replace("Z", "+00:00"))
+            issue_time = datetime.fromisoformat(response_issue)
         except ValueError as exc:
             raise ValueError("Invalid SAML Response IssueInstant") from exc
         if issue_time > datetime.now(UTC) + timedelta(
@@ -819,7 +819,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError("SAML Conditions are required")
 
         def parse_time(value: str) -> datetime:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is None:
                 raise ValueError("SAML timestamp must include timezone")
             return parsed

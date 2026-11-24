@@ -60,6 +60,7 @@ class SessionManager:
         roles: list[str] | None = None,
         old_session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        refresh_token: str | None = None,
     ) -> tuple[str, str]:
         r = await self.get_redis()
         if old_session_id:
@@ -71,6 +72,7 @@ class SessionManager:
         session_data = {
             "session_id": session_id,
             "jwt": jwt_token,
+            "refresh_token": refresh_token or "",
             "user_id": user_id,
             "email": email,
             "tenant_id": tenant_id,

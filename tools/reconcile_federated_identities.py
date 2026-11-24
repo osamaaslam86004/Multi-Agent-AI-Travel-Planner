@@ -19,7 +19,6 @@ async def reconcile_federated_identities():
     if pool is None:
         logger.info("Database pool unavailable; skipping SQL reconciliation.")
         return
-
     count = 0
     async with pool.connection() as conn:
         async with conn.cursor() as cur:

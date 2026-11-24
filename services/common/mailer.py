@@ -43,6 +43,12 @@ class MailerInterface(abc.ABC):
     async def send_account_recovery(self, email: str, token_or_url: str) -> bool:
         pass
 
+    @abc.abstractmethod
+    async def send_invitation(
+        self, email: str, token: str, org_id: str, role: str
+    ) -> bool:
+        pass
+
 
 class LogMailer(MailerInterface):
     """Log-only Mailer Adapter for development and testing environments."""
@@ -62,6 +68,14 @@ class LogMailer(MailerInterface):
     async def send_account_recovery(self, email: str, token_or_url: str) -> bool:
         logger.info(
             f"[LogMailer] Dispatching Account Recovery Password Reset to '{email}': {_mask_token_in_url(token_or_url)}"
+        )
+        return True
+
+    async def send_invitation(
+        self, email: str, token: str, org_id: str, role: str
+    ) -> bool:
+        logger.info(
+            f"[LogMailer] Dispatching Organization Invitation ({org_id}/{role}) to '{email}': {_mask_token_in_url(token)}"
         )
         return True
 
@@ -123,6 +137,13 @@ class SMTPMailer(MailerInterface):
         body = f"A password reset request was initiated for your account.\n\nUse the link below to set a new password:\n\n{token_or_url}\n\nThis link expires in 30 minutes."
         return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
+    async def send_invitation(
+        self, email: str, token: str, org_id: str, role: str
+    ) -> bool:
+        subject = f"Invitation to Join Organization {org_id} on TravelBrain"
+        body = f"You have been invited to join organization '{org_id}' with role '{role}'.\n\nUse your invitation token to accept:\n{token}\n\nThis invitation expires in 7 days."
+        return await asyncio.to_thread(self._send_email_sync, email, subject, body)
+
 
 _mailer_instance: MailerInterface | None = None
 
@@ -136,3 +157,7 @@ def get_mailer() -> MailerInterface:
         else:
             _mailer_instance = LogMailer()
     return _mailer_instance
+
+
+async def send_invitation_email(email: str, token: str, org_id: str, role: str) -> bool:
+    get_mailer()

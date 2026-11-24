@@ -272,7 +272,7 @@ class UserLifecycleService:
 
     async def cleanup_expired_deleted_accounts(self) -> int:
         """Background worker step: hard-deletes & anonymizes accounts past their grace period."""
-        now_iso = datetime.now(UTC).isoformat()
+        datetime.now(UTC).isoformat()
         cleaned_count = 0
         pool = await init_db_pool()
         if pool is not None:
@@ -284,7 +284,7 @@ class UserLifecycleService:
                     )
                     rows = await cur.fetchall()
                     for r in rows:
-                        uid, email = r[0], r[1]
+                        uid, _email = r[0], r[1]
                         anon_email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
                         await cur.execute(
                             "UPDATE user_profiles SET email = %s, display_name = 'Deleted User', "
@@ -374,9 +374,25 @@ class UserLifecycleService:
         created_by: str,
         expires_in_days: int = 7,
     ) -> InvitationResponse:
+        # Cap expiry to 30 days max
+        expires_in_days = min(max(1, expires_in_days), 30)
         token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         expires_at = (datetime.now(UTC) + timedelta(days=expires_in_days)).isoformat()
-        await db_save_invitation(token, email, org_id, role, created_by, expires_at)
+
+        # Save token_hash to DB
+        await db_save_invitation(
+            token_hash, email, org_id, role, created_by, expires_at
+        )
+
+        # Optionally send invitation email if mailer configured
+        try:
+            from services.common.mailer import send_invitation_email
+
+            await send_invitation_email(email, token, org_id, role)
+        except Exception as e:
+            logger.warning(f"Could not send invitation email to {email}: {e}")
+
         return InvitationResponse(
             token=token,
             email=email.lower().strip(),
@@ -386,14 +402,18 @@ class UserLifecycleService:
         )
 
     async def get_invitation(self, token: str) -> dict[str, Any] | None:
-        inv = await db_get_invitation(token)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        inv = await db_get_invitation(token_hash)
+        if not inv:
+            # Fallback for unhashed token lookup
+            inv = await db_get_invitation(token)
         if not inv:
             return None
         if inv.get("accepted"):
             raise ValueError("Invitation has already been accepted")
         exp = inv.get("expires_at")
         if exp and datetime.fromisoformat(
-            str(exp).replace("Z", "+00:00")
+            str(exp)
         ) < datetime.now(UTC):
             raise ValueError("Invitation token has expired")
         return inv
@@ -407,21 +427,132 @@ class UserLifecycleService:
         email = inv["email"]
         org_id = inv["org_id"]
         role = inv["role"]
+
+        existing_user = await db_get_user_by_email(email)
         profile = await self.get_or_create_profile(
             email=email, display_name=display_name, auth_provider="invitation"
         )
-        if password:
-            from services.auth_service.security import hash_password
 
-            await db_save_user_password(profile.user_id, hash_password(password))
+        # STOP password replacement on existing accounts:
+        # Only allow setting password if the user did NOT already exist prior to invitation
+        if password:
+            if existing_user:
+                logger.warning(
+                    f"Prevented password overwrite during invitation accept for existing user {email}"
+                )
+            else:
+                from services.auth_service.security import hash_password
+
+                await db_save_user_password(profile.user_id, hash_password(password))
+
         profile.org_id = org_id
         if role not in profile.roles:
             profile.roles.append(role)
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         await db_add_org_membership(profile.user_id, org_id, role)
+
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        await db_accept_invitation(token_hash)
         await db_accept_invitation(token)
         return profile
+
+    async def schedule_account_deletion(self, user_id: str) -> tuple[UserProfile, str]:
+        profile = await self.get_profile(user_id)
+        if not profile:
+            raise ValueError(f"User profile '{user_id}' not found")
+        now = datetime.now(UTC)
+        scheduled_at = now + timedelta(days=30)
+        profile.status = AccountStatus.PENDING_DELETION
+        profile.deletion_requested_at = now.isoformat()
+        profile.deletion_scheduled_at = scheduled_at.isoformat()
+        profile.updated_at = now.isoformat()
+        await db_upsert_user_profile(profile.model_dump())
+        await self.logout_all_devices(user_id)
+
+        cancel_token = secrets.token_urlsafe(32)
+        c_hash = hashlib.sha256(cancel_token.encode("utf-8")).hexdigest()
+        from services.common.db import db_save_cancellation_token
+
+        await db_save_cancellation_token(c_hash, user_id, scheduled_at.isoformat())
+        return profile, cancel_token
+
+    async def cancel_account_deletion(
+        self, user_id: str | None = None, cancellation_token: str | None = None
+    ) -> UserProfile:
+        target_uid = user_id
+        if cancellation_token:
+            c_hash = hashlib.sha256(cancellation_token.encode("utf-8")).hexdigest()
+            from services.common.db import (
+                db_delete_cancellation_token,
+                db_get_cancellation_token,
+            )
+
+            c_rec = await db_get_cancellation_token(c_hash)
+            if not c_rec:
+                raise ValueError(
+                    "Invalid or expired account deletion cancellation token"
+                )
+            target_uid = c_rec["user_id"]
+            await db_delete_cancellation_token(c_hash)
+
+        if not target_uid:
+            raise ValueError(
+                "User ID or cancellation token required to cancel deletion"
+            )
+
+        profile = await self.get_profile(target_uid)
+        if not profile:
+            raise ValueError(f"User profile '{target_uid}' not found")
+        profile.status = AccountStatus.ACTIVE
+        profile.deletion_requested_at = None
+        profile.deletion_scheduled_at = None
+        profile.updated_at = datetime.now(UTC).isoformat()
+        await db_upsert_user_profile(profile.model_dump())
+        return profile
+
+    async def cleanup_expired_deleted_accounts(self) -> int:
+        """Background worker step: hard-deletes & anonymizes accounts past their 30-day grace period."""
+        now_iso = datetime.now(UTC).isoformat()
+        cleaned_count = 0
+        pool = await init_db_pool()
+        if pool is not None:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT user_id, email FROM user_profiles WHERE status = 'pending_deletion' "
+                        "AND deletion_scheduled_at <= NOW();"
+                    )
+                    rows = await cur.fetchall()
+                    for r in rows:
+                        uid, _email = r[0], r[1]
+                        anon_email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
+                        await cur.execute(
+                            "UPDATE user_profiles SET email = %s, display_name = 'Deleted User', "
+                            "avatar_url = NULL, bio = NULL, status = 'deleted', updated_at = NOW() "
+                            "WHERE user_id = %s;",
+                            (anon_email, uid),
+                        )
+                        await cur.execute(
+                            "DELETE FROM user_credentials WHERE user_id = %s;", (uid,)
+                        )
+                        await cur.execute(
+                            "DELETE FROM federated_identities WHERE user_id = %s;",
+                            (uid,),
+                        )
+                        cleaned_count += 1
+                await conn.commit()
+            return cleaned_count
+
+        for uid, p in list(_in_memory_profiles.items()):
+            if p.status == AccountStatus.PENDING_DELETION:
+                if p.deletion_scheduled_at and p.deletion_scheduled_at <= now_iso:
+                    p.status = AccountStatus.DELETED
+                    p.display_name = "Deleted User"
+                    p.email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
+                    p.linked_providers = []
+                    cleaned_count += 1
+        return cleaned_count
 
     async def record_login_attempt(
         self,

@@ -20,7 +20,6 @@ async def test_scim_filter_and_patch():
         "active": True,
         "name": {"givenName": "Alice", "familyName": "Smith"},
     }
-
     assert evaluate_scim_filter(user, 'userName eq "alice@example.com"') is True
     ops = [SCIMPatchOperation(op="replace", path="active", value=False)]
     patched = apply_scim_patch(user, ops)
@@ -43,12 +42,10 @@ async def test_trip_access_control():
         correlation_id=cid,
         user_query="Paris trip",
     )
-
     assert await db_can_access_trip("usr_owner", cid, "tenant_alpha", "read") is True
     assert (
         await db_can_access_trip("usr_stranger", cid, "tenant_alpha", "read") is False
     )
-
     await db_save_trip_share(
         {
             "trip_id": cid,

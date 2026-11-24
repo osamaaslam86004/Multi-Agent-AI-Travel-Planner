@@ -21,8 +21,6 @@ from opentelemetry.trace.propagation.tracecontext import (
 )
 
 OPENTELEMETRY_AVAILABLE = True
-
-
 # Context Variables for Log Correlation across Threads / Async Tasks
 correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "correlation_id", default="none"

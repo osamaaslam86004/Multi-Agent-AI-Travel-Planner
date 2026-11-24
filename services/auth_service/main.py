@@ -437,9 +437,8 @@ async def mfa_verify_login(req: MFAVerifyLoginRequest, request: Request):
         secret = await get_mfa_secret(user_id)
         if secret and verify_totp_code(secret, req.totp_code):
             totp_valid = True
-    elif req.backup_code:
-        if await consume_backup_code(user_id, req.backup_code):
-            totp_valid = True
+    elif req.backup_code and await consume_backup_code(user_id, req.backup_code):
+        totp_valid = True
     if not totp_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1737,7 +1736,7 @@ async def create_delegated_permission_route(
             status_code=404, detail="Delegate must belong to the same tenant"
         )
     try:
-        expiry = datetime.fromisoformat(req.expires_at.replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(req.expires_at)
         if expiry <= datetime.now(UTC):
             raise ValueError("Delegation expiry must be in the future")
     except ValueError:
@@ -1776,7 +1775,7 @@ async def share_trip_route(req: TripShareRequest, user: CurrentUserDep):
         raise HTTPException(status_code=400, detail="Invalid trip share permission")
     if req.expires_at:
         try:
-            share_expiry = datetime.fromisoformat(req.expires_at.replace("Z", "+00:00"))
+            share_expiry = datetime.fromisoformat(req.expires_at)
             if share_expiry <= datetime.now(UTC):
                 raise ValueError
         except ValueError:
@@ -2043,3 +2042,18 @@ async def saml_sp_metadata_route():
     adapter = SAML2Adapter()
     metadata_xml = adapter.get_sp_metadata()
     return Response(content=metadata_xml, media_type="application/xml")
+
+
+@app.post("/api/v1/admin/users/{user_id}/mfa/reset")
+async def admin_reset_mfa_route(user_id: str, user: CurrentUserDep, reauth: ReauthDep):
+    caller_rank = get_max_caller_rank(user.roles)
+    if caller_rank < 60:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin MFA reset requires organization owner or platform administrator privileges.",
+        )
+    await security_state.delete_mfa_secret(user_id)
+    p = await user_lifecycle_service.get_profile(user_id)
+    if p:
+        p.mfa_enabled = False
+        await db_upsert_user_profile(p.model_dump())
