@@ -727,8 +727,6 @@ async def stream_planning_events(correlation_id: str, request: Request):
 
 
 # --- Added P0 Comprehensive Identity & Auth BFF Proxies ---
-
-
 @app.get("/api/v1/auth/profile")
 async def bff_get_profile(request: Request):
     session = await session_manager.validate_request(request, check_csrf=False)
@@ -1023,7 +1021,6 @@ async def bff_saml_acs(request: Request, response: Response):
     form_data = await request.form()
     saml_resp = form_data.get("SAMLResponse")
     relay_state = form_data.get("RelayState", "/")
-
     upstream_resp = await http_client.post(
         f"{AUTH_SERVICE_URL}/api/v1/auth/saml/acs",
         data={"SAMLResponse": saml_resp, "RelayState": relay_state},

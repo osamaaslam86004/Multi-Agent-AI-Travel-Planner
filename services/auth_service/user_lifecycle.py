@@ -92,8 +92,8 @@ class UserLifecycleService:
             profile = UserProfile(
                 user_id=user_id,
                 email=existing_user_dict["email"],
-                display_name=display_name
-                or existing_user_dict.get("display_name")
+                display_name=existing_user_dict.get("display_name")
+                or display_name
                 or email_clean.split("@")[0].title(),
                 avatar_url=existing_user_dict.get("avatar_url"),
                 bio=existing_user_dict.get("bio"),
@@ -196,8 +196,7 @@ class UserLifecycleService:
         if not profile:
             raise ValueError(f"User profile '{user_id}' not found")
         if display_name is not None:
-            if display_name and not profile.display_name:
-                profile.display_name = display_name
+            profile.display_name = display_name
         if avatar_url is not None:
             profile.avatar_url = avatar_url
         if bio is not None:
@@ -379,12 +378,10 @@ class UserLifecycleService:
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         expires_at = (datetime.now(UTC) + timedelta(days=expires_in_days)).isoformat()
-
         # Save token_hash to DB
         await db_save_invitation(
             token_hash, email, org_id, role, created_by, expires_at
         )
-
         # Optionally send invitation email if mailer configured
         try:
             from services.common.mailer import send_invitation_email
@@ -392,7 +389,6 @@ class UserLifecycleService:
             await send_invitation_email(email, token, org_id, role)
         except Exception as e:
             logger.warning(f"Could not send invitation email to {email}: {e}")
-
         return InvitationResponse(
             token=token,
             email=email.lower().strip(),
@@ -412,9 +408,7 @@ class UserLifecycleService:
         if inv.get("accepted"):
             raise ValueError("Invitation has already been accepted")
         exp = inv.get("expires_at")
-        if exp and datetime.fromisoformat(
-            str(exp)
-        ) < datetime.now(UTC):
+        if exp and datetime.fromisoformat(str(exp)) < datetime.now(UTC):
             raise ValueError("Invitation token has expired")
         return inv
 
@@ -427,12 +421,10 @@ class UserLifecycleService:
         email = inv["email"]
         org_id = inv["org_id"]
         role = inv["role"]
-
         existing_user = await db_get_user_by_email(email)
         profile = await self.get_or_create_profile(
             email=email, display_name=display_name, auth_provider="invitation"
         )
-
         # STOP password replacement on existing accounts:
         # Only allow setting password if the user did NOT already exist prior to invitation
         if password:
@@ -444,14 +436,12 @@ class UserLifecycleService:
                 from services.auth_service.security import hash_password
 
                 await db_save_user_password(profile.user_id, hash_password(password))
-
         profile.org_id = org_id
         if role not in profile.roles:
             profile.roles.append(role)
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         await db_add_org_membership(profile.user_id, org_id, role)
-
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         await db_accept_invitation(token_hash)
         await db_accept_invitation(token)
@@ -469,7 +459,6 @@ class UserLifecycleService:
         profile.updated_at = now.isoformat()
         await db_upsert_user_profile(profile.model_dump())
         await self.logout_all_devices(user_id)
-
         cancel_token = secrets.token_urlsafe(32)
         c_hash = hashlib.sha256(cancel_token.encode("utf-8")).hexdigest()
         from services.common.db import db_save_cancellation_token
@@ -495,12 +484,10 @@ class UserLifecycleService:
                 )
             target_uid = c_rec["user_id"]
             await db_delete_cancellation_token(c_hash)
-
         if not target_uid:
             raise ValueError(
                 "User ID or cancellation token required to cancel deletion"
             )
-
         profile = await self.get_profile(target_uid)
         if not profile:
             raise ValueError(f"User profile '{target_uid}' not found")
@@ -543,7 +530,6 @@ class UserLifecycleService:
                         cleaned_count += 1
                 await conn.commit()
             return cleaned_count
-
         for uid, p in list(_in_memory_profiles.items()):
             if p.status == AccountStatus.PENDING_DELETION:
                 if p.deletion_scheduled_at and p.deletion_scheduled_at <= now_iso:

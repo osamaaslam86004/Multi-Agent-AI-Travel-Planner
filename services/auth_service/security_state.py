@@ -237,7 +237,6 @@ async def save_mfa_secret(user_id: str, secret: str) -> None:
     if r is not None:
         await r.set(f"mfa_secret:{digest(user_id)}", enc_secret)
     _in_memory_sec_state[f"mfa_secret:{digest(user_id)}"] = enc_secret
-
     # Persist in DB
     from services.common.db import db_get_mfa_factor, db_save_mfa_factor
 
@@ -257,7 +256,6 @@ async def get_mfa_secret(user_id: str) -> str | None:
     raw = _in_memory_sec_state.get(f"mfa_secret:{digest(user_id)}")
     if raw:
         return _decrypt_secret(raw)
-
     # Fallback to DB
     from services.common.db import db_get_mfa_factor
 
@@ -282,7 +280,6 @@ async def delete_mfa_secret(user_id: str) -> None:
     _in_memory_sec_state.pop(f"mfa_secret:{digest(user_id)}", None)
     _in_memory_sec_state.pop(f"mfa_backup:{digest(user_id)}", None)
     _in_memory_sec_state.pop(f"mfa_enrollment:{digest(user_id)}", None)
-
     from services.common.db import db_delete_mfa_factor
 
     await db_delete_mfa_factor(user_id)
@@ -295,7 +292,6 @@ async def save_backup_codes(user_id: str, codes: list[str]) -> None:
     if r is not None:
         await r.set(f"mfa_backup:{digest(user_id)}", encoded)
     _in_memory_sec_state[f"mfa_backup:{digest(user_id)}"] = [digest(c) for c in codes]
-
     # Persist in DB
     from services.common.db import db_get_mfa_factor, db_save_mfa_factor
 
@@ -323,12 +319,10 @@ async def consume_backup_code(user_id: str, code: str) -> bool:
         success = bool(await r.eval(script, 1, key, code_digest))
         if success:
             return True
-
     codes = _in_memory_sec_state.get(f"mfa_backup:{digest(user_id)}")
     if codes and isinstance(codes, list) and code_digest in codes:
         codes.remove(code_digest)
         return True
-
     # Check DB fallback
     from services.common.db import db_get_mfa_factor, db_save_mfa_factor
 
@@ -363,3 +357,18 @@ async def is_session_revoked(sid: str) -> bool:
     r = await _redis()
     if r is not None:
         return bool(await r.get(f"revoked_sid:{digest(sid)}"))
+
+
+async def check_and_mark_totp_used(
+    user_id: str, code: str, window_seconds: int = 90
+) -> bool:
+    """Returns True if TOTP code was already used within window_seconds (replay prevention), False if first use."""
+    key = f"totp_used:{digest(user_id)}:{digest(code)}"
+    r = await _redis()
+    if r is not None:
+        was_set = await r.set(key, "1", ex=window_seconds, nx=True)
+        return not was_set
+    if key in _in_memory_sec_state:
+        return True
+    _in_memory_sec_state[key] = time.time()
+    return False

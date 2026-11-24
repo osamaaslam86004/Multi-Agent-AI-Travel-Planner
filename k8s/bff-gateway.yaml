@@ -1,3 +1,4 @@
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -109,3 +110,4 @@ spec:
     - name: http
       port: 80
       targetPort: 8000
+

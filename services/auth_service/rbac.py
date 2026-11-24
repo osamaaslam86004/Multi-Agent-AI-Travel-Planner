@@ -11,7 +11,6 @@ from fastapi import HTTPException, status
 from services.auth_service.models import RoleDefinition
 
 logger = logging.getLogger("travelbrain.auth.rbac")
-
 ROLES_CATALOG: dict[str, RoleDefinition] = {
     "platform_owner": RoleDefinition(
         name="Platform Owner",
@@ -107,7 +106,6 @@ ROLES_CATALOG: dict[str, RoleDefinition] = {
         permissions=[],
     ),
 }
-
 ROLE_RANKS: dict[str, int] = {
     "platform_owner": 100,
     "platform_administrator": 80,
@@ -150,17 +148,14 @@ def validate_role_assignment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Role '{target_role}' does not exist in the role catalog.",
         )
-
     caller_max_rank = get_max_caller_rank(caller_roles)
     target_rank = get_role_rank(r_clean)
-
     # Escalation ceiling check
     if caller_max_rank < target_rank:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Privilege escalation blocked: caller rank ({caller_max_rank}) is lower than target role rank ({target_rank}).",
         )
-
     role_def = ROLES_CATALOG[r_clean]
     # Scope check
     if role_def.scope == "platform":

@@ -28,6 +28,17 @@ def _mask_token_in_url(token_or_url: str) -> str:
     return masked
 
 
+def build_absolute_url(path_or_url: str) -> str:
+    """Construct an absolute URL targeting the configured public_base_url."""
+    if not path_or_url:
+        return get_settings().auth.public_base_url
+    if path_or_url.startswith(("http://", "https://")):
+        return path_or_url
+    base = get_settings().auth.public_base_url.rstrip("/")
+    path = path_or_url.lstrip("/")
+    return f"{base}/{path}"
+
+
 class MailerInterface(abc.ABC):
     """Abstract Mailer Interface for sending transactional identity emails."""
 
@@ -45,7 +56,7 @@ class MailerInterface(abc.ABC):
 
     @abc.abstractmethod
     async def send_invitation(
-        self, email: str, token: str, org_id: str, role: str
+        self, email: str, token_or_url: str, org_id: str, role: str
     ) -> bool:
         pass
 
@@ -54,28 +65,32 @@ class LogMailer(MailerInterface):
     """Log-only Mailer Adapter for development and testing environments."""
 
     async def send_magic_link(self, email: str, token_or_url: str) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         logger.info(
-            f"[LogMailer] Dispatching Magic Link to '{email}': {_mask_token_in_url(token_or_url)}"
+            f"[LogMailer] Dispatching Magic Link to '{email}': {_mask_token_in_url(abs_url)}"
         )
         return True
 
     async def send_email_verification(self, email: str, token_or_url: str) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         logger.info(
-            f"[LogMailer] Dispatching Email Verification to '{email}': {_mask_token_in_url(token_or_url)}"
+            f"[LogMailer] Dispatching Email Verification to '{email}': {_mask_token_in_url(abs_url)}"
         )
         return True
 
     async def send_account_recovery(self, email: str, token_or_url: str) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         logger.info(
-            f"[LogMailer] Dispatching Account Recovery Password Reset to '{email}': {_mask_token_in_url(token_or_url)}"
+            f"[LogMailer] Dispatching Account Recovery Password Reset to '{email}': {_mask_token_in_url(abs_url)}"
         )
         return True
 
     async def send_invitation(
-        self, email: str, token: str, org_id: str, role: str
+        self, email: str, token_or_url: str, org_id: str, role: str
     ) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         logger.info(
-            f"[LogMailer] Dispatching Organization Invitation ({org_id}/{role}) to '{email}': {_mask_token_in_url(token)}"
+            f"[LogMailer] Dispatching Organization Invitation ({org_id}/{role}) to '{email}': {_mask_token_in_url(abs_url)}"
         )
         return True
 
@@ -97,7 +112,9 @@ class SMTPMailer(MailerInterface):
         self.username = username or getattr(settings.auth, "smtp_username", "")
         self.password = password or getattr(settings.auth, "smtp_password", "")
         self.sender_email = sender_email or getattr(
-            settings.auth, "smtp_sender_email", "noreply@travelbrain.ai"
+            settings.auth,
+            "smtp_from_email",
+            getattr(settings.auth, "smtp_sender_email", "noreply@travelbrain.ai"),
         )
 
     def _send_email_sync(
@@ -123,25 +140,29 @@ class SMTPMailer(MailerInterface):
             return False
 
     async def send_magic_link(self, email: str, token_or_url: str) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         subject = "Your TravelBrain Secure Magic Link Login"
-        body = f"Use the following secure link to log in to your account:\n\n{token_or_url}\n\nThis link expires in 15 minutes."
+        body = f"Use the following secure link to log in to your account:\n\n{abs_url}\n\nThis link expires in 15 minutes."
         return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
     async def send_email_verification(self, email: str, token_or_url: str) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         subject = "Verify Your TravelBrain Account Email"
-        body = f"Please verify your email address by clicking the link below:\n\n{token_or_url}\n\nThis link expires in 24 hours."
+        body = f"Please verify your email address by clicking the link below:\n\n{abs_url}\n\nThis link expires in 24 hours."
         return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
     async def send_account_recovery(self, email: str, token_or_url: str) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         subject = "TravelBrain Account Password Reset & Recovery Request"
-        body = f"A password reset request was initiated for your account.\n\nUse the link below to set a new password:\n\n{token_or_url}\n\nThis link expires in 30 minutes."
+        body = f"A password reset request was initiated for your account.\n\nUse the link below to set a new password:\n\n{abs_url}\n\nThis link expires in 30 minutes."
         return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
     async def send_invitation(
-        self, email: str, token: str, org_id: str, role: str
+        self, email: str, token_or_url: str, org_id: str, role: str
     ) -> bool:
+        abs_url = build_absolute_url(token_or_url)
         subject = f"Invitation to Join Organization {org_id} on TravelBrain"
-        body = f"You have been invited to join organization '{org_id}' with role '{role}'.\n\nUse your invitation token to accept:\n{token}\n\nThis invitation expires in 7 days."
+        body = f"You have been invited to join organization '{org_id}' with role '{role}'.\n\nUse the following link to accept your invitation:\n{abs_url}\n\nThis invitation expires in 7 days."
         return await asyncio.to_thread(self._send_email_sync, email, subject, body)
 
 
@@ -159,5 +180,8 @@ def get_mailer() -> MailerInterface:
     return _mailer_instance
 
 
-async def send_invitation_email(email: str, token: str, org_id: str, role: str) -> bool:
-    get_mailer()
+async def send_invitation_email(
+    email: str, token_or_url: str, org_id: str, role: str
+) -> bool:
+    mailer = get_mailer()
+    return await mailer.send_invitation(email, token_or_url, org_id, role)

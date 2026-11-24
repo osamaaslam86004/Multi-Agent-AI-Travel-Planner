@@ -292,6 +292,16 @@ async def init_identity_schema(conn: Any) -> None:
     CREATE INDEX IF NOT EXISTS idx_scim_users_org ON scim_users (org_id);
     CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments (user_id);
 
+    CREATE INDEX IF NOT EXISTS idx_user_profiles_email_lower ON user_profiles ((LOWER(email)));
+    CREATE INDEX IF NOT EXISTS idx_user_profiles_tenant ON user_profiles (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_login_history_user_time ON login_history (user_id, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_federated_identities_user ON federated_identities (user_id);
+    CREATE INDEX IF NOT EXISTS idx_org_invitations_email ON org_invitations ((LOWER(email)));
+    CREATE INDEX IF NOT EXISTS idx_scim_users_org ON scim_users (org_id);
+    CREATE INDEX IF NOT EXISTS idx_scim_groups_org ON scim_groups (org_id);
+    CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments (user_id);
+    CREATE INDEX IF NOT EXISTS idx_org_memberships_user ON org_memberships (user_id);
+
     """
     async with conn.cursor() as cur:
         await cur.execute(ddl)
@@ -1411,11 +1421,7 @@ async def db_can_access_trip(
         ):
             expiry = delegation.get("expires_at")
             try:
-                expires_at = (
-                    datetime.fromisoformat(str(expiry))
-                    if expiry
-                    else None
-                )
+                expires_at = datetime.fromisoformat(str(expiry)) if expiry else None
             except ValueError:
                 expires_at = None
             if expires_at and expires_at > datetime.now(UTC):
@@ -1909,8 +1915,6 @@ async def db_delete_all_sessions(user_id: str) -> int:
 
 
 # --- Added P0 Identity & Session Helpers ---
-
-
 async def db_get_user_roles_for_org(
     user_id: str, org_id: str, tenant_id: str = "default"
 ) -> list[str]:
@@ -1937,8 +1941,12 @@ async def db_get_user_roles_for_org(
                 )
                 rows = await cur.fetchall()
                 for role_name, scope_type, scope_id in rows:
-                    if scope_type == "platform" or scope_type == "organization" and scope_id == org_id or scope_type == "tenant" and (
-                        scope_id == tenant_id or not scope_id
+                    if (
+                        scope_type == "platform"
+                        or scope_type == "organization"
+                        and scope_id == org_id
+                        or scope_type == "tenant"
+                        and (scope_id == tenant_id or not scope_id)
                     ):
                         roles.add(role_name)
                 await cur.execute(
@@ -1972,7 +1980,6 @@ async def db_get_user_roles_for_org(
             for pr in p.roles:
                 if pr.lower() in ("platform_owner", "platform_administrator", "admin"):
                     roles.add(pr)
-
     if not roles:
         roles.add("member")
     return list(roles)
@@ -2130,3 +2137,41 @@ async def db_delete_cancellation_token(token_hash: str) -> None:
             await conn.commit()
     else:
         _in_memory_db.get("cancellation_tokens", {}).pop(token_hash, None)
+
+
+async def db_list_scim_tokens(org_id: str) -> list[dict[str, Any]]:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT token_id, org_id, created_at FROM scim_tokens WHERE org_id = %s ORDER BY created_at DESC;",
+                    (org_id,),
+                )
+                rows = await cur.fetchall()
+                return [
+                    {"token_id": r[0], "org_id": r[1], "created_at": str(r[2])}
+                    for r in rows
+                ]
+    return [
+        t
+        for t in _in_memory_db.get("scim_tokens", {}).values()
+        if t.get("org_id") == org_id
+    ]
+
+
+async def db_delete_scim_token(token_id: str, org_id: str) -> bool:
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM scim_tokens WHERE token_id = %s AND org_id = %s;",
+                (token_id, org_id),
+            )
+            await conn.commit()
+            return cur.rowcount > 0
+    scim_toks = _in_memory_db.get("scim_tokens", {})
+    if token_id in scim_toks and scim_toks[token_id].get("org_id") == org_id:
+        del scim_toks[token_id]
+        return True
+    return False

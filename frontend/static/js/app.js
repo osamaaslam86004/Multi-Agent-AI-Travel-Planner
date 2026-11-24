@@ -1,11 +1,10 @@
+
 /* TravelBrain AI Frontend — Multi-Agent Planning, Session & Security Management */
 (function () {
   "use strict";
-
   var $ = function (id) {
     return document.getElementById(id);
   };
-
   var conversation = $("conversation");
   var hero = $("hero");
   var input = $("input");
@@ -22,12 +21,10 @@
   var logoutAllBtn = $("logoutAllBtn");
   var mfaCodeInput = $("mfaCodeInput");
   var submitMfaBtn = $("submitMfaBtn");
-
   var csrfToken = "";
   var userSession = null;
   var currentEventSource = null;
   var mfaChallengeToken = null;
-
   function showToast(msg) {
     var toast = $("toast");
     if (!toast) return;
@@ -39,7 +36,6 @@
       toast.hidden = true;
     }, 3000);
   }
-
   function initSession() {
     if (statusBtn && statusText) {
       statusBtn.setAttribute("data-state", "checking");
@@ -66,7 +62,6 @@
         }
       });
   }
-
   /* Safe rendering of security events without innerHTML concatenation */
   function loadSecurityEvents() {
     if (!securityEventsList) return;
@@ -77,16 +72,13 @@
       .then(function (data) {
         var events = data.security_events || [];
         securityEventsList.textContent = "";
-
         if (events.length === 0) {
           securityEventsList.textContent = "No security events recorded.";
           return;
         }
-
         var ul = document.createElement("ul");
         ul.style.paddingLeft = "16px";
         ul.style.margin = "0";
-
         events.slice(0, 10).forEach(function (e) {
           var li = document.createElement("li");
           var dateStr = (e.timestamp || "").split("T")[0];
@@ -100,31 +92,25 @@
           }
           ul.appendChild(li);
         });
-
         securityEventsList.appendChild(ul);
       })
       .catch(function () {
         securityEventsList.textContent = "Sign in to view security log.";
       });
   }
-
   /* Planning Stream and Render Logic */
   function startPlanning(queryText) {
     if (!queryText || !queryText.trim()) return;
-
     if (hero) hero.hidden = true;
     if (sendBtn) sendBtn.disabled = true;
-
     var userBubble = document.createElement("div");
     userBubble.className = "msg msg-user";
     userBubble.textContent = queryText;
     conversation.appendChild(userBubble);
-
     var agentBubble = document.createElement("div");
     agentBubble.className = "msg msg-agent";
     agentBubble.textContent = "Gathering requirements and starting multi-agent planning…";
     conversation.appendChild(agentBubble);
-
     fetch("/api/v1/plan", {
       method: "POST",
       headers: {
@@ -147,13 +133,11 @@
         if (sendBtn) sendBtn.disabled = false;
       });
   }
-
   function connectSSE(url, targetElem) {
     if (currentEventSource) {
       currentEventSource.close();
     }
     currentEventSource = new EventSource(url);
-
     currentEventSource.onmessage = function (event) {
       try {
         var data = JSON.parse(event.data);
@@ -169,13 +153,11 @@
         targetElem.textContent = event.data;
       }
     };
-
     currentEventSource.onerror = function () {
       currentEventSource.close();
       if (sendBtn) sendBtn.disabled = false;
     };
   }
-
   if (composer && input) {
     composer.addEventListener("submit", function (e) {
       e.preventDefault();
@@ -184,7 +166,6 @@
       startPlanning(val);
     });
   }
-
   if (securityBtn && securityModal && securityModalScrim) {
     securityBtn.addEventListener("click", function () {
       securityModal.hidden = false;
@@ -199,7 +180,6 @@
     if (doneSecurityModal) doneSecurityModal.addEventListener("click", closeModal);
     securityModalScrim.addEventListener("click", closeModal);
   }
-
   if (submitMfaBtn && mfaCodeInput) {
     submitMfaBtn.addEventListener("click", function () {
       var code = mfaCodeInput.value.trim();
@@ -230,7 +210,6 @@
         });
     });
   }
-
   if (logoutAllBtn) {
     logoutAllBtn.addEventListener("click", function () {
       fetch("/api/v1/users/me/logout-all", {
@@ -243,5 +222,5 @@
         });
     });
   }
-
   initSession();
+  

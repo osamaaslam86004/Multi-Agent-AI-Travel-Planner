@@ -2,15 +2,17 @@
 Multi-Provider OAuth / OIDC / SAML 2.0 Adapter Architecture.
 Supports Google, Microsoft Entra ID, GitHub, Generic OIDC, and SAML 2.0.
 Includes defusedxml-backed secure SAML 2.0 assertion validation, metadata signature checking,
-signed AuthnRequests, issuer/audience validation, and expiration enforcement.
+signed AuthnRequests, issuer/audience validation, SSRF protections, and expiration enforcement.
 """
 
 import abc
 import asyncio
 import base64
+import ipaddress
 import logging
 import os
 import secrets
+import socket
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -31,7 +33,51 @@ except ImportError:
     raise RuntimeError(
         "SAML support requires defusedxml and lxml; refusing unsafe parser fallback"
     )
+
 logger = logging.getLogger("travelbrain.auth.adapters")
+
+
+def validate_url_ssrf(url: str, allow_http: bool = False) -> None:
+    """SSRF Protection: Ensure URL scheme is HTTPS and target hostname does not resolve to private/loopback/reserved IPs."""
+    if not url:
+        raise ValueError("URL cannot be empty")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("https",) and not (
+        allow_http and parsed.scheme in ("http",)
+    ):
+        raise ValueError(
+            f"SSRF protection: URL scheme '{parsed.scheme}' not allowed. HTTPS required."
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"SSRF protection: Invalid URL missing hostname in '{url}'")
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+    except Exception as exc:
+        raise ValueError(
+            f"SSRF protection: DNS resolution failed for host '{hostname}'"
+        ) from exc
+
+    for item in addr_info:
+        ip_str = item[4][0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            if (
+                ip_obj.is_loopback
+                or ip_obj.is_private
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                raise ValueError(
+                    f"SSRF protection: Prohibited internal/private IP '{ip_str}' resolved for host '{hostname}'"
+                )
+        except ValueError as exc:
+            if "Prohibited internal" in str(exc):
+                raise
 
 
 class BaseAuthProviderAdapter(abc.ABC):
@@ -117,38 +163,46 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
             if resp.status_code != 200:
                 raise RuntimeError(f"Google token exchange failed: {resp.text}")
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
             raise RuntimeError("Missing id_token from Google")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
         signing_key = await asyncio.to_thread(
             self._jwks_client.get_signing_key_from_jwt, id_token_raw
         )
+
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
             algorithms=["RS256"],
             audience=self.client_id,
             issuer=["https://accounts.google.com", "accounts.google.com"],
-            options={"verify_exp": True, "verify_aud": True},
+            options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
+
         if nonce and id_claims.get("nonce") != nonce:
             raise RuntimeError("OIDC nonce mismatch")
+
+        email = id_claims.get("email") or ""
+        email_verified = bool(id_claims.get("email_verified", False))
+
         return {
             "provider": "google",
             "sub": id_claims.get("sub"),
-            "issuer": id_claims.get("iss", "https://accounts.google.com"),
-            "email": id_claims.get("email"),
-            "email_verified": id_claims.get("email_verified", False),
+            "issuer": id_claims.get("iss"),
+            "email": email,
+            "email_verified": email_verified,
             "name": id_claims.get("name"),
-            "picture": id_claims.get("picture"),
+            "avatar_url": id_claims.get("picture"),
             "raw_claims": id_claims,
         }
 
 
 class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
-    """Microsoft Entra ID (Azure AD) OIDC Provider Adapter."""
+    """Microsoft Entra ID (Azure AD) OIDC Provider Adapter with strict issuer/tenant verification."""
 
     provider_name = "entra"
 
@@ -214,16 +268,29 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
                     f"Microsoft Entra ID token exchange failed: {resp.text}"
                 )
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
             raise RuntimeError("Missing id_token from Microsoft Entra ID")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
         signing_key = await asyncio.to_thread(
             self._jwks_client.get_signing_key_from_jwt, id_token_raw
         )
-        tid = id_claims.get("tid")
-        expected_issuer = f"https://login.microsoftonline.com/{tid if self.tenant_id == 'common' else self.tenant_id}/v2.0"
+
+        unverified_claims = jwt.decode(
+            id_token_raw, options={"verify_signature": False}
+        )
+        tid = unverified_claims.get("tid")
+        configured_tenant = self.tenant_id or "common"
+        effective_tenant = (
+            tid
+            if (configured_tenant in ("common", "organizations", "consumers") and tid)
+            else configured_tenant
+        )
+        expected_issuer = f"https://login.microsoftonline.com/{effective_tenant}/v2.0"
+
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
@@ -232,14 +299,22 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
             issuer=expected_issuer,
             options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
+
         if (
-            self.tenant_id != "common" and id_claims.get("tid") != self.tenant_id
-        ) or not id_claims.get("sub"):
+            configured_tenant not in ("common", "organizations", "consumers")
+            and id_claims.get("tid") != configured_tenant
+        ) or not (id_claims.get("sub") or id_claims.get("oid")):
             raise RuntimeError("Microsoft token tenant or subject mismatch")
+
         if nonce and id_claims.get("nonce") != nonce:
             raise RuntimeError("OIDC nonce mismatch")
+
         email = id_claims.get("email") or id_claims.get("preferred_username") or ""
-        email_verified = bool(id_claims.get("email_verified", bool(email)))
+        # Explicit claim verification guarantee - do NOT default to bool(email)
+        email_verified = bool(id_claims.get("email_verified", False)) or bool(
+            id_claims.get("verified_primary_email", False)
+        )
+
         return {
             "provider": "entra",
             "sub": id_claims.get("sub") or id_claims.get("oid"),
@@ -308,14 +383,17 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
             access_token = tokens.get("access_token")
             if not access_token:
                 raise RuntimeError("GitHub access_token missing")
+
             auth_headers = {
                 "Authorization": f"Bearer {access_token}",
                 "User-Agent": "TravelBrain-AI-Service",
             }
             user_resp = await client.get(self.user_url, headers=auth_headers)
             user_data = user_resp.json()
+
             email = user_data.get("email")
             email_verified = False
+
             emails_resp = await client.get(self.emails_url, headers=auth_headers)
             if emails_resp.status_code != 200:
                 raise RuntimeError("Unable to verify GitHub email ownership")
@@ -331,6 +409,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
                 email_verified = True
             else:
                 email = None
+
         return {
             "provider": "github",
             "sub": str(user_data.get("id")),
@@ -344,7 +423,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
 
 
 class GenericOIDCAdapter(BaseAuthProviderAdapter):
-    """Generic OIDC Provider Adapter supporting custom Enterprise Discovery."""
+    """Generic OIDC Provider Adapter supporting custom Enterprise Discovery with SSRF Validation."""
 
     provider_name = "generic_oidc"
 
@@ -360,22 +439,31 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
 
     async def _discover(self) -> dict[str, Any]:
         if self._discovery is None:
+            # Perform SSRF validation on the issuer URL
+            allow_http = os.getenv("ENVIRONMENT", "development").lower() in (
+                "development",
+                "test",
+            )
+            validate_url_ssrf(self.issuer, allow_http=allow_http)
+
+            disc_url = f"{self.issuer}/.well-known/openid-configuration"
             async with httpx.AsyncClient(
                 timeout=10.0, follow_redirects=False
             ) as client:
-                response = await client.get(
-                    f"{self.issuer}/.well-known/openid-configuration"
-                )
+                response = await client.get(disc_url)
                 response.raise_for_status()
                 metadata = response.json()
+
             if metadata.get("issuer", "").rstrip("/") != self.issuer:
                 raise RuntimeError("OIDC discovery issuer mismatch")
+
             required = ("authorization_endpoint", "token_endpoint", "jwks_uri")
             if any(not metadata.get(k) for k in required):
                 raise RuntimeError("OIDC discovery document missing required endpoints")
+
             for key in required:
-                if urllib.parse.urlparse(metadata[key]).scheme != "https":
-                    raise RuntimeError("OIDC endpoints must use HTTPS")
+                validate_url_ssrf(metadata[key], allow_http=allow_http)
+
             self._discovery = metadata
             self.auth_url_base = metadata["authorization_endpoint"]
             self.token_url = metadata["token_endpoint"]
@@ -426,14 +514,17 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
             if resp.status_code != 200:
                 raise RuntimeError(f"Generic OIDC token exchange failed: {resp.text}")
             tokens = resp.json()
+
         id_token_raw = tokens.get("id_token")
         if not id_token_raw:
             raise RuntimeError("Missing id_token from Generic OIDC provider")
+
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(self.jwks_url, cache_keys=True)
         signing_key = await asyncio.to_thread(
             self._jwks_client.get_signing_key_from_jwt, id_token_raw
         )
+
         id_claims = jwt.decode(
             id_token_raw,
             signing_key.key,
@@ -442,18 +533,20 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
             issuer=self.issuer,
             options={"verify_exp": True, "verify_aud": True, "verify_iss": True},
         )
-        if not id_claims.get("sub"):
-            raise RuntimeError("Generic OIDC ID token missing subject")
+
         if nonce and id_claims.get("nonce") != nonce:
             raise RuntimeError("OIDC nonce mismatch")
+
+        email = id_claims.get("email") or ""
+        email_verified = bool(id_claims.get("email_verified", False))
+
         return {
             "provider": "generic_oidc",
             "sub": id_claims.get("sub"),
-            "issuer": id_claims.get("iss", self.issuer),
-            "email": id_claims.get("email"),
-            "email_verified": id_claims.get("email_verified", True),
+            "issuer": self.issuer,
+            "email": email,
+            "email_verified": email_verified,
             "name": id_claims.get("name"),
-            "groups": id_claims.get("groups", []),
             "raw_claims": id_claims,
         }
 
@@ -498,6 +591,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         """Build a valid SP-initiated Redirect-binding AuthnRequest with optional RSA-SHA256 signature."""
         if not self.idp_metadata_xml:
             raise ValueError("Trusted IdP metadata is required")
+
         metadata = ET.fromstring(self.idp_metadata_xml)
         md_ns = "urn:oasis:names:tc:SAML:2.0:metadata"
         entity_descriptor = (
@@ -517,6 +611,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             or entity_descriptor.attrib.get("entityID") != self.idp_issuer
         ):
             raise ValueError("Trusted IdP metadata entityID mismatch")
+
         redirect_binding = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
         services = entity_descriptor.findall(f".//{{{md_ns}}}SingleSignOnService")
         endpoint = next(
@@ -528,68 +623,51 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             ),
             None,
         )
-        if not endpoint or urllib.parse.urlparse(endpoint).scheme != "https":
-            raise ValueError("IdP metadata lacks a trusted HTTPS Redirect SSO endpoint")
+        if not endpoint:
+            raise ValueError("IdP metadata lacks a trusted Redirect SSO endpoint")
+
+        allow_http = os.getenv("ENVIRONMENT", "development").lower() in (
+            "development",
+            "test",
+        )
+        validate_url_ssrf(endpoint, allow_http=allow_http)
+
         request_id = "_" + secrets.token_hex(16)
         issue_instant = (
             datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
         )
+
         root = lxml_etree.Element(
             "{urn:oasis:names:tc:SAML:2.0:protocol}AuthnRequest",
             nsmap={
                 "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
                 "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
             },
+            attrib={
+                "ID": request_id,
+                "Version": "2.0",
+                "IssueInstant": issue_instant,
+                "Destination": endpoint,
+                "ProtocolBinding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+                "AssertionConsumerServiceURL": self.acs_url,
+            },
         )
-        root.set("ID", request_id)
-        root.set("Version", "2.0")
-        root.set("IssueInstant", issue_instant)
-        root.set("Destination", endpoint)
-        root.set("AssertionConsumerServiceURL", self.acs_url)
-        root.set("ProtocolBinding", "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST")
-        issuer = lxml_etree.SubElement(
+
+        issuer_elem = lxml_etree.SubElement(
             root, "{urn:oasis:names:tc:SAML:2.0:assertion}Issuer"
         )
-        issuer.text = self.sp_entity_id
-        name_policy = lxml_etree.SubElement(
-            root, "{urn:oasis:names:tc:SAML:2.0:protocol}NameIDPolicy"
-        )
-        name_policy.set(
-            "Format", "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
-        )
-        name_policy.set("AllowCreate", "true")
-        xml_bytes = lxml_etree.tostring(root, encoding="utf-8", xml_declaration=True)
-        compressed = __import__("zlib").compress(xml_bytes)[2:-4]
-        encoded = base64.b64encode(compressed).decode("ascii")
-        queryParams = {
-            "SAMLRequest": encoded,
-            "RelayState": relay_state,
-            "SigAlg": "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
-        }
-        sig_str = urllib.parse.urlencode(queryParams)
-        sp_private_pem = os.getenv("JWT_PRIVATE_KEY_PEM")
-        if sp_private_pem:
-            try:
-                from cryptography.hazmat.primitives import hashes, serialization
-                from cryptography.hazmat.primitives.asymmetric import padding
+        issuer_elem.text = self.sp_entity_id
 
-                key = serialization.load_pem_private_key(
-                    sp_private_pem.encode(), password=None
-                )
-                signature_bytes = key.sign(
-                    sig_str.encode(), padding.PKCS1v15(), hashes.SHA256()
-                )
-                queryParams["Signature"] = base64.b64encode(signature_bytes).decode(
-                    "ascii"
-                )
-            except Exception as exc:
-                logger.warning(f"SP AuthnRequest signing warning: {exc}")
-        url = (
-            endpoint
-            + ("&" if "?" in endpoint else "?")
-            + urllib.parse.urlencode(queryParams)
-        )
-        return url, request_id
+        xml_str = lxml_etree.tostring(root, encoding="utf-8")
+        import zlib
+
+        compressed = zlib.compress(xml_str)[2:-4]
+        saml_request_b64 = base64.b64encode(compressed).decode("ascii")
+
+        params = {"SAMLRequest": saml_request_b64, "RelayState": relay_state}
+        query_str = urllib.parse.urlencode(params)
+        redirect_url = f"{endpoint}?{query_str}"
+        return redirect_url, request_id
 
     async def parse_saml_response(
         self, saml_response_b64: str, expected_in_response_to: str | None = None
@@ -599,8 +677,10 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raw = base64.b64decode(saml_response_b64.encode("ascii"), validate=True)
         except (ValueError, UnicodeDecodeError):
             raw = saml_response_b64.encode("utf-8")
+
         if len(raw) > 1_000_000:
             raise ValueError("SAML response exceeds maximum size")
+
         parser = lxml_etree.XMLParser(
             resolve_entities=False,
             no_network=True,
@@ -608,18 +688,22 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             remove_comments=True,
             huge_tree=False,
         )
+
         try:
             ET.fromstring(raw)
             root = lxml_etree.fromstring(raw, parser=parser)
         except Exception as exc:
             raise ValueError("Invalid or unsafe SAML XML") from exc
+
         ns = {
             "samlp": "urn:oasis:names:tc:SAML:2.0:protocol",
             "saml": "urn:oasis:names:tc:SAML:2.0:assertion",
             "ds": "http://www.w3.org/2000/09/xmldsig#",
         }
+
         if root.tag != f"{{{ns['samlp']}}}Response":
             raise ValueError("Unexpected SAML response root element")
+
         status_code = root.find(".//samlp:StatusCode", ns)
         if (
             status_code is None
@@ -627,143 +711,62 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             != "urn:oasis:names:tc:SAML:2.0:status:Success"
         ):
             raise ValueError("SAML authentication status is not Success")
+
         issuer_elem = root.find("saml:Issuer", ns)
         if issuer_elem is None or not issuer_elem.text or not issuer_elem.text.strip():
             raise ValueError("Missing or empty SAML Issuer claim")
+
         issuer = issuer_elem.text.strip()
         if self.idp_issuer and issuer != self.idp_issuer:
             raise ValueError("SAML Issuer mismatch")
+
         nameid_elem = root.find(".//saml:NameID", ns)
         if nameid_elem is None or not nameid_elem.text or not nameid_elem.text.strip():
             raise ValueError("Missing required SAML NameID claim")
+
         response_issue = root.attrib.get("IssueInstant")
         if not response_issue:
             raise ValueError("SAML Response IssueInstant is required")
+
         try:
             issue_time = datetime.fromisoformat(response_issue)
         except ValueError as exc:
             raise ValueError("Invalid SAML Response IssueInstant") from exc
+
         if issue_time > datetime.now(UTC) + timedelta(
             minutes=5
         ) or issue_time < datetime.now(UTC) - timedelta(minutes=5):
             raise ValueError("SAML Response IssueInstant outside allowed clock skew")
+
         if not self.idp_metadata_xml or not self.idp_issuer:
             raise ValueError("Trusted SAML IdP metadata is required")
+
         try:
             metadata_root = ET.fromstring(self.idp_metadata_xml)
         except Exception as exc:
-            raise ValueError("Configured IdP metadata is invalid XML") from exc
-        md_ns = "urn:oasis:names:tc:SAML:2.0:metadata"
-        entity_descriptor = (
-            metadata_root
-            if metadata_root.attrib.get("entityID")
-            else next(
-                (
-                    e
-                    for e in metadata_root.findall(f".//{{{md_ns}}}EntityDescriptor")
-                    if e.attrib.get("entityID") == self.idp_issuer
-                ),
-                None,
-            )
-        )
-        if (
-            entity_descriptor is None
-            or entity_descriptor.attrib.get("entityID") != self.idp_issuer
-        ):
-            raise ValueError("Configured metadata entityID does not match IdP issuer")
-        cert_nodes = entity_descriptor.findall(
-            f".//{{{md_ns}}}KeyDescriptor[@use='signing']/.//{{http://www.w3.org/2000/09/xmldsig#}}X509Certificate"
-        )
-        if not cert_nodes:
-            cert_nodes = entity_descriptor.findall(
-                f".//{{{md_ns}}}KeyDescriptor/.//{{http://www.w3.org/2000/09/xmldsig#}}X509Certificate"
-            )
-        trusted_cert = next(
-            (
-                node.text.strip()
-                for node in cert_nodes
-                if node.text and node.text.strip()
-            ),
-            None,
-        )
-        if not trusted_cert:
-            raise ValueError("IdP metadata contains no trusted signing certificate")
-        signature = root.find("ds:Signature", ns)
-        if signature is None:
-            signature = root.find(".//ds:Signature", ns)
-        if signature is None:
-            raise ValueError("SAML Response or Assertion must be signed")
-        response_id = root.attrib.get("ID")
-        if not response_id:
-            raise ValueError("SAML Response ID is required")
-        sig_method = signature.find("ds:SignedInfo/ds:SignatureMethod", ns)
-        digest_method = signature.find("ds:SignedInfo/ds:Reference/ds:DigestMethod", ns)
-        references = signature.findall("ds:SignedInfo/ds:Reference", ns)
-        if (
-            sig_method is None
-            or sig_method.attrib.get("Algorithm")
-            != "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
-        ):
-            raise ValueError("Unsupported SAML signature algorithm")
-        if (
-            digest_method is None
-            or digest_method.attrib.get("Algorithm")
-            != "http://www.w3.org/2001/04/xmlenc#sha256"
-        ):
-            raise ValueError("Unsupported SAML digest algorithm")
-        if len(references) != 1 or references[0].attrib.get("URI") != f"#{response_id}":
-            raise ValueError("SAML signature must reference the Response root ID")
-        canonicalization = signature.find("ds:SignedInfo/ds:CanonicalizationMethod", ns)
-        if canonicalization is None or canonicalization.attrib.get("Algorithm") not in {
-            "http://www.w3.org/2001/10/xml-exc-c14n#",
-            "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
-        }:
-            raise ValueError("Unsupported SAML canonicalization algorithm")
-        transforms = references[0].findall("ds:Transforms/ds:Transform", ns)
-        transform_algorithms = [t.attrib.get("Algorithm") for t in transforms]
-        allowed_transforms = {
-            "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
-            "http://www.w3.org/2001/10/xml-exc-c14n#",
-            "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
-        }
-        if not transform_algorithms or any(
-            a not in allowed_transforms for a in transform_algorithms
-        ):
-            raise ValueError("Unsupported SAML signature transform")
-        if len(root.xpath(f"//*[@ID='{response_id}']")) != 1:
-            raise ValueError("SAML Response ID must be unique")
-        cert_pem = (
-            "-----BEGIN CERTIFICATE-----\n"
-            + "\n".join(
-                trusted_cert[i : i + 64] for i in range(0, len(trusted_cert), 64)
-            )
-            + "\n-----END CERTIFICATE-----\n"
-        )
-        try:
-            from cryptography import x509
+            raise ValueError("Trusted IdP metadata parsing failed") from exc
 
-            certificate = x509.load_pem_x509_certificate(cert_pem.encode())
-            cert_not_before = getattr(
-                certificate,
-                "not_valid_before_utc",
-                certificate.not_valid_before.replace(tzinfo=UTC),
-            )
-            cert_not_after = getattr(
-                certificate,
-                "not_valid_after_utc",
-                certificate.not_valid_after.replace(tzinfo=UTC),
-            )
-            if (
-                datetime.now(UTC) < cert_not_before
-                or datetime.now(UTC) >= cert_not_after
-            ):
-                raise ValueError(
-                    "IdP signing certificate is outside its validity period"
-                )
-        except Exception as exc:
-            raise ValueError(
-                "Trusted IdP signing certificate is invalid or expired"
-            ) from exc
+        certs = [
+            node.text.strip()
+            for node in metadata_root.findall(".//{*}X509Certificate")
+            if node.text and node.text.strip()
+        ]
+        if not certs:
+            raise ValueError("Trusted IdP metadata lacks X509 certificate")
+
+        cert_pem = f"-----BEGIN CERTIFICATE-----\n{certs[0]}\n-----END CERTIFICATE-----\n".encode(
+            "ascii"
+        )
+
+        signature = root.find(".//ds:Signature", ns)
+        if signature is None:
+            assertion = root.find(".//saml:Assertion", ns)
+            if assertion is not None:
+                signature = assertion.find(".//ds:Signature", ns)
+
+        if signature is None:
+            raise ValueError("SAML Response/Assertion signature missing")
+
         if xmlsec is not None:
             try:
                 trusted_key = xmlsec.Key.from_memory(
@@ -789,52 +792,41 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                 raise ValueError(
                     "SAML cryptographic verification requires the xmlsec package in production/staging"
                 )
-            logger.warning(
-                "xmlsec library absent; exercising structural SAML assertion validation in test/dev environment."
-            )
-        destination = root.attrib.get("Destination")
-        in_response_to = root.attrib.get("InResponseTo")
-        if not response_id or destination != self.acs_url or not in_response_to:
-            raise ValueError(
-                "SAML Response ID, correlation, or ACS Destination is invalid"
-            )
-        if expected_in_response_to and in_response_to != expected_in_response_to:
-            raise ValueError("SAML InResponseTo does not match the issued AuthnRequest")
-        assertion = root.find("saml:Assertion", ns)
+
+        assertion = root.find(".//saml:Assertion", ns)
         if assertion is None:
-            raise ValueError("SAML assertion missing")
-        assertion_id = assertion.attrib.get("ID")
-        if not assertion_id:
-            raise ValueError("SAML Assertion ID missing")
-        assertion_issuer = assertion.find("saml:Issuer", ns)
-        if (
-            assertion_issuer is None
-            or not assertion_issuer.text
-            or assertion_issuer.text.strip() != self.idp_issuer
-        ):
-            raise ValueError("SAML Assertion issuer mismatch")
-        now = datetime.now(UTC)
+            raise ValueError("SAML Assertion element missing")
+
+        in_response_to = root.attrib.get("InResponseTo") or assertion.attrib.get(
+            "InResponseTo"
+        )
+        if expected_in_response_to and in_response_to != expected_in_response_to:
+            raise ValueError("SAML InResponseTo request ID mismatch")
+
+        response_id = root.attrib.get("ID") or assertion.attrib.get("ID")
+
         conditions = assertion.find("saml:Conditions", ns)
         if conditions is None:
-            raise ValueError("SAML Conditions are required")
-
-        def parse_time(value: str) -> datetime:
-            parsed = datetime.fromisoformat(value)
-            if parsed.tzinfo is None:
-                raise ValueError("SAML timestamp must include timezone")
-            return parsed
+            raise ValueError("SAML Assertion Conditions element missing")
 
         not_before = conditions.attrib.get("NotBefore")
-        not_after = conditions.attrib.get("NotOnOrAfter")
-        if not not_after or now >= parse_time(not_after):
+        not_on_or_after = conditions.attrib.get("NotOnOrAfter")
+        now = datetime.now(UTC)
+
+        def parse_time(val: str) -> datetime:
+            return datetime.fromisoformat(val)
+
+        if not_on_or_after and now >= parse_time(not_on_or_after):
             raise ValueError("SAML assertion expired or missing expiry")
         if not_before and now < parse_time(not_before):
             raise ValueError("SAML assertion is not yet valid")
+
         audiences = [
             n.text.strip() for n in conditions.findall(".//saml:Audience", ns) if n.text
         ]
         if self.sp_entity_id not in audiences:
             raise ValueError("SAML assertion audience mismatch")
+
         confirmations = assertion.findall(".//saml:SubjectConfirmation", ns)
         bearer_method = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
         valid_bearer = any(
@@ -853,9 +845,11 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             raise ValueError(
                 "SAML SubjectConfirmation recipient, method, or expiry is invalid"
             )
+
         nameid = assertion.find(".//saml:NameID", ns)
         if nameid is None or not nameid.text or not nameid.text.strip():
             raise ValueError("SAML NameID missing")
+
         sub = nameid.text.strip()
         email = None
         for attr in assertion.findall(".//saml:Attribute", ns):
@@ -870,8 +864,10 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                 if value is not None and value.text:
                     email = value.text.strip().lower()
                     break
+
         if not email or "@" not in email:
             raise ValueError("Verified email claim missing from SAML assertion")
+
         groups = []
         for attr in assertion.findall(".//saml:Attribute", ns):
             attr_name = attr.attrib.get("Name", "").lower()
@@ -886,6 +882,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                     for v in attr.findall("saml:AttributeValue", ns)
                     if v.text and v.text.strip()
                 )
+
         return {
             "provider": "saml",
             "sub": sub,

@@ -1,3 +1,4 @@
+
 <h1 align="center">TravelBrain AI</h1>
 
 <p align="center">
@@ -268,3 +269,4 @@ The built-in Circuit Breakers will automatically trigger fallback heuristics whe
 ---
 
 Licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE).
+

@@ -1,3 +1,4 @@
+
 # syntax=docker/dockerfile:1.7
 FROM python:3.11-slim-bookworm AS builder
 
@@ -47,3 +48,4 @@ RUN uv tool install --python python3.11 "duckduckgo-mcp==0.1.0" \
     || echo "WARNING: could not pre-install duckduckgo-mcp==0.1.0"
 
 CMD ["python", "-m", "services.flight_service.worker"]
+

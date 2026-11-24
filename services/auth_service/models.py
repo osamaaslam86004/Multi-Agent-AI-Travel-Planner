@@ -5,7 +5,7 @@ Pydantic models for Auth, User Account Lifecycle, Multi-Provider Auth, RBAC, and
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +114,44 @@ class ProfileUpdateRequest(BaseModel):
     bio: str | None = Field(None, max_length=500)
     timezone: str | None = Field(None, max_length=50)
     preferred_currency: str | None = Field(None, max_length=10)
+
+    @field_validator("avatar_url")
+    @classmethod
+    def validate_avatar_url(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        v_clean = v.strip()
+        if not (
+            v_clean.startswith(("https://", "http://localhost"))
+        ):
+            raise ValueError("Avatar URL must start with https://")
+        return v_clean
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        v_clean = v.strip()
+        try:
+            import zoneinfo
+
+            zoneinfo.ZoneInfo(v_clean)
+        except Exception:
+            raise ValueError(f"Invalid IANA timezone '{v_clean}'")
+        return v_clean
+
+    @field_validator("preferred_currency")
+    @classmethod
+    def validate_currency(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        v_clean = v.strip().upper()
+        import re
+
+        if not re.match(r"^[A-Z]{3}$", v_clean):
+            raise ValueError(f"Invalid ISO 4217 currency code '{v_clean}'")
+        return v_clean
 
 
 class AccountStatusChangeRequest(BaseModel):
@@ -439,3 +477,12 @@ class SCIMPatchRequest(BaseModel):
         default_factory=lambda: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
     )
     Operations: list[SCIMPatchOperation] = Field(min_length=1, max_length=100)
+
+
+class SCIMErrorSchema(BaseModel):
+    schemas: list[str] = Field(
+        default_factory=lambda: ["urn:ietf:params:scim:api:messages:2.0:Error"]
+    )
+    status: str
+    scimType: str | None = None
+    detail: str

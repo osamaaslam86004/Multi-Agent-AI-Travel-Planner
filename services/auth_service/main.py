@@ -10,13 +10,14 @@ import json
 import logging
 import secrets
 import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from services.auth_service.adapters import (
     GenericOIDCAdapter,
@@ -71,6 +72,7 @@ from services.auth_service.models import (
 from services.auth_service.rbac import ROLES_CATALOG, policy_registry
 from services.auth_service.security import (
     assess_suspicious_login,
+    async_hash_password,
     compute_device_fingerprint,
     decode_refresh_token,
     decode_signed_token,
@@ -108,12 +110,15 @@ from services.common.auth_middleware import (
     require_reauth,
 )
 from services.common.db import (
+    close_db_pool,
     db_assign_role,
+    db_delete_scim_token,
     db_get_federated_identity,
     db_get_scim_token_by_hash,
     db_get_user_by_email,
     db_get_user_org_memberships,
     db_get_user_password,
+    db_list_scim_tokens,
     db_revoke_role,
     db_save_delegated_permission,
     db_save_scim_token,
@@ -121,6 +126,8 @@ from services.common.db import (
     db_save_user_password,
     db_upsert_user_profile,
     get_trip_by_id,
+    init_db_pool,
+    init_identity_schema,
 )
 from services.common.mailer import get_mailer
 from services.core.config import get_settings
@@ -129,10 +136,48 @@ from services.shared.redis_client import get_redis_client
 logger = logging.getLogger("travelbrain.auth_service")
 _settings = get_settings()
 ENVIRONMENT = _settings.app.environment.lower()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing Auth & Identity Service dependencies...")
+    try:
+        from services.common.telemetry import (
+            configure_structured_logging,
+            setup_telemetry,
+        )
+
+        configure_structured_logging()
+        setup_telemetry(service_name="auth-service")
+    except Exception as exc:
+        logger.warning(f"Telemetry initialization warning: {exc}")
+
+    try:
+        pool = await init_db_pool()
+        if pool is not None:
+            async with pool.connection() as conn:
+                init_identity_schema(conn)
+    except Exception as exc:
+        logger.warning(f"Database initialization warning: {exc}")
+
+    try:
+        r = await get_redis_client()
+        if r is not None:
+            await r.ping()
+    except Exception as exc:
+        logger.warning(f"Redis initialization warning: {exc}")
+
+    yield
+
+    logger.info("Shutting down Auth & Identity Service dependencies...")
+    await close_db_pool()
+
+
 app = FastAPI(
     title="TravelBrain Enterprise Auth & Identity Service",
     version="2.0.0",
     docs_url="/docs" if ENVIRONMENT == "development" else None,
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -1269,7 +1314,7 @@ async def confirm_account_recovery(req: AccountRecoveryConfirmRequest):
             status_code=400, detail="Invalid or expired account recovery token."
         )
     user_id = profile.user_id
-    new_hash = hash_password(req.new_password)
+    new_hash = await async_hash_password(req.new_password)
     await db_save_user_password(user_id, new_hash)
     await lifecycle_service.logout_all_devices(user_id)
     return {"status": "success", "detail": "Password successfully updated."}
@@ -1847,9 +1892,118 @@ async def verify_scim_token(request: Request, authorization: str = Header(None))
 
 
 SCIMAuthDep = Depends(verify_scim_token)
-
-
 # SCIM 2.0 Endpoints
+
+
+# ---------------------------------------------------------------------------
+# SCIM 2.0 Discovery & Service Provider Configuration Endpoints (RFC 7643 / 7644)
+# ---------------------------------------------------------------------------
+@app.get("/scim/v2/ServiceProviderConfig")
+async def scim_service_provider_config():
+    return JSONResponse(
+        content={
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
+            "documentationUri": f"{_settings.auth.public_base_url}/docs/scim",
+            "patch": {"supported": True},
+            "bulk": {
+                "supported": False,
+                "maxOperations": 1000,
+                "maxPayloadSize": 1048576,
+            },
+            "filter": {"supported": True, "maxResults": 200},
+            "changePassword": {"supported": True},
+            "sort": {"supported": True},
+            "etag": {"supported": True},
+            "authenticationSchemes": [
+                {
+                    "name": "OAuth Bearer Token",
+                    "description": "Authentication scheme using SCIM Bearer Tokens",
+                    "specUri": "http://www.rfc-editor.org/info/rfc6750",
+                    "type": "oauthbearertoken",
+                    "primary": True,
+                }
+            ],
+        },
+        headers={"Content-Type": "application/scim+json"},
+    )
+
+
+@app.get("/scim/v2/ResourceTypes")
+async def scim_resource_types():
+    return JSONResponse(
+        content={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+            "totalResults": 2,
+            "Resources": [
+                {
+                    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ResourceType"],
+                    "id": "User",
+                    "name": "User",
+                    "endpoint": "/scim/v2/Users",
+                    "description": "User Account Resource",
+                    "schema": "urn:ietf:params:scim:schemas:core:2.0:User",
+                },
+                {
+                    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ResourceType"],
+                    "id": "Group",
+                    "name": "Group",
+                    "endpoint": "/scim/v2/Groups",
+                    "description": "Group Resource",
+                    "schema": "urn:ietf:params:scim:schemas:core:2.0:Group",
+                },
+            ],
+        },
+        headers={"Content-Type": "application/scim+json"},
+    )
+
+
+@app.get("/scim/v2/Schemas")
+async def scim_schemas():
+    return JSONResponse(
+        content={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+            "totalResults": 2,
+            "Resources": [
+                {
+                    "id": "urn:ietf:params:scim:schemas:core:2.0:User",
+                    "name": "User",
+                    "description": "Core User Schema",
+                },
+                {
+                    "id": "urn:ietf:params:scim:schemas:core:2.0:Group",
+                    "name": "Group",
+                    "description": "Core Group Schema",
+                },
+            ],
+        },
+        headers={"Content-Type": "application/scim+json"},
+    )
+
+
+@app.get("/api/v1/orgs/{org_id}/scim-tokens")
+async def list_org_scim_tokens(org_id: str, user: CurrentUserDep):
+    if "organization_owner" not in user.roles and "platform_owner" not in user.roles:
+        raise HTTPException(
+            status_code=403, detail="Insufficient authorization to list SCIM tokens."
+        )
+    tokens = await db_list_scim_tokens(org_id)
+    return {"tokens": tokens}
+
+
+@app.delete("/api/v1/orgs/{org_id}/scim-tokens/{token_id}")
+async def revoke_org_scim_token(
+    org_id: str, token_id: str, user: CurrentUserDep, reauth: ReauthDep
+):
+    if "organization_owner" not in user.roles and "platform_owner" not in user.roles:
+        raise HTTPException(
+            status_code=403, detail="Insufficient authorization to revoke SCIM tokens."
+        )
+    deleted = await db_delete_scim_token(token_id, org_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="SCIM token not found.")
+    return {"status": "revoked", "token_id": token_id}
+
+
 @app.get("/scim/v2/Users", response_model=SCIMListResponse)
 async def scim_list_users(
     request: Request,
