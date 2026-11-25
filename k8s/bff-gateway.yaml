@@ -38,7 +38,7 @@ spec:
                 name: travelbrain-config
           env:
             - name: POSTGRES_HOST
-              value: "postgres"
+              value: "postgres-service.travelbrain.svc.cluster.local"
             - name: POSTGRES_PORT
               value: "5432"
             - name: POSTGRES_DB

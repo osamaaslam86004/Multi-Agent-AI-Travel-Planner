@@ -335,6 +335,35 @@
       <div class="modal-body">
         <section class="cred">
           <div class="cred-head">
+            <span class="cred-label">Account Sign In</span>
+          </div>
+          <div
+            class="cred-field"
+            style="display: flex; gap: 8px; flex-wrap: wrap"
+          >
+            <input
+              type="email"
+              id="loginEmailInput"
+              class="cred-input"
+              placeholder="Email address"
+            />
+            <input
+              type="password"
+              id="loginPasswordInput"
+              class="cred-input"
+              placeholder="Password"
+            />
+            <button
+              class="btn btn-primary btn-sm"
+              id="loginSubmitBtn"
+              type="button"
+            >
+              Sign In
+            </button>
+          </div>
+        </section>
+        <section class="cred">
+          <div class="cred-head">
             <span class="cred-label">Linked Identity Providers</span>
           </div>
           <p class="cred-hint">
@@ -384,6 +413,62 @@
               type="button"
             >
               Verify MFA
+            </button>
+          </div>
+        </section>
+        <section class="cred">
+          <div class="cred-head">
+            <span class="cred-label">Active Sessions</span>
+          </div>
+          <div
+            id="activeSessionsList"
+            style="font-size: 12.5px; max-height: 120px; overflow-y: auto"
+          >
+            Loading active sessions...
+          </div>
+        </section>
+        <section class="cred">
+          <div class="cred-head">
+            <span class="cred-label">Enterprise IdP Configuration</span>
+          </div>
+          <div
+            class="cred-field"
+            style="display: flex; gap: 8px; flex-wrap: wrap"
+          >
+            <input
+              type="text"
+              id="idpOrgIdInput"
+              class="cred-input"
+              placeholder="Org ID"
+            />
+            <input
+              type="text"
+              id="idpNameInput"
+              class="cred-input"
+              placeholder="IdP Name (e.g. okta)"
+            />
+            <select id="idpTypeSelect" class="cred-input">
+              <option value="oidc">OIDC</option>
+              <option value="saml">SAML 2.0</option>
+            </select>
+            <input
+              type="text"
+              id="idpIssuerInput"
+              class="cred-input"
+              placeholder="Issuer URL"
+            />
+            <input
+              type="text"
+              id="idpClientIdInput"
+              class="cred-input"
+              placeholder="Client ID"
+            />
+            <button
+              class="btn btn-primary btn-sm"
+              id="saveIdpBtn"
+              type="button"
+            >
+              Save IdP
             </button>
           </div>
         </section>

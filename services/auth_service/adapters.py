@@ -4,6 +4,7 @@ Supports Google, Microsoft Entra ID, GitHub, Generic OIDC, and SAML 2.0.
 Includes defusedxml-backed secure SAML 2.0 assertion validation, metadata signature checking,
 signed AuthnRequests, issuer/audience validation, SSRF protections, and expiration enforcement.
 """
+
 import abc
 import asyncio
 import base64
@@ -23,6 +24,7 @@ from jwt import PyJWKClient
 try:
     import defusedxml.ElementTree as ET
     from lxml import etree as lxml_etree
+
     try:
         import xmlsec
     except ImportError:
@@ -32,6 +34,8 @@ except ImportError:
         "SAML support requires defusedxml and lxml; refusing unsafe parser fallback"
     )
 logger = logging.getLogger("travelbrain.auth.adapters")
+
+
 def validate_url_ssrf(url: str, allow_http: bool = False) -> None:
     """SSRF Protection: Ensure URL scheme is HTTPS and target hostname does not resolve to private/loopback/reserved IPs."""
     if not url:
@@ -70,9 +74,13 @@ def validate_url_ssrf(url: str, allow_http: bool = False) -> None:
         except ValueError as exc:
             if "Prohibited internal" in str(exc):
                 raise
+
+
 class BaseAuthProviderAdapter(abc.ABC):
     """Abstract Base Class for Identity Provider Adapters."""
+
     provider_name: str = "base"
+
     @abc.abstractmethod
     async def get_auth_url(
         self,
@@ -82,6 +90,7 @@ class BaseAuthProviderAdapter(abc.ABC):
         nonce: str | None = None,
     ) -> str:
         pass
+
     @abc.abstractmethod
     async def exchange_code(
         self,
@@ -91,9 +100,13 @@ class BaseAuthProviderAdapter(abc.ABC):
         nonce: str | None = None,
     ) -> dict[str, Any]:
         pass
+
+
 class GoogleOAuthAdapter(BaseAuthProviderAdapter):
     """Google OIDC Provider Adapter."""
+
     provider_name = "google"
+
     def __init__(self, client_id: str = "", client_secret: str = ""):
         self.client_id = client_id or os.getenv("GOOGLE_CLIENT_ID", "")
         self.client_secret = client_secret or os.getenv("GOOGLE_CLIENT_SECRET", "")
@@ -101,6 +114,7 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
         self.token_url = "https://oauth2.googleapis.com/token"
         self.jwks_url = "https://www.googleapis.com/oauth2/v3/certs"
         self._jwks_client: PyJWKClient | None = None
+
     async def get_auth_url(
         self,
         state: str,
@@ -123,6 +137,7 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
         if nonce:
             params["nonce"] = nonce
         return f"{self.auth_url_base}?{urllib.parse.urlencode(params)}"
+
     async def exchange_code(
         self,
         code: str,
@@ -174,9 +189,13 @@ class GoogleOAuthAdapter(BaseAuthProviderAdapter):
             "avatar_url": id_claims.get("picture"),
             "raw_claims": id_claims,
         }
+
+
 class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
     """Microsoft Entra ID (Azure AD) OIDC Provider Adapter with strict issuer/tenant verification."""
+
     provider_name = "entra"
+
     def __init__(
         self, client_id: str = "", client_secret: str = "", tenant_id: str = "common"
     ):
@@ -193,6 +212,7 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
             f"https://login.microsoftonline.com/{self.tenant_id}/discovery/v2.0/keys"
         )
         self._jwks_client: PyJWKClient | None = None
+
     async def get_auth_url(
         self,
         state: str,
@@ -214,6 +234,7 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
         if nonce:
             params["nonce"] = nonce
         return f"{self.auth_url_base}?{urllib.parse.urlencode(params)}"
+
     async def exchange_code(
         self,
         code: str,
@@ -287,9 +308,13 @@ class MicrosoftEntraAdapter(BaseAuthProviderAdapter):
             "groups": id_claims.get("groups", []),
             "raw_claims": id_claims,
         }
+
+
 class GitHubOAuthAdapter(BaseAuthProviderAdapter):
     """GitHub OAuth Provider Adapter."""
+
     provider_name = "github"
+
     def __init__(self, client_id: str = "", client_secret: str = ""):
         self.client_id = client_id or os.getenv("GITHUB_CLIENT_ID", "")
         self.client_secret = client_secret or os.getenv("GITHUB_CLIENT_SECRET", "")
@@ -297,6 +322,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
         self.token_url = "https://github.com/login/oauth/access_token"
         self.user_url = "https://api.github.com/user"
         self.emails_url = "https://api.github.com/user/emails"
+
     async def get_auth_url(
         self,
         state: str,
@@ -314,6 +340,7 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
             params["code_challenge"] = code_challenge
             params["code_challenge_method"] = "S256"
         return f"{self.auth_url_base}?{urllib.parse.urlencode(params)}"
+
     async def exchange_code(
         self,
         code: str,
@@ -371,9 +398,13 @@ class GitHubOAuthAdapter(BaseAuthProviderAdapter):
             "avatar_url": user_data.get("avatar_url"),
             "raw_claims": user_data,
         }
+
+
 class GenericOIDCAdapter(BaseAuthProviderAdapter):
     """Generic OIDC Provider Adapter supporting custom Enterprise Discovery with SSRF Validation."""
+
     provider_name = "generic_oidc"
+
     def __init__(self, issuer: str, client_id: str, client_secret: str):
         self.issuer = issuer.rstrip("/")
         self.client_id = client_id
@@ -383,6 +414,7 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
         self.jwks_url = ""
         self._jwks_client: PyJWKClient | None = None
         self._discovery: dict[str, Any] | None = None
+
     async def _discover(self) -> dict[str, Any]:
         if self._discovery is None:
             # Perform SSRF validation on the issuer URL
@@ -410,6 +442,7 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
             self.token_url = metadata["token_endpoint"]
             self.jwks_url = metadata["jwks_uri"]
         return self._discovery
+
     async def get_auth_url(
         self,
         state: str,
@@ -431,6 +464,7 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
         if nonce:
             params["nonce"] = nonce
         return f"{self.auth_url_base}?{urllib.parse.urlencode(params)}"
+
     async def exchange_code(
         self,
         code: str,
@@ -482,9 +516,13 @@ class GenericOIDCAdapter(BaseAuthProviderAdapter):
             "name": id_claims.get("name"),
             "raw_claims": id_claims,
         }
+
+
 class SAML2Adapter(BaseAuthProviderAdapter):
     """SAML 2.0 Enterprise SSO Adapter with defusedxml parsing, signature verification, and assertion validation."""
+
     provider_name = "saml"
+
     def __init__(
         self,
         sp_entity_id: str,
@@ -496,6 +534,23 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         self.acs_url = acs_url
         self.idp_metadata_xml = idp_metadata_xml
         self.idp_issuer = idp_issuer
+
+    @staticmethod
+    def generate_sp_metadata(sp_entity_id: str, acs_url: str) -> str:
+        safe_entity = html_escape(sp_entity_id, quote=True)
+        safe_acs = html_escape(acs_url, quote=True)
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{safe_entity}">'
+            '<md:SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" '
+            'protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">'
+            "<md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat>"
+            '<md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
+            f'Location="{safe_acs}" index="1"/>'
+            "</md:SPSSODescriptor>"
+            "</md:EntityDescriptor>"
+        )
+
     async def get_auth_url(
         self,
         state: str,
@@ -505,6 +560,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
     ) -> str:
         url, _ = self.build_authn_request(state)
         return url
+
     async def exchange_code(
         self,
         code: str,
@@ -513,6 +569,7 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         nonce: str | None = None,
     ) -> dict[str, Any]:
         return await self.parse_saml_response(code)
+
     def build_authn_request(self, relay_state: str) -> tuple[str, str]:
         """Build a valid SP-initiated Redirect-binding AuthnRequest with optional RSA-SHA256 signature."""
         if not self.idp_metadata_xml:
@@ -579,12 +636,14 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         issuer_elem.text = self.sp_entity_id
         xml_str = lxml_etree.tostring(root, encoding="utf-8")
         import zlib
+
         compressed = zlib.compress(xml_str)[2:-4]
         saml_request_b64 = base64.b64encode(compressed).decode("ascii")
         params = {"SAMLRequest": saml_request_b64, "RelayState": relay_state}
         query_str = urllib.parse.urlencode(params)
         redirect_url = f"{endpoint}?{query_str}"
         return redirect_url, request_id
+
     async def parse_saml_response(
         self, saml_response_b64: str, expected_in_response_to: str | None = None
     ) -> dict[str, Any]:
@@ -657,13 +716,24 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         cert_pem = f"-----BEGIN CERTIFICATE-----\n{certs[0]}\n-----END CERTIFICATE-----\n".encode(
             "ascii"
         )
-        signature = root.find(".//ds:Signature", ns)
+        assertions = root.findall(".//saml:Assertion", ns)
+        if len(assertions) != 1:
+            raise ValueError("SAML Response must contain exactly one Assertion")
+        assertion = assertions[0]
+        signature = root.find("ds:Signature", ns)
+        signed_target = root
         if signature is None:
-            assertion = root.find(".//saml:Assertion", ns)
-            if assertion is not None:
-                signature = assertion.find(".//ds:Signature", ns)
+            signature = assertion.find("ds:Signature", ns)
+            signed_target = assertion
         if signature is None:
             raise ValueError("SAML Response/Assertion signature missing")
+        target_id = signed_target.attrib.get("ID")
+        ref_node = signature.find(".//ds:Reference", ns)
+        ref_uri = ref_node.attrib.get("URI", "") if ref_node is not None else ""
+        if target_id and ref_uri and ref_uri != f"#{target_id}":
+            raise ValueError(
+                "SAML XML Signature Wrapping (XSW) detected: Reference URI mismatch"
+            )
         if xmlsec is not None:
             try:
                 trusted_key = xmlsec.Key.from_memory(
@@ -681,17 +751,9 @@ class SAML2Adapter(BaseAuthProviderAdapter):
                     "SAML Response cryptographic signature verification failed"
                 ) from exc
         else:
-            if (
-                os.getenv("ENVIRONMENT", "development").lower()
-                in ("production", "staging")
-                and os.getenv("ALLOW_UNVERIFIED_SAML_TESTS", "").lower() != "true"
-            ):
-                raise ValueError(
-                    "SAML cryptographic verification requires the xmlsec package in production/staging"
-                )
-        assertion = root.find(".//saml:Assertion", ns)
-        if assertion is None:
-            raise ValueError("SAML Assertion element missing")
+            raise ValueError(
+                "SAML cryptographic verification requires the xmlsec package"
+            )
         in_response_to = root.attrib.get("InResponseTo") or assertion.attrib.get(
             "InResponseTo"
         )
@@ -704,8 +766,10 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         not_before = conditions.attrib.get("NotBefore")
         not_on_or_after = conditions.attrib.get("NotOnOrAfter")
         now = datetime.now(UTC)
+
         def parse_time(val: str) -> datetime:
             return datetime.fromisoformat(val)
+
         if not_on_or_after and now >= parse_time(not_on_or_after):
             raise ValueError("SAML assertion expired or missing expiry")
         if not_before and now < parse_time(not_before):
@@ -777,23 +841,31 @@ class SAML2Adapter(BaseAuthProviderAdapter):
             "in_response_to": in_response_to,
             "raw_xml": raw.decode("utf-8", errors="replace"),
         }
+
+
 class ProviderRegistry:
     """Registry for dynamically managing Identity Provider Adapters."""
+
     def __init__(self):
         self._adapters: dict[str, BaseAuthProviderAdapter] = {}
         self.register(GoogleOAuthAdapter())
         self.register(MicrosoftEntraAdapter())
         self.register(GitHubOAuthAdapter())
+
     def register(self, adapter: BaseAuthProviderAdapter):
         self._adapters[adapter.provider_name] = adapter
+
     def register_generic_oidc(
         self, issuer: str, client_id: str, client_secret: str
     ) -> GenericOIDCAdapter:
         adapter = GenericOIDCAdapter(issuer, client_id, client_secret)
         self.register(adapter)
         return adapter
+
     def get_adapter(self, provider_name: str) -> BaseAuthProviderAdapter:
         if provider_name not in self._adapters:
             raise ValueError(f"Unsupported Identity Provider: {provider_name}")
         return self._adapters[provider_name]
+
+
 provider_registry = ProviderRegistry()

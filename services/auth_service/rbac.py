@@ -3,6 +3,7 @@ Authorization Architecture, Role-Based Access Control (RBAC), and Policy Registr
 Defines platform, organization, tenant, and resource-level roles, permission inheritance,
 role rank hierarchy, escalation ceiling checks, and trip resource access control.
 """
+
 import logging
 
 from fastapi import HTTPException, status
@@ -118,13 +119,19 @@ ROLE_RANKS: dict[str, int] = {
     "viewer": 10,
     "google_verified": 10,
 }
+
+
 def get_role_rank(role_name: str) -> int:
     r_clean = role_name.lower().strip().replace(" ", "_")
     return ROLE_RANKS.get(r_clean, 0)
+
+
 def get_max_caller_rank(caller_roles: list[str]) -> int:
     if not caller_roles:
         return 0
     return max([get_role_rank(r) for r in caller_roles])
+
+
 def validate_role_assignment(
     caller_roles: list[str],
     target_role: str,
@@ -188,13 +195,18 @@ def validate_role_assignment(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cross-organization role assignment is prohibited.",
                 )
+
+
 class AuthorizationPolicyRegistry:
     """Policy engine for role hierarchy, permission expansion, and resource access evaluation."""
+
     def __init__(self):
         self.roles = ROLES_CATALOG
+
     def resolve_effective_permissions(self, user_roles: list[str]) -> set[str]:
         effective: set[str] = set()
         visited: set[str] = set()
+
         def _expand(role_key: str):
             r_clean = role_key.lower().strip().replace(" ", "_")
             if r_clean in visited:
@@ -206,9 +218,11 @@ class AuthorizationPolicyRegistry:
             effective.update(role_def.permissions)
             for parent in role_def.inherits:
                 _expand(parent)
+
         for r in user_roles:
             _expand(r)
         return effective
+
     def has_permission(self, user_roles: list[str], required_permission: str) -> bool:
         effective = self.resolve_effective_permissions(user_roles)
         if "*" in effective:
@@ -217,6 +231,7 @@ class AuthorizationPolicyRegistry:
             return True
         domain_prefix = required_permission.split(":")[0]
         return f"{domain_prefix}:*" in effective
+
     def can_access_trip(
         self,
         user_id: str,
@@ -240,3 +255,6 @@ class AuthorizationPolicyRegistry:
             elif required_action == "admin":
                 return perm_level == "admin"
         return False
+
+
+policy_registry = AuthorizationPolicyRegistry()

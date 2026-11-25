@@ -81,7 +81,13 @@
         events.slice(0, 10).forEach(function (e) {
           var li = document.createElement("li");
           var dateStr = (e.timestamp || "").split("T")[0];
-          li.textContent = dateStr + " - " + (e.provider || "Direct") + " (" + (e.ip_address || "unknown") + ")";
+          li.textContent =
+            dateStr +
+            " - " +
+            (e.provider || "Direct") +
+            " (" +
+            (e.ip_address || "unknown") +
+            ")";
           if (e.suspicious) {
             var tag = document.createElement("strong");
             tag.style.color = "var(--rose, #ff4d4d)";
@@ -108,7 +114,8 @@
     conversation.appendChild(userBubble);
     var agentBubble = document.createElement("div");
     agentBubble.className = "msg msg-agent";
-    agentBubble.textContent = "Gathering requirements and starting multi-agent planning…";
+    agentBubble.textContent =
+      "Gathering requirements and starting multi-agent planning…";
     conversation.appendChild(agentBubble);
     fetch("/api/v1/plan", {
       method: "POST",
@@ -124,7 +131,7 @@
       })
       .then(function (data) {
         var cid = data.correlation_id;
-        var sseUrl = data.sse_url || ("/api/v1/events/stream/" + cid);
+        var sseUrl = data.sse_url || "/api/v1/events/stream/" + cid;
         connectSSE(sseUrl, agentBubble);
       })
       .catch(function (err) {
@@ -143,7 +150,10 @@
         if (data.message) {
           targetElem.textContent = data.message;
         }
-        if (data.stage === "completed" || data.stage === "synthesis_completed") {
+        if (
+          data.stage === "completed" ||
+          data.stage === "synthesis_completed"
+        ) {
           currentEventSource.close();
           if (sendBtn) sendBtn.disabled = false;
           showToast("Trip itinerary successfully generated!");
@@ -175,8 +185,10 @@
       securityModal.hidden = true;
       securityModalScrim.hidden = true;
     };
-    if (closeSecurityModal) closeSecurityModal.addEventListener("click", closeModal);
-    if (doneSecurityModal) doneSecurityModal.addEventListener("click", closeModal);
+    if (closeSecurityModal)
+      closeSecurityModal.addEventListener("click", closeModal);
+    if (doneSecurityModal)
+      doneSecurityModal.addEventListener("click", closeModal);
     securityModalScrim.addEventListener("click", closeModal);
   }
   if (submitMfaBtn && mfaCodeInput) {
@@ -189,7 +201,10 @@
       };
       fetch("/api/v1/auth/mfa/verify", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
         body: JSON.stringify(payload),
       })
         .then(function (res) {
@@ -214,11 +229,11 @@
       fetch("/api/v1/users/me/logout-all", {
         method: "POST",
         headers: { "X-CSRF-Token": csrfToken },
-      })
-        .then(function () {
-          showToast("All active sessions revoked.");
-          initSession();
-        });
+      }).then(function () {
+        showToast("All active sessions revoked.");
+        initSession();
+      });
     });
   }
   initSession();
+})();

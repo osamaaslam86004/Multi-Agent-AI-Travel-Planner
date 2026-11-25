@@ -1,6 +1,7 @@
 """
 Pydantic models for Auth, User Account Lifecycle, Multi-Provider Auth, RBAC, and Enterprise Identity (SCIM/SSO).
 """
+
 from enum import Enum
 from typing import Any
 
@@ -14,14 +15,20 @@ class UserLoginRequest(BaseModel):
     email: str
     password: str
     tenant_id: str = "default"
+
+
 class GoogleTokenExchangeRequest(BaseModel):
     code: str
     redirect_uri: str
     state: str
     code_verifier: str | None = None
+
+
 class GoogleAuthUrlResponse(BaseModel):
     auth_url: str
     state: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str | None = None
@@ -37,12 +44,20 @@ class TokenResponse(BaseModel):
     mfa_required: bool = False
     mfa_challenge_token: str | None = None
     mfa_methods: list[str] | None = None
+
+
 class TokenRefreshRequest(BaseModel):
     refresh_token: str
+
+
 class TokenRevokeRequest(BaseModel):
     token: str
+
+
 class SessionRevokeRequest(BaseModel):
     session_id: str = Field(..., min_length=8, max_length=128)
+
+
 class JWKKey(BaseModel):
     kty: str = "RSA"
     use: str = "sig"
@@ -50,8 +65,12 @@ class JWKKey(BaseModel):
     kid: str
     n: str
     e: str
+
+
 class JWKSResponse(BaseModel):
     keys: list[JWKKey]
+
+
 # ---------------------------------------------------------------------------
 # Section 2.1: User Account Lifecycle Models
 # ---------------------------------------------------------------------------
@@ -61,11 +80,15 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
     PENDING_DELETION = "pending_deletion"
     DELETED = "deleted"
+
+
 class LinkedProviderInfo(BaseModel):
     provider: str
     provider_user_id: str
     email: str | None = None
     linked_at: str
+
+
 class UserProfile(BaseModel):
     user_id: str
     email: str
@@ -81,25 +104,29 @@ class UserProfile(BaseModel):
     email_verified: bool = False
     mfa_enabled: bool = False
     linked_providers: list[LinkedProviderInfo] = Field(default_factory=list)
+    deletion_requested_at: str | None = None
+    deletion_scheduled_at: str | None = None
     created_at: str
     updated_at: str
+
+
 class ProfileUpdateRequest(BaseModel):
     display_name: str | None = Field(None, max_length=100)
     avatar_url: str | None = Field(None, max_length=500)
     bio: str | None = Field(None, max_length=500)
     timezone: str | None = Field(None, max_length=50)
     preferred_currency: str | None = Field(None, max_length=10)
+
     @field_validator("avatar_url")
     @classmethod
     def validate_avatar_url(cls, v: str | None) -> str | None:
         if v is None or not v.strip():
             return None
         v_clean = v.strip()
-        if not (
-            v_clean.startswith(("https://", "http://localhost"))
-        ):
+        if not (v_clean.startswith(("https://", "http://localhost"))):
             raise ValueError("Avatar URL must start with https://")
         return v_clean
+
     @field_validator("timezone")
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
@@ -108,10 +135,12 @@ class ProfileUpdateRequest(BaseModel):
         v_clean = v.strip()
         try:
             import zoneinfo
+
             zoneinfo.ZoneInfo(v_clean)
         except Exception:
             raise ValueError(f"Invalid IANA timezone '{v_clean}'")
         return v_clean
+
     @field_validator("preferred_currency")
     @classmethod
     def validate_currency(cls, v: str | None) -> str | None:
@@ -119,23 +148,34 @@ class ProfileUpdateRequest(BaseModel):
             return None
         v_clean = v.strip().upper()
         import re
+
         if not re.match(r"^[A-Z]{3}$", v_clean):
             raise ValueError(f"Invalid ISO 4217 currency code '{v_clean}'")
         return v_clean
+
+
 class AccountStatusChangeRequest(BaseModel):
     user_id: str | None = None
     status: AccountStatus
     reason: str | None = None
+
+
 class AccountRecoveryRequest(BaseModel):
     email: str
+
+
 class AccountRecoveryConfirmRequest(BaseModel):
     token: str
     new_password: str = Field(..., min_length=12)
+
+
 class LinkProviderRequest(BaseModel):
     provider: str
     code: str = Field(..., min_length=1, max_length=4096)
     state: str = Field(..., min_length=16, max_length=256)
     redirect_uri: str = Field(..., min_length=8, max_length=2048)
+
+
 class LoginHistoryEntry(BaseModel):
     id: str
     user_id: str
@@ -146,6 +186,8 @@ class LoginHistoryEntry(BaseModel):
     status: str  # success / failed
     suspicious: bool = False
     details: str | None = None
+
+
 class ActiveSessionResponse(BaseModel):
     session_id: str
     user_id: str
@@ -157,8 +199,12 @@ class ActiveSessionResponse(BaseModel):
     last_active_at: str
     expires_at: str
     is_current: bool = False
+
+
 class RevokeSessionRequest(BaseModel):
     session_id: str
+
+
 # ---------------------------------------------------------------------------
 # Section 2.2: Authentication Enhancement Models
 # ---------------------------------------------------------------------------
@@ -168,58 +214,90 @@ class MultiProviderLoginRequest(BaseModel):
     redirect_uri: str
     state: str
     code_verifier: str | None = None
+
+
 class MagicLinkRequest(BaseModel):
     email: str
+
+
 class MagicLinkVerifyRequest(BaseModel):
     token: str
+
+
 class EmailVerifyRequest(BaseModel):
     token: str
+
+
 class TOTPSetupResponse(BaseModel):
     secret: str
     otpauth_url: str
     qr_code_payload: str
     backup_codes: list[str]
+
+
 class TOTPVerifyRequest(BaseModel):
     code: str
+
+
 class MFAChallengeRequest(BaseModel):
     mfa_token: str
     code: str
+
+
 class MFAVerifyLoginRequest(BaseModel):
     mfa_challenge_token: str
     totp_code: str | None = None
     backup_code: str | None = None
+
+
 class ReauthRequest(BaseModel):
     password: str | None = None
     mfa_code: str | None = None
     action: str = Field(..., min_length=3, max_length=128)
+
+
 class ReauthResponse(BaseModel):
     sudo_token: str
     expires_in: int = 900
+
+
 class DeviceTrustRequest(BaseModel):
     device_fingerprint: str
     device_name: str | None = None
     trust_device: bool = True
+
+
 class InvitationCreateRequest(BaseModel):
     email: str
     org_id: str
     role: str = "member"
     expires_in_days: int = 7
+
+
 class InvitationResponse(BaseModel):
-    token: str
+    token: str | None = None
     email: str
     org_id: str
     role: str
     expires_at: str
+
+
 class InvitationAcceptRequest(BaseModel):
     token: str
     password: str | None = None
     display_name: str | None = None
+
+
 class OrgMembershipResponse(BaseModel):
     org_id: str
     role: str
     created_at: str
+
+
 class SwitchOrgRequest(BaseModel):
     org_id: str
+
+
 class SecurityEventResponse(BaseModel):
     id: str
     user_id: str
@@ -229,6 +307,8 @@ class SecurityEventResponse(BaseModel):
     user_agent: str
     suspicious: bool
     details: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Section 2.3: Authorization Architecture (RBAC & Permissions)
 # ---------------------------------------------------------------------------
@@ -238,45 +318,63 @@ class RoleDefinition(BaseModel):
     description: str
     inherits: list[str] = Field(default_factory=list)
     permissions: list[str] = Field(default_factory=list)
+
+
 class PermissionDefinition(BaseModel):
     name: str
     category: str
     description: str
+
+
 class RoleAssignmentRequest(BaseModel):
     user_id: str
     role: str
     org_id: str | None = None
     tenant_id: str = "default"
+
+
 class RoleRevocationRequest(BaseModel):
     user_id: str
     role: str
     org_id: str | None = None
+
+
 class ResourcePermissionCheckRequest(BaseModel):
     resource_type: str  # trip, organization, tenant
     resource_id: str
     action: str  # read, write, delete, share, manage
+
+
 class TripShareRequest(BaseModel):
     trip_id: str
     grantee_id: str
     permission_level: str  # read, write, admin
     expires_at: str | None = None
+
+
 class DelegatedPermissionRequest(BaseModel):
     delegate_user_id: str
     resource_type: str
     resource_id: str
     permissions: list[str]
     expires_at: str
+
+
 # ---------------------------------------------------------------------------
 # Section 2.4: Enterprise Identity & SCIM 2.0 Models
 # ---------------------------------------------------------------------------
 class OrgSSODiscoveryRequest(BaseModel):
     email: str
+
+
 class OrgSSODiscoveryResponse(BaseModel):
     org_id: str
     org_name: str
     sso_enforced: bool
     sso_type: str  # oidc, saml
     login_url: str
+
+
 class IdPConfigRequest(BaseModel):
     org_id: str
     idp_name: str
@@ -288,6 +386,8 @@ class IdPConfigRequest(BaseModel):
     enforce_sso: bool = False
     allowed_domains: list[str] = Field(default_factory=list)
     group_role_mappings: dict[str, str] = Field(default_factory=dict)
+
+
 class IdPConfigResponse(BaseModel):
     org_id: str
     idp_name: str
@@ -298,24 +398,34 @@ class IdPConfigResponse(BaseModel):
     allowed_domains: list[str]
     group_role_mappings: dict[str, str]
     metadata_xml: str | None = None
+
+
 class SAMLACSRequest(BaseModel):
     SAMLResponse: str
     RelayState: str | None = None
+
+
 # SCIM 2.0 Standard Schemas
 class SCIMName(BaseModel):
     formatted: str | None = None
     familyName: str | None = None
     givenName: str | None = None
+
+
 class SCIMEmail(BaseModel):
     value: str
     type: str = "work"
     primary: bool = True
+
+
 class SCIMMeta(BaseModel):
     resourceType: str
     created: str | None = None
     lastModified: str | None = None
     location: str | None = None
     version: str | None = None
+
+
 class SCIMUserSchema(BaseModel):
     schemas: list[str] = Field(
         default_factory=lambda: ["urn:ietf:params:scim:schemas:core:2.0:User"]
@@ -329,9 +439,13 @@ class SCIMUserSchema(BaseModel):
     active: bool = True
     groups: list[dict[str, Any]] = Field(default_factory=list)
     meta: SCIMMeta | None = None
+
+
 class SCIMMember(BaseModel):
     value: str
     display: str | None = None
+
+
 class SCIMGroupSchema(BaseModel):
     schemas: list[str] = Field(
         default_factory=lambda: ["urn:ietf:params:scim:schemas:core:2.0:Group"]
@@ -340,6 +454,8 @@ class SCIMGroupSchema(BaseModel):
     displayName: str
     members: list[SCIMMember] = Field(default_factory=list)
     meta: SCIMMeta | None = None
+
+
 class SCIMListResponse(BaseModel):
     schemas: list[str] = Field(
         default_factory=lambda: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]
@@ -348,15 +464,21 @@ class SCIMListResponse(BaseModel):
     startIndex: int = 1
     itemsPerPage: int = 100
     Resources: list[Any] = Field(default_factory=list)
+
+
 class SCIMPatchOperation(BaseModel):
     op: str  # add, replace, remove
     path: str | None = None
     value: Any = None
+
+
 class SCIMPatchRequest(BaseModel):
     schemas: list[str] = Field(
         default_factory=lambda: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
     )
     Operations: list[SCIMPatchOperation] = Field(min_length=1, max_length=100)
+
+
 class SCIMErrorSchema(BaseModel):
     schemas: list[str] = Field(
         default_factory=lambda: ["urn:ietf:params:scim:api:messages:2.0:Error"]

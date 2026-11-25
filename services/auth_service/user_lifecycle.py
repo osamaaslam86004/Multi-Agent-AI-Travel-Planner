@@ -3,6 +3,8 @@ User Account Lifecycle Management Service.
 Handles user profiles, account state transitions, identity provider linking,
 login history tracking, active sessions, invitations, grace period soft-deletion, and multi-device logout with database persistence.
 """
+
+import hashlib
 import logging
 import os
 import secrets
@@ -44,10 +46,14 @@ logger = logging.getLogger("travelbrain.auth.user_lifecycle")
 _in_memory_profiles: dict[str, UserProfile] = {}
 _in_memory_login_history: dict[str, list[LoginHistoryEntry]] = {}
 _in_memory_sessions: dict[str, list[dict[str, Any]]] = {}
+
+
 class UserLifecycleService:
     """Core User Profile and Account Lifecycle Service with Postgres persistence."""
+
     def __init__(self, redis_client: Any = None):
         self.redis = redis_client
+
     async def get_or_create_profile(
         self,
         email: str,
@@ -112,7 +118,7 @@ class UserLifecycleService:
                 display_name=display_name or email_clean.split("@")[0].title(),
                 tenant_id=tenant_id,
                 status=AccountStatus.ACTIVE,
-                email_verified=(auth_provider != "direct"),
+                email_verified=(auth_provider not in ("direct", "invitation")),
                 created_at=now_str,
                 updated_at=now_str,
             )
@@ -142,6 +148,7 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
+
     async def get_profile(
         self, user_id: str, tenant_id: str | None = None
     ) -> UserProfile | None:
@@ -176,6 +183,7 @@ class UserLifecycleService:
                 updated_at=user_dict.get("updated_at"),
             )
         return _in_memory_profiles.get(user_id)
+
     async def update_profile(
         self,
         user_id: str,
@@ -202,6 +210,7 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
+
     async def change_account_status(
         self, user_id: str, new_status: AccountStatus, reason: str | None = None
     ) -> UserProfile:
@@ -219,10 +228,21 @@ class UserLifecycleService:
             await self.logout_all_devices(user_id)
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
+        r = await get_redis_client()
+        if r is not None:
+            await r.set(f"user_status:{user_id}", new_status.value)
+        if new_status in (
+            AccountStatus.SUSPENDED,
+            AccountStatus.DEACTIVATED,
+            AccountStatus.DELETED,
+            AccountStatus.PENDING_DELETION,
+        ):
+            await self.logout_all_devices(user_id)
         logger.info(
             f"User '{user_id}' status changed to '{new_status.value}': {reason}"
         )
         return profile
+
     async def schedule_account_deletion(
         self, user_id: str, grace_period_days: int = 30
     ) -> UserProfile:
@@ -232,35 +252,56 @@ class UserLifecycleService:
         now = datetime.now(UTC)
         sched = now + timedelta(days=grace_period_days)
         profile.status = AccountStatus.PENDING_DELETION
+        profile.deletion_requested_at = now.isoformat()
+        profile.deletion_scheduled_at = sched.isoformat()
         profile.updated_at = now.isoformat()
-        p_dict = profile.model_dump()
-        p_dict["deletion_requested_at"] = now.isoformat()
-        p_dict["deletion_scheduled_at"] = sched.isoformat()
-        await db_upsert_user_profile(p_dict)
+        await db_upsert_user_profile(profile.model_dump())
         await self.logout_all_devices(user_id)
         _in_memory_profiles[user_id] = profile
         logger.info(
             f"Scheduled soft-deletion for user '{user_id}' at {sched.isoformat()}"
         )
         return profile
-    async def cancel_account_deletion(self, user_id: str) -> UserProfile:
-        profile = await self.get_profile(user_id)
+
+    async def cancel_account_deletion(
+        self, user_id: str | None = None, cancellation_token: str | None = None
+    ) -> UserProfile:
+        target_uid = user_id
+        if cancellation_token:
+            c_hash = hashlib.sha256(cancellation_token.encode("utf-8")).hexdigest()
+            from services.common.db import (
+                db_delete_cancellation_token,
+                db_get_cancellation_token,
+            )
+
+            c_rec = await db_get_cancellation_token(c_hash)
+            if not c_rec:
+                raise ValueError(
+                    "Invalid or expired account deletion cancellation token"
+                )
+            target_uid = c_rec["user_id"]
+            await db_delete_cancellation_token(c_hash)
+        if not target_uid:
+            raise ValueError(
+                "User ID or cancellation token required to cancel deletion"
+            )
+        profile = await self.get_profile(target_uid)
         if not profile:
-            raise ValueError(f"User profile '{user_id}' not found")
+            raise ValueError(f"User profile '{target_uid}' not found")
         if profile.status != AccountStatus.PENDING_DELETION:
             raise ValueError("Account is not pending deletion")
         profile.status = AccountStatus.ACTIVE
+        profile.deletion_requested_at = None
+        profile.deletion_scheduled_at = None
         profile.updated_at = datetime.now(UTC).isoformat()
-        p_dict = profile.model_dump()
-        p_dict["deletion_requested_at"] = None
-        p_dict["deletion_scheduled_at"] = None
-        await db_upsert_user_profile(p_dict)
-        _in_memory_profiles[user_id] = profile
-        logger.info(f"Cancelled soft-deletion for user '{user_id}'")
+        await db_upsert_user_profile(profile.model_dump())
+        _in_memory_profiles[target_uid] = profile
+        logger.info(f"Cancelled soft-deletion for user '{target_uid}'")
         return profile
+
     async def cleanup_expired_deleted_accounts(self) -> int:
         """Background worker step: hard-deletes & anonymizes accounts past their grace period."""
-        datetime.now(UTC).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         cleaned_count = 0
         pool = await init_db_pool()
         if pool is not None:
@@ -292,12 +333,14 @@ class UserLifecycleService:
             return cleaned_count
         for uid, p in list(_in_memory_profiles.items()):
             if p.status == AccountStatus.PENDING_DELETION:
-                p.status = AccountStatus.DELETED
-                p.display_name = "Deleted User"
-                p.email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
-                p.linked_providers = []
-                cleaned_count += 1
+                if not p.deletion_scheduled_at or p.deletion_scheduled_at <= now_iso:
+                    p.status = AccountStatus.DELETED
+                    p.display_name = "Deleted User"
+                    p.email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
+                    p.linked_providers = []
+                    cleaned_count += 1
         return cleaned_count
+
     async def link_provider(
         self,
         user_id: str,
@@ -333,6 +376,7 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
+
     async def unlink_provider(self, user_id: str, provider: str) -> UserProfile:
         profile = await self.get_profile(user_id)
         if not profile:
@@ -351,6 +395,7 @@ class UserLifecycleService:
         await db_upsert_user_profile(profile.model_dump())
         _in_memory_profiles[user_id] = profile
         return profile
+
     async def create_invitation(
         self,
         email: str,
@@ -371,16 +416,18 @@ class UserLifecycleService:
         # Optionally send invitation email if mailer configured
         try:
             from services.common.mailer import send_invitation_email
+
             await send_invitation_email(email, token, org_id, role)
         except Exception as e:
             logger.warning(f"Could not send invitation email to {email}: {e}")
         return InvitationResponse(
-            token=token,
+            token=None,
             email=email.lower().strip(),
             org_id=org_id,
             role=role,
             expires_at=expires_at,
         )
+
     async def get_invitation(self, token: str) -> dict[str, Any] | None:
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         inv = await db_get_invitation(token_hash)
@@ -395,6 +442,7 @@ class UserLifecycleService:
         if exp and datetime.fromisoformat(str(exp)) < datetime.now(UTC):
             raise ValueError("Invitation token has expired")
         return inv
+
     async def accept_invitation(
         self, token: str, password: str | None = None, display_name: str | None = None
     ) -> UserProfile:
@@ -417,10 +465,15 @@ class UserLifecycleService:
                 )
             else:
                 from services.auth_service.security import hash_password
+
                 await db_save_user_password(profile.user_id, hash_password(password))
         profile.org_id = org_id
-        if role not in profile.roles:
-            profile.roles.append(role)
+        from services.auth_service.rbac import ROLES_CATALOG
+
+        role_def = ROLES_CATALOG.get(role)
+        if role_def and role_def.scope != "organization":
+            if role not in profile.roles:
+                profile.roles.append(role)
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         await db_add_org_membership(profile.user_id, org_id, role)
@@ -428,94 +481,7 @@ class UserLifecycleService:
         await db_accept_invitation(token_hash)
         await db_accept_invitation(token)
         return profile
-    async def schedule_account_deletion(self, user_id: str) -> tuple[UserProfile, str]:
-        profile = await self.get_profile(user_id)
-        if not profile:
-            raise ValueError(f"User profile '{user_id}' not found")
-        now = datetime.now(UTC)
-        scheduled_at = now + timedelta(days=30)
-        profile.status = AccountStatus.PENDING_DELETION
-        profile.deletion_requested_at = now.isoformat()
-        profile.deletion_scheduled_at = scheduled_at.isoformat()
-        profile.updated_at = now.isoformat()
-        await db_upsert_user_profile(profile.model_dump())
-        await self.logout_all_devices(user_id)
-        cancel_token = secrets.token_urlsafe(32)
-        c_hash = hashlib.sha256(cancel_token.encode("utf-8")).hexdigest()
-        from services.common.db import db_save_cancellation_token
-        await db_save_cancellation_token(c_hash, user_id, scheduled_at.isoformat())
-        return profile, cancel_token
-    async def cancel_account_deletion(
-        self, user_id: str | None = None, cancellation_token: str | None = None
-    ) -> UserProfile:
-        target_uid = user_id
-        if cancellation_token:
-            c_hash = hashlib.sha256(cancellation_token.encode("utf-8")).hexdigest()
-            from services.common.db import (
-                db_delete_cancellation_token,
-                db_get_cancellation_token,
-            )
-            c_rec = await db_get_cancellation_token(c_hash)
-            if not c_rec:
-                raise ValueError(
-                    "Invalid or expired account deletion cancellation token"
-                )
-            target_uid = c_rec["user_id"]
-            await db_delete_cancellation_token(c_hash)
-        if not target_uid:
-            raise ValueError(
-                "User ID or cancellation token required to cancel deletion"
-            )
-        profile = await self.get_profile(target_uid)
-        if not profile:
-            raise ValueError(f"User profile '{target_uid}' not found")
-        profile.status = AccountStatus.ACTIVE
-        profile.deletion_requested_at = None
-        profile.deletion_scheduled_at = None
-        profile.updated_at = datetime.now(UTC).isoformat()
-        await db_upsert_user_profile(profile.model_dump())
-        return profile
-    async def cleanup_expired_deleted_accounts(self) -> int:
-        """Background worker step: hard-deletes & anonymizes accounts past their 30-day grace period."""
-        now_iso = datetime.now(UTC).isoformat()
-        cleaned_count = 0
-        pool = await init_db_pool()
-        if pool is not None:
-            async with pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT user_id, email FROM user_profiles WHERE status = 'pending_deletion' "
-                        "AND deletion_scheduled_at <= NOW();"
-                    )
-                    rows = await cur.fetchall()
-                    for r in rows:
-                        uid, _email = r[0], r[1]
-                        anon_email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
-                        await cur.execute(
-                            "UPDATE user_profiles SET email = %s, display_name = 'Deleted User', "
-                            "avatar_url = NULL, bio = NULL, status = 'deleted', updated_at = NOW() "
-                            "WHERE user_id = %s;",
-                            (anon_email, uid),
-                        )
-                        await cur.execute(
-                            "DELETE FROM user_credentials WHERE user_id = %s;", (uid,)
-                        )
-                        await cur.execute(
-                            "DELETE FROM federated_identities WHERE user_id = %s;",
-                            (uid,),
-                        )
-                        cleaned_count += 1
-                await conn.commit()
-            return cleaned_count
-        for uid, p in list(_in_memory_profiles.items()):
-            if p.status == AccountStatus.PENDING_DELETION:
-                if p.deletion_scheduled_at and p.deletion_scheduled_at <= now_iso:
-                    p.status = AccountStatus.DELETED
-                    p.display_name = "Deleted User"
-                    p.email = f"deleted_{uuid.uuid4().hex[:8]}@anonymized.local"
-                    p.linked_providers = []
-                    cleaned_count += 1
-        return cleaned_count
+
     async def record_login_attempt(
         self,
         user_id: str,
@@ -543,6 +509,7 @@ class UserLifecycleService:
         _in_memory_login_history[user_id].insert(0, entry)
         _in_memory_login_history[user_id] = _in_memory_login_history[user_id][:50]
         return entry
+
     async def get_login_history(
         self, user_id: str, limit: int = 20
     ) -> list[LoginHistoryEntry]:
@@ -550,6 +517,7 @@ class UserLifecycleService:
         if rows:
             return [LoginHistoryEntry(**row) for row in rows]
         return _in_memory_login_history.get(user_id, [])[:limit]
+
     async def list_active_sessions(
         self, user_id: str, current_session_id: str | None = None
     ) -> list[ActiveSessionResponse]:
@@ -571,6 +539,7 @@ class UserLifecycleService:
                 )
             )
         return res
+
     async def revoke_session(self, user_id: str, session_id: str) -> bool:
         if user_id in _in_memory_sessions:
             _in_memory_sessions[user_id] = [
@@ -580,6 +549,7 @@ class UserLifecycleService:
         if r:
             await r.setex(f"revoked:sid:{session_id}", 86400, "true")
         return True
+
     async def logout_all_devices(self, user_id: str) -> int:
         count = len(_in_memory_sessions.get(user_id, []))
         _in_memory_sessions[user_id] = []
@@ -590,7 +560,23 @@ class UserLifecycleService:
         ):
             raise RuntimeError("Distributed revocation state unavailable")
         if r:
-            await r.set(f"tokens_valid_after:{user_id}", str(time.time()))
+            now_ts = str(time.time())
+            await r.set(f"tokens_valid_after:{user_id}", now_ts)
+            await r.set(f"user_tokens_valid_after:{user_id}", now_ts)
+            try:
+                idx_keys = await r.keys(f"user_sessions:*:{user_id}")
+                for idx_key in idx_keys:
+                    parts = idx_key.split(":", 2)
+                    tenant = parts[1] if len(parts) == 3 else "default"
+                    sids = await r.smembers(idx_key)
+                    for sid in sids:
+                        await r.delete(f"session:{tenant}:{sid}")
+                        count += 1
+                    await r.delete(idx_key)
+            except Exception as exc:
+                logger.warning(f"Failed deleting BFF sessions for {user_id}: {exc}")
         logger.info(f"User '{user_id}' logged out from all {count} devices.")
         return count
+
+
 lifecycle_service = UserLifecycleService()

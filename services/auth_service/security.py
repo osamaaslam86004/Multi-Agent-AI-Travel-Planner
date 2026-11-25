@@ -4,6 +4,7 @@ Argon2id password hashing, RFC 6238 TOTP MFA, Sudo Reauth tokens, Magic Links,
 Device Fingerprinting, and suspicious login detection.
 Supports dual-key RSA key rotation precedence and async offloading for Argon2 operations.
 """
+
 import asyncio
 import base64
 import hashlib
@@ -13,6 +14,7 @@ import os
 import secrets
 import struct
 import time
+import urllib.parse
 import uuid
 from typing import Any
 
@@ -33,10 +35,14 @@ REFRESH_TOKEN_EXPIRE_SECONDS = _settings.auth.refresh_token_expire_seconds
 SUDO_TOKEN_EXPIRE_SECONDS = _settings.auth.sudo_token_expire_seconds
 _primary_private_key: rsa.RSAPrivateKey | None = None
 _previous_private_key: rsa.RSAPrivateKey | None = None
+
+
 def int_to_base64url(val: int) -> str:
     """Convert integer to base64url encoded string without padding."""
     val_bytes = val.to_bytes((val.bit_length() + 7) // 8, byteorder="big")
     return base64.urlsafe_b64encode(val_bytes).rstrip(b"=").decode("ascii")
+
+
 def compute_rfc7638_kid(pub_key: rsa.RSAPublicKey) -> str:
     """Compute RFC 7638 JSON Web Key (JWK) Thumbprint as Key ID (kid)."""
     numbers = pub_key.public_numbers()
@@ -48,9 +54,13 @@ def compute_rfc7638_kid(pub_key: rsa.RSAPublicKey) -> str:
     canonical_json = json.dumps(canonical_dict, separators=(",", ":"))
     digest = hashlib.sha256(canonical_json.encode("utf-8")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
 def generate_user_id(email: str | None = None) -> str:
     """Generate cryptographically random internal user_id (usr_<uuid4_hex>) with full 128-bit entropy."""
     return f"usr_{uuid.uuid4().hex}"
+
+
 # Argon2id Password Hashing (Synchronous core)
 def hash_password(password: str) -> str:
     """Hash password using Argon2id."""
@@ -60,6 +70,8 @@ def hash_password(password: str) -> str:
     salt_b64 = base64.b64encode(salt).decode("ascii")
     key_b64 = base64.b64encode(key).decode("ascii")
     return f"argon2id$v=19$m=65536,t=3,p=4${salt_b64}${key_b64}"
+
+
 def verify_password(password: str, password_hash: str) -> bool:
     """Verify password against Argon2id hash."""
     try:
@@ -79,22 +91,24 @@ def verify_password(password: str, password_hash: str) -> bool:
         return True
     except (ValueError, TypeError, InvalidKey):
         return False
+
+
 # Non-blocking Async Wrappers for Argon2 CPU work
 async def async_hash_password(password: str) -> str:
     """Offload CPU-bound Argon2 password hashing to a background thread."""
     return await asyncio.to_thread(hash_password, password)
+
+
 async def async_verify_password(password: str, password_hash: str) -> bool:
     """Offload CPU-bound Argon2 password verification to a background thread."""
     return await asyncio.to_thread(verify_password, password, password_hash)
+
+
 # Deterministic RSA Keypair Loading & Rotation Precedence
 def _initialize_rsa_keys() -> None:
     global _primary_private_key, _previous_private_key
     pem_env = _settings.auth.jwt_private_key_pem or os.getenv("JWT_PRIVATE_KEY_PEM")
-    path_env = (
-        _settings.auth.jwt_previous_private_key_path
-        or _settings.auth.jwt_private_key_path
-        or os.getenv("JWT_PRIVATE_KEY_PATH")
-    )
+    path_env = _settings.auth.jwt_private_key_path or os.getenv("JWT_PRIVATE_KEY_PATH")
     if _primary_private_key is None:
         if pem_env:
             try:
@@ -141,6 +155,8 @@ def _initialize_rsa_keys() -> None:
                     )
             except Exception:
                 _previous_private_key = None
+
+
 def get_jwks() -> dict[str, Any]:
     """Expose public keys in JWKS format with kid."""
     _initialize_rsa_keys()
@@ -172,12 +188,15 @@ def get_jwks() -> dict[str, Any]:
             }
         )
     return {"keys": keys}
-def issue_jwt(
+
+
+def _encode_jwt(
     user_id: str,
     email: str,
     tenant_id: str = "default",
     org_id: str | None = None,
     roles: list[str] | None = None,
+    permissions: list[str] | None = None,
     token_use: str = "access",
     sid: str | None = None,
     ttl_seconds: int | None = None,
@@ -211,6 +230,7 @@ def issue_jwt(
         "tenant_id": tenant_id,
         "org_id": org_id,
         "roles": roles or ["member"],
+        "permissions": permissions or [],
         "token_use": token_use,
         "mfa_verified": mfa_verified,
     }
@@ -220,15 +240,69 @@ def issue_jwt(
         encryption_algorithm=serialization.NoEncryption(),
     )
     return jwt.encode(payload, pem_bytes, algorithm="RS256", headers={"kid": kid})
+
+
+def issue_jwt(
+    user_id: str,
+    email: str,
+    tenant_id: str = "default",
+    org_id: str | None = None,
+    roles: list[str] | None = None,
+    permissions: list[str] | None = None,
+    session_id: str | None = None,
+    mfa_verified: bool = True,
+) -> tuple[str, str, int]:
+    """Issue a signed (access_token, refresh_token, expires_in) tuple."""
+    sid = session_id or f"sid_{secrets.token_hex(12)}"
+    access_token = _encode_jwt(
+        user_id=user_id,
+        email=email,
+        tenant_id=tenant_id,
+        org_id=org_id,
+        roles=roles,
+        permissions=permissions,
+        token_use="access",
+        sid=sid,
+        ttl_seconds=ACCESS_TOKEN_EXPIRE_SECONDS,
+        mfa_verified=mfa_verified,
+    )
+    refresh_token = _encode_jwt(
+        user_id=user_id,
+        email=email,
+        tenant_id=tenant_id,
+        org_id=org_id,
+        roles=roles,
+        permissions=permissions,
+        token_use="refresh",
+        sid=sid,
+        ttl_seconds=REFRESH_TOKEN_EXPIRE_SECONDS,
+        mfa_verified=mfa_verified,
+    )
+    return access_token, refresh_token, ACCESS_TOKEN_EXPIRE_SECONDS
+
+
 def issue_sudo_token(user_id: str, tenant_id: str = "default") -> str:
     """Issue short-lived Sudo Reauthentication token (TTL: 15 mins)."""
-    return issue_jwt(
+    return _encode_jwt(
         user_id=user_id,
         email=f"{user_id}@sudo.local",
         tenant_id=tenant_id,
         token_use="sudo",
         ttl_seconds=SUDO_TOKEN_EXPIRE_SECONDS,
     )
+
+
+def verify_sudo_token(token: str, expected_user_id: str | None = None) -> bool:
+    """Verify a short-lived Sudo Reauthentication token's signature, expiry, use, and subject."""
+    if not token or not isinstance(token, str):
+        return False
+    try:
+        claims = decode_signed_token(token, allowed_uses=("sudo",))
+    except Exception:
+        return False
+    return not (expected_user_id is not None and claims.get("sub") != expected_user_id)
+
+
 def decode_signed_token(
     token: str, allowed_uses: tuple[str, ...] = ("access", "refresh")
 ) -> dict[str, Any]:
@@ -273,9 +347,13 @@ def decode_signed_token(
             except jwt.PyJWTError:
                 pass
         raise
+
+
 def decode_refresh_token(refresh_token: str) -> dict[str, Any]:
     """Cryptographically validate a refresh JWT before any rotation state is touched."""
     return decode_signed_token(refresh_token, allowed_uses=("refresh",))
+
+
 def decode_signed_token_allow_expired(token: str) -> dict[str, Any]:
     """Decode token allowing expiration for token-refresh or revocation contexts, using dual-key rotation."""
     _initialize_rsa_keys()
@@ -311,14 +389,20 @@ def decode_signed_token_allow_expired(token: str) -> dict[str, Any]:
             except jwt.PyJWTError:
                 pass
         raise
+
+
 # RFC 6238 TOTP Engine
 def generate_totp_secret() -> str:
     """Generate 160-bit (20-byte) base32 encoded TOTP secret key."""
     return base64.b32encode(os.urandom(20)).decode("ascii")
+
+
 def get_totp_uri(secret: str, account_name: str, issuer: str = "TravelBrain") -> str:
     """Construct standard OTPAUTH URI for QR code generators."""
     label = f"{issuer}:{account_name}"
     return f"otpauth://totp/{urllib.parse.quote(label)}?secret={secret}&issuer={urllib.parse.quote(issuer)}&algorithm=SHA1&digits=6&period=30"
+
+
 def _totp_code_at_counter(secret: str, counter: int) -> str:
     """Generate 6-digit TOTP code for a given 30-second counter."""
     key = base64.b32decode(secret, casefold=True)
@@ -333,6 +417,8 @@ def _totp_code_at_counter(secret: str, counter: int) -> str:
     )
     otp = binary % 1000000
     return f"{otp:06d}"
+
+
 def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
     """Verify TOTP code with drift tolerance (+/- window 30s steps)."""
     if not secret or not code or len(code.strip()) != 6:
@@ -343,10 +429,14 @@ def verify_totp_code(secret: str, code: str, window: int = 1) -> bool:
         if hmac.compare_digest(_totp_code_at_counter(secret, c), clean_code):
             return True
     return False
+
+
 # Magic Link Tokens
 _SECRET_HMAC_KEY = hashlib.sha256(
     _settings.auth.jwt_secret_key.encode("utf-8") + b"|magic-links"
 ).digest()
+
+
 def generate_magic_link_token(email: str, ttl_seconds: int = 900) -> str:
     """Generate HMAC-SHA256 signed magic link token."""
     now = int(time.time())
@@ -358,6 +448,8 @@ def generate_magic_link_token(email: str, ttl_seconds: int = 900) -> str:
     ).hexdigest()
     raw = f"{payload}:{sig}"
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
 def verify_magic_link_token(token: str) -> str | None:
     """Validate signed magic token format and expiry."""
     try:
@@ -377,10 +469,14 @@ def verify_magic_link_token(token: str) -> str | None:
         return email.lower().strip() if hmac.compare_digest(expected_sig, sig) else None
     except Exception:
         return None
+
+
 def compute_device_fingerprint(user_agent: str, ip_address: str) -> str:
     subnet = ".".join(ip_address.split(".")[:3]) if "." in ip_address else ip_address
     compiled = f"{user_agent.strip().lower()}:{subnet}"
     return f"fp_{hashlib.sha256(compiled.encode('utf-8')).hexdigest()[:16]}"
+
+
 def assess_suspicious_login(
     user_id: str,
     ip_address: str,

@@ -1,6 +1,7 @@
 """
 Authentication & Enterprise Identity Domain Settings.
 """
+
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -20,6 +21,8 @@ class AuthSettings(BaseDomainSettings):
     # Core Auth Service URLs & Rotation
     auth_service_url: str = "http://auth-service:8001"
     auth_service_jwks_url: str = "http://auth-service:8001/.well-known/jwks.json"
+    jwt_private_key_path: str | None = None
+    jwt_private_key_pem: str | None = None
     jwt_previous_private_key_path: str | None = None
     jwt_previous_private_key_pem: str | None = None
     # OAuth / OIDC Providers Config
@@ -54,6 +57,7 @@ class AuthSettings(BaseDomainSettings):
     enforce_device_trust: bool = False
     enable_suspicious_login_detection: bool = True
     enable_dev_login: bool = True
+
     @classmethod
     def load(cls) -> "AuthSettings":
         aliases = {
@@ -87,6 +91,8 @@ class AuthSettings(BaseDomainSettings):
             "enable_dev_login": "ENABLE_DEV_LOGIN",
             "auth_service_url": "AUTH_SERVICE_URL",
             "auth_service_jwks_url": "AUTH_SERVICE_JWKS_URL",
+            "jwt_private_key_path": "JWT_PRIVATE_KEY_PATH",
+            "jwt_private_key_pem": "JWT_PRIVATE_KEY_PEM",
             "jwt_previous_private_key_path": "JWT_PREVIOUS_PRIVATE_KEY_PATH",
             "jwt_previous_private_key_pem": "JWT_PREVIOUS_PRIVATE_KEY_PEM",
             "smtp_host": "SMTP_HOST",
