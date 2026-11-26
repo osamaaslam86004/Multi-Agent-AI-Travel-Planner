@@ -2343,3 +2343,4 @@ async def admin_reset_mfa_route(user_id: str, user: CurrentUserDep, reauth: Reau
     if p:
         p.mfa_enabled = False
         await db_upsert_user_profile(p.model_dump())
+    return {"status": "success", "detail": f"MFA reset for user '{user_id}'"}

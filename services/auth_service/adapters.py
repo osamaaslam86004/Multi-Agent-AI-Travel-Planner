@@ -15,6 +15,7 @@ import secrets
 import socket
 import urllib.parse
 from datetime import UTC, datetime, timedelta
+from html import escape as html_escape
 from typing import Any
 
 import httpx
