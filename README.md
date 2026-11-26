@@ -51,7 +51,7 @@ Planning a trip usually means juggling half a dozen browser tabs — one for fli
 TravelBrain AI has evolved from a single-process modular monolith into a production-ready, highly available **Event-Driven Microservices Architecture** operating under the **Scatter-Gather Saga Pattern**.
 
 ### High-Level Topology
-
+```mermaid 
 flowchart TD
     Client["Browser / Mobile Client"] -->|"HTTPS + Encrypted HttpOnly Cookie"| BFF["API Gateway / BFF Service\n(:8000)"]
     
@@ -97,6 +97,7 @@ flowchart TD
     SynthesisWorker -->|"Real-Time Progress / Final Payload"| RedisPubSub["Redis PubSub Channel\ntrip:stream:[id]"]
     RedisPubSub -->|"Server-Sent Events (SSE)"| BFF
     BFF -->|"Live Markdown & JSON Stream"| Client
+```
 
 ### Core Architectural Pillars
 
