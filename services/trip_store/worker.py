@@ -31,12 +31,18 @@ setup_telemetry(service_name="trip-store-service")
 event_bus = EventBus(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
 is_healthy = True
+
+
 async def handle_liveness(request):
     return web.json_response({"status": "UP", "service": "trip-store-worker"})
+
+
 async def handle_readiness(request):
     if is_healthy and not stop_event.is_set():
         return web.json_response({"status": "READY"})
     return web.json_response({"status": "DRAINING"}, status=503)
+
+
 async def start_health_server():
     app = web.Application()
     app.router.add_get("/health/live", handle_liveness)
@@ -46,6 +52,8 @@ async def start_health_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     logger.info("Trip store worker health probe server listening on port 8080")
+
+
 async def handle_synthesis_completed(event: CloudEvent) -> None:
     data = event.data if isinstance(event.data, dict) else event.data.model_dump()
     cid = data["correlation_id"]
@@ -82,12 +90,16 @@ async def handle_synthesis_completed(event: CloudEvent) -> None:
         event_type="com.travelbrain.synthesis.completed.v1",
         payload=data,
     )
+
+
 async def main():
     await event_bus.connect()
     loop = asyncio.get_running_loop()
+
     def handle_shutdown():
         logger.info("SIGTERM/SIGINT received. Initiating trip store worker drain...")
         stop_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, handle_shutdown)
@@ -105,5 +117,7 @@ async def main():
     finally:
         await event_bus.close()
         logger.info("Trip store worker shutdown complete.")
+
+
 if __name__ == "__main__":
     asyncio.run(main())

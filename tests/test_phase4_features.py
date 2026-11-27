@@ -3,6 +3,7 @@ Comprehensive Unit & Integration Test Suite for Phase 4 Architecture:
 Observability (OTel & JSON Logging), FinOps (Persistence & Pre-flight Budgets),
 Metrics (Cardinality Control), Scale (Probes & Shutdown), and LLM Tier / Circuit Breaker Fixes.
 """
+
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -45,6 +46,8 @@ async def test_traceparent_generation_and_w3c_extraction():
     carrier = {}
     injected = inject_traceparent(carrier, tp)
     assert injected["traceparent"] == tp
+
+
 @pytest.mark.asyncio
 async def test_structured_json_logging_formatter():
     """Verify JSON log formatter includes trace_id, span_id, correlation_id, and tenant_id."""
@@ -68,6 +71,8 @@ async def test_structured_json_logging_formatter():
     assert parsed["tenant_id"] == "tenant_gamma"
     assert "trace_id" in parsed
     assert "timestamp" in parsed
+
+
 @pytest.mark.asyncio
 async def test_finops_cost_calculation_and_ledger():
     """Verify FinOps pricing formulas and DB usage recording."""
@@ -88,6 +93,8 @@ async def test_finops_cost_calculation_and_ledger():
         total_tokens=1500,
         latency_ms=320.5,
     )
+
+
 @pytest.mark.asyncio
 async def test_preflight_tenant_budget_check():
     """Verify pre-flight tenant token budget enforcement in SessionManager."""
@@ -100,6 +107,8 @@ async def test_preflight_tenant_budget_check():
     )
     assert allowed is False
     assert current == 198000
+
+
 @pytest.mark.asyncio
 async def test_circuit_breaker_non_transient_error_filtering():
     """Verify that non-transient exceptions (ValueError) do NOT count as circuit breaker failures."""
@@ -111,6 +120,8 @@ async def test_circuit_breaker_non_transient_error_filtering():
     with pytest.raises(httpx.HTTPError):
         await cb.call(AsyncMock(side_effect=httpx.HTTPError("503 Service Unavailable")))
     assert cb.failure_count == 1
+
+
 @pytest.mark.asyncio
 async def test_circuit_breaker_retry_after_parsing():
     """Verify Retry-After header parsing from HTTPStatusError."""
@@ -122,6 +133,8 @@ async def test_circuit_breaker_retry_after_parsing():
     )
     retry_sec = parse_retry_after(err)
     assert retry_sec == 45.0
+
+
 @pytest.mark.asyncio
 async def test_local_huggingface_provider_availability():
     """Verify LocalHuggingFaceProvider does NOT falsely report available when offline."""
@@ -134,6 +147,8 @@ async def test_local_huggingface_provider_availability():
         pytest.raises(RuntimeError),
     ):
         await provider.generate(messages)
+
+
 @pytest.mark.asyncio
 async def test_synthesizer_xml_delimitation_and_input_bounds():
     """Verify synthesizer wraps untrusted user query and agent inputs in XML tags and enforces character bounds."""

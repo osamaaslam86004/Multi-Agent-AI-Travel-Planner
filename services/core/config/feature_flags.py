@@ -1,6 +1,7 @@
 """
 Feature Flags Domain Settings.
 """
+
 from services.core.config.base import BaseDomainSettings
 
 
@@ -11,6 +12,7 @@ class FeatureFlagSettings(BaseDomainSettings):
     enable_stream_caching: bool = True
     enable_mcp_integrations: bool = True
     enable_experimental_agents: bool = False
+
     @classmethod
     def load(cls) -> "FeatureFlagSettings":
         aliases = {

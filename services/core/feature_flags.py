@@ -1,6 +1,7 @@
 """
 Centralized Feature Flag Evaluation Infrastructure.
 """
+
 import logging
 
 import redis.asyncio as aioredis
@@ -9,12 +10,16 @@ from services.core.config import get_settings
 from services.shared.redis_client import get_redis_client
 
 logger = logging.getLogger("travelbrain.core.feature_flags")
+
+
 class FeatureFlagManager:
     """
     Centralized Feature Flag Evaluator supporting static settings and dynamic Redis overrides.
     """
+
     def __init__(self) -> None:
         self.settings = get_settings().feature_flags
+
     async def is_enabled(
         self,
         flag_name: str,
@@ -47,6 +52,10 @@ class FeatureFlagManager:
         ) as exc:
             logger.debug(f"Failed dynamic feature flag lookup for '{flag_name}': {exc}")
         return default
+
+
 _feature_flag_manager = FeatureFlagManager()
+
+
 def get_feature_flag_manager() -> FeatureFlagManager:
     return _feature_flag_manager

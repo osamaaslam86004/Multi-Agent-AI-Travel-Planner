@@ -471,9 +471,10 @@ class UserLifecycleService:
         from services.auth_service.rbac import ROLES_CATALOG
 
         role_def = ROLES_CATALOG.get(role)
-        if role_def and role_def.scope != "organization":
-            if role not in profile.roles:
-                profile.roles.append(role)
+        if not role_def or role_def.scope != "organization":
+            raise ValueError(
+                f"Invalid or unauthorized organization role '{role}' in invitation"
+            )
         profile.updated_at = datetime.now(UTC).isoformat()
         await db_upsert_user_profile(profile.model_dump())
         await db_add_org_membership(profile.user_id, org_id, role)

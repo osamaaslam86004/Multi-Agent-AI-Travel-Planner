@@ -140,28 +140,9 @@ class EnterpriseIdentityService:
         return _in_memory_idp_configs.get(org_id)
 
     async def verify_domain_ownership(self, org_id: str, domain: str) -> bool:
-        from services.common.db import init_db_pool
+        from services.common.db import db_is_domain_verified
 
-        pool = await init_db_pool()
-        if pool is not None:
-            async with pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT verified FROM verified_domains WHERE org_id = %s AND domain = %s;",
-                        (org_id, domain.lower().strip()),
-                    )
-                    row = await cur.fetchone()
-                    if row:
-                        return bool(row[0])
-                    # Auto-seed verification record
-                    token = f"travelbrain-verification-{org_id[:8]}"
-                    await cur.execute(
-                        "INSERT INTO verified_domains (org_id, domain, verification_token, verified) VALUES (%s, %s, %s, TRUE) ON CONFLICT DO NOTHING;",
-                        (org_id, domain.lower().strip(), token),
-                    )
-                    await conn.commit()
-                    return True
-        return True
+        return await db_is_domain_verified(domain, org_id)
 
     async def set_idp_config(self, req: IdPConfigRequest) -> IdPConfigResponse:
         for d in req.allowed_domains:
@@ -711,7 +692,6 @@ class SCIM2Service:
         from services.auth_service.user_lifecycle import lifecycle_service
         from services.common.db import (
             db_revoke_role,
-            db_upsert_user_profile,
             init_db_pool,
         )
 
@@ -724,9 +704,6 @@ class SCIM2Service:
                 )
                 if profile:
                     current_member_user_ids.add(profile.user_id)
-                    if mapped_role not in profile.roles:
-                        profile.roles.append(mapped_role)
-                        await db_upsert_user_profile(profile.model_dump())
                     await db_assign_role(
                         profile.user_id,
                         mapped_role,
@@ -735,7 +712,6 @@ class SCIM2Service:
                         "scim_group_reconciliation",
                     )
                     await lifecycle_service.logout_all_devices(profile.user_id)
-
         # Bidirectional revocation for removed members
         pool = await init_db_pool()
         if pool is not None:
@@ -754,11 +730,7 @@ class SCIM2Service:
                                 scope_type="organization",
                                 scope_id=org_id,
                             )
-                            p = await lifecycle_service.get_profile(uid)
-                            if p and mapped_role in p.roles:
-                                p.roles.remove(mapped_role)
-                                await db_upsert_user_profile(p.model_dump())
-                                await lifecycle_service.logout_all_devices(uid)
+                            await lifecycle_service.logout_all_devices(uid)
 
 
 enterprise_service = EnterpriseIdentityService()

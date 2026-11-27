@@ -1,6 +1,7 @@
 """
 LLM Providers Domain Settings.
 """
+
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -20,6 +21,7 @@ class LLMSettings(BaseDomainSettings):
     timeout_seconds: float = 30.0
     max_retries: int = 3
     finops_daily_token_budget: int = 1000000
+
     @classmethod
     def load(cls) -> "LLMSettings":
         aliases = {

@@ -109,23 +109,36 @@ def _initialize_rsa_keys() -> None:
     global _primary_private_key, _previous_private_key
     pem_env = _settings.auth.jwt_private_key_pem or os.getenv("JWT_PRIVATE_KEY_PEM")
     path_env = _settings.auth.jwt_private_key_path or os.getenv("JWT_PRIVATE_KEY_PATH")
+    env_name = os.getenv("ENVIRONMENT", "development").lower().strip()
     if _primary_private_key is None:
         if pem_env:
             try:
                 _primary_private_key = serialization.load_pem_private_key(
                     pem_env.encode("utf-8"), password=None, backend=default_backend()
                 )
-            except Exception:
-                _primary_private_key = None
-        elif path_env and os.path.exists(path_env):
+            except Exception as exc:
+                raise RuntimeError(
+                    "Invalid RSA private key configuration: failed to load PEM private key from JWT_PRIVATE_KEY_PEM"
+                ) from exc
+        elif path_env:
+            if not os.path.exists(path_env):
+                raise RuntimeError(
+                    f"Configured JWT_PRIVATE_KEY_PATH file not found: {path_env}"
+                )
             try:
                 with open(path_env, "rb") as f:
                     _primary_private_key = serialization.load_pem_private_key(
                         f.read(), password=None, backend=default_backend()
                     )
-            except Exception:
-                _primary_private_key = None
+            except Exception as exc:
+                raise RuntimeError(
+                    "Invalid RSA private key configuration: failed to load PEM private key from file"
+                ) from exc
         if _primary_private_key is None:
+            if env_name in ("production", "staging"):
+                raise RuntimeError(
+                    "Production/staging environment requires a valid configured RSA private key"
+                )
             # Fallback deterministic dev key generation
             seed_material = f"{ISSUER}:{_settings.auth.jwt_secret_key}".encode()
             seed_hash = hashlib.sha256(seed_material).digest()

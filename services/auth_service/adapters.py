@@ -729,11 +729,22 @@ class SAML2Adapter(BaseAuthProviderAdapter):
         if signature is None:
             raise ValueError("SAML Response/Assertion signature missing")
         target_id = signed_target.attrib.get("ID")
-        ref_node = signature.find(".//ds:Reference", ns)
-        ref_uri = ref_node.attrib.get("URI", "") if ref_node is not None else ""
-        if target_id and ref_uri and ref_uri != f"#{target_id}":
+        if not target_id or not target_id.strip():
             raise ValueError(
-                "SAML XML Signature Wrapping (XSW) detected: Reference URI mismatch"
+                "SAML signature target element is missing required 'ID' attribute"
+            )
+        ref_node = signature.find(".//ds:Reference", ns)
+        if ref_node is None:
+            raise ValueError("SAML Signature element missing ds:Reference node")
+        ref_uri = ref_node.attrib.get("URI", "").strip()
+        if not ref_uri:
+            raise ValueError(
+                "SAML Signature ds:Reference node missing required 'URI' attribute"
+            )
+        expected_ref_uri = f"#{target_id.strip()}"
+        if ref_uri != expected_ref_uri:
+            raise ValueError(
+                f"SAML XML Signature Wrapping (XSW) detected: Reference URI '{ref_uri}' does not match target ID '{expected_ref_uri}'"
             )
         if xmlsec is not None:
             try:

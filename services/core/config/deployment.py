@@ -1,6 +1,7 @@
 """
 Deployment & Infrastructure Domain Settings.
 """
+
 from services.core.config.base import BaseDomainSettings
 
 
@@ -11,6 +12,7 @@ class DeploymentSettings(BaseDomainSettings):
     deployment_zone: str = "us-central1-a"
     region: str = "us-central1"
     keda_enabled: bool = True
+
     @classmethod
     def load(cls) -> "DeploymentSettings":
         aliases = {

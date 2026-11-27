@@ -24,14 +24,19 @@ from langchain_core.messages import (
 from services.common.schemas import LLMResult
 
 logger = logging.getLogger("travelbrain.llm_provider")
+
+
 class BaseLLMProvider(ABC):
     """Abstract Base Class defining the contract for all LLM providers."""
+
     def __init__(self, provider_name: str, model_name: str):
         self.provider_name = provider_name
         self.model_name = model_name
+
     @abstractmethod
     def is_available(self) -> bool:
         """Check if provider credentials or runtime dependencies are satisfied."""
+
     @abstractmethod
     async def generate(
         self,
@@ -40,6 +45,7 @@ class BaseLLMProvider(ABC):
         **kwargs: Any,
     ) -> LLMResult:
         """Asynchronously generate standard completion from input messages."""
+
     @abstractmethod
     async def generate_structured(
         self,
@@ -49,6 +55,7 @@ class BaseLLMProvider(ABC):
         **kwargs: Any,
     ) -> LLMResult:
         """Asynchronously generate structured output conforming to a JSON schema."""
+
     def _extract_json_from_text(self, text: str) -> dict[str, Any]:
         """Utility to safely extract and parse JSON object from markdown or freeform text."""
         cleaned = text.strip()
@@ -64,11 +71,14 @@ class BaseLLMProvider(ABC):
             raise ValueError(
                 f"Failed to parse structured JSON from text: {text[:200]}..."
             )
+
+
 # ============================================================================
 # Tier 1: Groq Cloud Provider (Fast Llama-3-70B Inference)
 # ============================================================================
 class GroqLLMProvider(BaseLLMProvider):
     """High-throughput Groq LLM Provider."""
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -80,16 +90,20 @@ class GroqLLMProvider(BaseLLMProvider):
         )
         super().__init__(provider_name="groq", model_name=selected_model)
         self._llm = None
+
     def is_available(self) -> bool:
         return bool(self.api_key and len(self.api_key.strip()) > 5)
+
     def _get_client(self, temperature: float = 0.3, **kwargs: Any):
         from langchain_groq import ChatGroq
+
         return ChatGroq(
             groq_api_key=self.api_key,
             model_name=self.model_name,
             temperature=temperature,
             **kwargs,
         )
+
     async def generate(
         self,
         messages: list[BaseMessage],
@@ -123,6 +137,7 @@ class GroqLLMProvider(BaseLLMProvider):
             token_usage=token_usage,
             latency_ms=round(latency_ms, 2),
         )
+
     async def generate_structured(
         self,
         messages: list[BaseMessage],
@@ -164,11 +179,14 @@ class GroqLLMProvider(BaseLLMProvider):
             latency_ms=round(latency_ms, 2),
             structured_data=parsed_data,
         )
+
+
 # ============================================================================
 # Tier 2: Google Gemini Provider (Primary Cloud Fallback)
 # ============================================================================
 class GeminiLLMProvider(BaseLLMProvider):
     """Google Gemini Cloud Fallback Provider using REST API."""
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -179,8 +197,10 @@ class GeminiLLMProvider(BaseLLMProvider):
             model_name or get_settings().llm.gemini_model or "gemini-2.5-flash"
         )
         super().__init__(provider_name="gemini", model_name=selected_model)
+
     def is_available(self) -> bool:
         return bool(self.api_key and len(self.api_key.strip()) > 5)
+
     def _convert_messages(
         self, messages: list[BaseMessage]
     ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -197,6 +217,7 @@ class GeminiLLMProvider(BaseLLMProvider):
             else:
                 contents.append({"role": "user", "parts": [{"text": str(msg.content)}]})
         return system_instruction, contents
+
     async def generate(
         self,
         messages: list[BaseMessage],
@@ -239,6 +260,7 @@ class GeminiLLMProvider(BaseLLMProvider):
             token_usage=token_usage,
             latency_ms=round(latency_ms, 2),
         )
+
     async def generate_structured(
         self,
         messages: list[BaseMessage],
@@ -287,6 +309,8 @@ class GeminiLLMProvider(BaseLLMProvider):
             latency_ms=round(latency_ms, 2),
             structured_data=parsed_data,
         )
+
+
 # ============================================================================
 # Tier 3: Local Hugging Face / Compact Quantized Model (<12GB VRAM Footprint)
 # ============================================================================
@@ -297,6 +321,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
     and compact HuggingFace Transformers 4-bit pipelines.
     No false availability reporting or canned itinerary generation on failure.
     """
+
     def __init__(
         self,
         model_name: str | None = None,
@@ -314,6 +339,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         self._pipeline = None
         self._checked_pipeline = False
         self._endpoint_available = None
+
     def is_available(self) -> bool:
         if self._endpoint_available is True:
             return True
@@ -328,6 +354,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             logger.debug("Local LLM endpoint check failed: %s", exc)
         pipe = self._load_transformers_pipeline()
         return pipe is not None
+
     def _convert_messages_to_dict(
         self, messages: list[BaseMessage]
     ) -> list[dict[str, str]]:
@@ -342,6 +369,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             else:
                 formatted.append({"role": "user", "content": str(msg.content)})
         return formatted
+
     async def _try_local_endpoint(
         self, messages: list[BaseMessage], temperature: float
     ) -> tuple[str, dict[str, int]] | None:
@@ -381,6 +409,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             )
             self._endpoint_available = False
         return None
+
     def _load_transformers_pipeline(self):
         if self._checked_pipeline:
             return self._pipeline
@@ -388,6 +417,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         try:
             import torch
             from transformers import pipeline
+
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             self._pipeline = pipeline(
                 "text-generation",
@@ -401,11 +431,13 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
             logger.debug("Transformers pipeline unavailable (%s)", exc)
             self._pipeline = None
         return self._pipeline
+
     def _run_pipeline_blocking(self, prompt: str, temperature: float) -> str:
         res = self._pipeline(
             prompt, max_new_tokens=1024, do_sample=True, temperature=temperature
         )
         return res[0]["generated_text"].replace(prompt, "").strip()
+
     async def generate(
         self,
         messages: list[BaseMessage],
@@ -450,6 +482,7 @@ class LocalHuggingFaceProvider(BaseLLMProvider):
         raise RuntimeError(
             f"LocalHuggingFaceProvider ({self.model_name}) is unavailable at {self.endpoint_url}."
         )
+
     async def generate_structured(
         self,
         messages: list[BaseMessage],

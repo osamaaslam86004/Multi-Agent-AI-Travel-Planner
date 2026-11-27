@@ -2,6 +2,7 @@
 DLQ Replay Tool: Admin CLI utility for inspecting and replaying failed messages
 from the Dead Letter Queue ('stream:travel:dlq') back to their original target streams.
 """
+
 import asyncio
 import json
 import logging
@@ -18,6 +19,8 @@ logger = logging.getLogger("dlq_replay")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 DLQ_STREAM = "stream:travel:dlq"
+
+
 async def replay_dlq(max_messages: int = 100) -> int:
     """Replays messages from DLQ back to their original stream."""
     r = aioredis.from_url(
@@ -75,6 +78,8 @@ async def replay_dlq(max_messages: int = 100) -> int:
     await r.close()
     logger.info(f"DLQ Replay finish: {replayed_count} messages replayed.")
     return replayed_count
+
+
 if __name__ == "__main__":
     count = 100
     if len(sys.argv) > 1:

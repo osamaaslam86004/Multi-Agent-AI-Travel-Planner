@@ -2,6 +2,7 @@
 Itinerary and Synthesis LLM Engine with Resilient Multi-Provider Fallback Chain,
 Strict XML Delimitation, PII Redaction, Input Truncation, Prompt Bounding, and Single-Call Synthesis.
 """
+
 import contextvars
 import logging
 
@@ -17,6 +18,8 @@ logger = logging.getLogger("travelbrain.synthesis_engine")
 last_llm_result_var: contextvars.ContextVar[LLMResult | None] = contextvars.ContextVar(
     "last_llm_result", default=None
 )
+
+
 class StructuredItinerarySchema(BaseModel):
     summary: str = Field(description="Executive summary of the trip plan")
     itinerary_draft: str = Field(description="Detailed day-by-day itinerary")
@@ -26,12 +29,15 @@ class StructuredItinerarySchema(BaseModel):
     unbound_warnings: list[str] = Field(
         default_factory=list, description="Warnings regarding degraded or missing data"
     )
+
+
 class SynthesisEngine:
     """
     Orchestrates LLM prompts for multi-agent synthesis and final itinerary formatting
     with strict XML delimitation, input truncation, PII redaction, prompt bounds, and thread safety.
     Consolidates LLM generation into a single execution pass for efficiency.
     """
+
     def __init__(
         self,
         chain: ResilientLLMChain | None = None,
@@ -39,9 +45,11 @@ class SynthesisEngine:
     ):
         self.chain = chain or ResilientLLMChain()
         self.model_name = model_name or "resilient-multi-provider-chain"
+
     @property
     def last_result(self) -> LLMResult | None:
         return last_llm_result_var.get()
+
     async def synthesize_plan(
         self,
         user_query: str,
@@ -119,6 +127,7 @@ class SynthesisEngine:
                 clean_query, clean_flights, clean_hotels, clean_weather, itin
             )
             return itin, resp
+
     async def generate_itinerary(
         self,
         user_query: str,
@@ -137,6 +146,7 @@ class SynthesisEngine:
             tenant_id=tenant_id,
         )
         return itin
+
     async def format_final_response(
         self,
         user_query: str,
@@ -156,6 +166,7 @@ class SynthesisEngine:
             tenant_id=tenant_id,
         )
         return resp
+
     def _heuristic_itinerary(
         self, query: str, flights: str, hotels: str, weather: str
     ) -> str:
@@ -166,6 +177,7 @@ class SynthesisEngine:
             f"**Day 3: Scenic Excursions**\n- Explore local attractions.\n\n"
             f"**Day 4: Departure**\n- Transit to airport."
         )
+
     def _heuristic_final_response(
         self, query: str, flights: str, hotels: str, weather: str, itinerary: str
     ) -> str:

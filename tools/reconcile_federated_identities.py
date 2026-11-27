@@ -3,6 +3,7 @@
 Production Data Migration Tool: Reconcile Federated Identity Records.
 Reconciles federated identity records with user profile email addresses.
 """
+
 import asyncio
 import logging
 
@@ -10,6 +11,8 @@ from services.common.db import init_db_pool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tools.reconcile_federated_identities")
+
+
 async def reconcile_federated_identities():
     logger.info("Starting Federated Identity reconciliation...")
     pool = await init_db_pool()
@@ -27,5 +30,7 @@ async def reconcile_federated_identities():
             count = cur.rowcount
         await conn.commit()
     logger.info(f"Federated Identity reconciliation complete. Updated {count} records.")
+
+
 if __name__ == "__main__":
     asyncio.run(reconcile_federated_identities())

@@ -3,6 +3,7 @@
 Production Data Migration Tool: Encrypt Plaintext IdP Client Secrets.
 Idempotent script to safely migrate plaintext client_secret entries in idp_configs to ciphertext ('enc:v1:...').
 """
+
 import asyncio
 import logging
 
@@ -11,6 +12,8 @@ from services.common.db import db_list_all_idp_configs, db_save_idp_config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tools.migrate_idp_secrets")
+
+
 async def migrate_idp_secrets():
     logger.info("Starting IdP Client Secrets encryption migration...")
     configs = await db_list_all_idp_configs()
@@ -26,5 +29,7 @@ async def migrate_idp_secrets():
     logger.info(
         f"IdP Client Secrets migration complete. Encrypted {count} plaintext records."
     )
+
+
 if __name__ == "__main__":
     asyncio.run(migrate_idp_secrets())

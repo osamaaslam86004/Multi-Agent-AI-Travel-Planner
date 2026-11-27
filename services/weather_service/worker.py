@@ -2,6 +2,7 @@
 Weather Agent background worker subscribing to Redis Streams with OpenTelemetry tracing,
 Structured Logging, Signal-based Graceful Shutdown, and HTTP Health Probes.
 """
+
 import asyncio
 import logging
 import os
@@ -37,12 +38,18 @@ event_bus = EventBus(redis_url=REDIS_URL)
 provider = WeatherProvider(redis_url=REDIS_URL)
 stop_event = asyncio.Event()
 is_healthy = True
+
+
 async def handle_liveness(request):
     return web.json_response({"status": "UP", "service": "weather-worker"})
+
+
 async def handle_readiness(request):
     if is_healthy and not stop_event.is_set():
         return web.json_response({"status": "READY"})
     return web.json_response({"status": "DRAINING"}, status=503)
+
+
 async def start_health_server():
     app = web.Application()
     app.router.add_get("/health/live", handle_liveness)
@@ -52,6 +59,8 @@ async def start_health_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     logger.info("Weather worker health probe server listening on port 8080")
+
+
 async def handle_planning_initiated(
     event: CloudEvent[PlanningInitiatedPayload],
 ) -> None:

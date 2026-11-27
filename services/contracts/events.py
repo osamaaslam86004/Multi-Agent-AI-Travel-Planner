@@ -2,6 +2,7 @@
 Versioned Event and Stream Payload Contracts for Event-Driven Architecture.
 Supports CloudEvents v1.0 specification with explicit event_versioning.
 """
+
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
@@ -9,6 +10,8 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, Field
 
 T = TypeVar("T")
+
+
 class CloudEventV1(BaseModel, Generic[T]):
     specversion: str = "1.0"
     event_version: str = "1.0.0"
@@ -21,6 +24,8 @@ class CloudEventV1(BaseModel, Generic[T]):
     dataschema: str | None = "https://travelbrain.ai/schemas/v1"
     traceparent: str | None = None
     data: T
+
+
 # Domain Payloads (Phase 1)
 class PlanningInitiatedPayload(BaseModel):
     correlation_id: str
@@ -33,6 +38,8 @@ class PlanningInitiatedPayload(BaseModel):
     end_date: str | None = None
     dates: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class FlightResultPayload(BaseModel):
     correlation_id: str
     user_id: str = "unknown"
@@ -44,6 +51,8 @@ class FlightResultPayload(BaseModel):
     degraded: bool = False
     cached: bool = False
     error: str | None = None
+
+
 class HotelResultPayload(BaseModel):
     correlation_id: str
     user_id: str = "unknown"
@@ -55,6 +64,8 @@ class HotelResultPayload(BaseModel):
     degraded: bool = False
     cached: bool = False
     error: str | None = None
+
+
 class WeatherResultPayload(BaseModel):
     correlation_id: str
     user_id: str = "unknown"
@@ -66,6 +77,8 @@ class WeatherResultPayload(BaseModel):
     degraded: bool = False
     cached: bool = False
     error: str | None = None
+
+
 class SynthesisCompletedPayload(BaseModel):
     correlation_id: str
     user_id: str
@@ -81,12 +94,16 @@ class SynthesisCompletedPayload(BaseModel):
     weather_degraded: bool = False
     llm_calls: int = 1
     completed_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class StreamProgressUpdate(BaseModel):
     correlation_id: str
     stage: str
     message: str
     percentage: int
     payload: dict[str, Any] | None = None
+
+
 class LLMUsagePayload(BaseModel):
     tenant_id: str
     user_id: str
@@ -98,6 +115,8 @@ class LLMUsagePayload(BaseModel):
     total_tokens: int
     latency_ms: float
     cost_estimate: float
+
+
 # Domain Payloads (Phase 2: Enterprise Identity & Auth Lifecycle)
 class UserAccountCreatedPayload(BaseModel):
     user_id: str
@@ -106,6 +125,8 @@ class UserAccountCreatedPayload(BaseModel):
     org_id: str | None = None
     auth_provider: str = "direct"
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class UserStatusChangedPayload(BaseModel):
     user_id: str
     email: str
@@ -113,6 +134,8 @@ class UserStatusChangedPayload(BaseModel):
     new_status: str
     reason: str | None = None
     changed_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class SSOLoginEventPayload(BaseModel):
     user_id: str
     email: str
@@ -122,6 +145,8 @@ class SSOLoginEventPayload(BaseModel):
     user_agent: str
     suspicious: bool = False
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class SCIMUserProvisionedPayload(BaseModel):
     user_id: str
     email: str
@@ -129,6 +154,8 @@ class SCIMUserProvisionedPayload(BaseModel):
     action: str  # create, update, deactivate, delete
     scim_external_id: str | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class RoleAssignedPayload(BaseModel):
     user_id: str
     org_id: str | None = None

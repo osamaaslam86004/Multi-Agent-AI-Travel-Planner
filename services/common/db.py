@@ -3,6 +3,7 @@ Postgres Database connection pool management, tenant RLS context setting,
 and transactional operations for trips, append-only event audit, LLM usage ledger, outbox,
 and Phase 2 identity schema persistence.
 """
+
 import contextlib
 import json
 import logging
@@ -14,6 +15,7 @@ from typing import Any
 try:
     import psycopg
     from psycopg_pool import AsyncConnectionPool
+
     _PSYCOPG_ERRORS = (psycopg.Error,)
 except ImportError:
     psycopg = None
@@ -22,8 +24,12 @@ except ImportError:
 from services.core.config import get_settings
 
 logger = logging.getLogger("travelbrain.db")
+
+
 def _get_db_settings():
     return get_settings().db
+
+
 _DB_ERRORS: tuple[type[Exception], ...] = _PSYCOPG_ERRORS + (
     ImportError,
     OSError,
@@ -53,6 +59,8 @@ _in_memory_db: dict[str, Any] = {
     "active_sessions": {},
     "org_invitations": {},
 }
+
+
 async def init_identity_schema(conn: Any) -> None:
     """Initializing Phase 2 Identity tables if not present."""
     ddl = """
@@ -296,6 +304,8 @@ async def init_identity_schema(conn: Any) -> None:
     async with conn.cursor() as cur:
         await cur.execute(ddl)
     await conn.commit()
+
+
 async def init_db_pool() -> Any:
     global _pool
     if _pool is not None:
@@ -338,6 +348,8 @@ async def init_db_pool() -> Any:
         )
         _pool = None
         return None
+
+
 async def close_db_pool() -> None:
     global _pool
     if _pool is not None:
@@ -346,6 +358,8 @@ async def close_db_pool() -> None:
         except _DB_ERRORS as exc:
             logger.debug(f"Error closing Postgres pool: {exc}")
         _pool = None
+
+
 @contextlib.asynccontextmanager
 async def get_tenant_conn(tenant_id: str = "default") -> AsyncGenerator[Any, None]:
     pool = await init_db_pool()
@@ -356,6 +370,8 @@ async def get_tenant_conn(tenant_id: str = "default") -> AsyncGenerator[Any, Non
         async with conn.cursor() as cur:
             await cur.execute("SET LOCAL app.current_tenant_id = %s;", (tenant_id,))
         yield conn
+
+
 # --- User Profile & Credential Repository ---
 async def db_get_user_by_email(
     email: str, tenant_id: str | None = None
@@ -410,6 +426,8 @@ async def db_get_user_by_email(
                 continue
             return u
     return None
+
+
 async def db_get_user_by_id(
     user_id: str, tenant_id: str | None = None
 ) -> dict[str, Any] | None:
@@ -449,6 +467,8 @@ async def db_get_user_by_id(
                         }
                     return None
     return _in_memory_db["user_profiles"].get(user_id)
+
+
 async def db_upsert_user_profile(user_dict: dict[str, Any]) -> None:
     user_id = user_dict["user_id"]
     tenant_id = user_dict.get("tenant_id", "default")
@@ -499,6 +519,8 @@ async def db_upsert_user_profile(user_dict: dict[str, Any]) -> None:
                     )
                 return
     _in_memory_db["user_profiles"][user_id] = user_dict
+
+
 async def db_save_user_password(user_id: str, password_hash: str) -> None:
     pool = await init_db_pool()
     if pool is not None:
@@ -512,6 +534,8 @@ async def db_save_user_password(user_id: str, password_hash: str) -> None:
                     )
                 return
     _in_memory_db["user_credentials"][user_id] = password_hash
+
+
 async def db_get_user_password(user_id: str) -> str | None:
     pool = await init_db_pool()
     if pool is not None:
@@ -527,6 +551,8 @@ async def db_get_user_password(user_id: str) -> str | None:
                         return row[0]
                     return None
     return _in_memory_db["user_credentials"].get(user_id)
+
+
 # --- Federated Identities Repository ---
 async def db_link_federated_identity(
     user_id: str,
@@ -561,6 +587,8 @@ async def db_link_federated_identity(
         }
     )
     return fed_id
+
+
 async def db_unlink_federated_identity(user_id: str, provider: str) -> int:
     pool = await init_db_pool()
     if pool is not None:
@@ -579,6 +607,8 @@ async def db_unlink_federated_identity(user_id: str, provider: str) -> int:
         if not (f.get("user_id") == user_id and f.get("provider") == provider)
     ]
     return before - len(_in_memory_db["federated_identities"])
+
+
 async def db_get_federated_identity(
     provider: str, issuer: str, sub: str
 ) -> dict[str, Any] | None:
@@ -608,6 +638,8 @@ async def db_get_federated_identity(
         if fi["provider"] == provider and fi["issuer"] == issuer and fi["sub"] == sub:
             return fi
     return None
+
+
 async def db_get_user_linked_providers(user_id: str) -> list[dict[str, Any]]:
     pool = await init_db_pool()
     if pool is not None:
@@ -638,6 +670,8 @@ async def db_get_user_linked_providers(user_id: str) -> list[dict[str, Any]]:
         for f in _in_memory_db["federated_identities"]
         if f.get("user_id") == user_id
     ]
+
+
 # --- Multi-Org & Role Assignments Repository ---
 async def db_assign_role(
     user_id: str, role: str, scope_type: str, scope_id: str | None, assigned_by: str
@@ -671,6 +705,8 @@ async def db_assign_role(
         }
     )
     return assignment_id
+
+
 async def db_revoke_role(
     user_id: str, role: str, scope_type: str, scope_id: str | None
 ) -> int:
@@ -696,6 +732,8 @@ async def db_revoke_role(
         )
     ]
     return before - len(_in_memory_db["role_assignments"])
+
+
 async def db_get_user_org_memberships(user_id: str) -> list[dict[str, Any]]:
     pool = await init_db_pool()
     if pool is not None:
@@ -712,6 +750,8 @@ async def db_get_user_org_memberships(user_id: str) -> list[dict[str, Any]]:
                         for r in rows
                     ]
     return [m for m in _in_memory_db["org_memberships"] if m.get("user_id") == user_id]
+
+
 async def db_add_org_membership(
     user_id: str, org_id: str, role: str = "member"
 ) -> None:
@@ -738,6 +778,8 @@ async def db_add_org_membership(
             "created_at": datetime.now(UTC).isoformat(),
         }
     )
+
+
 async def db_remove_org_membership(user_id: str, org_id: str) -> None:
     pool = await init_db_pool()
     if pool is not None:
@@ -754,6 +796,8 @@ async def db_remove_org_membership(user_id: str, org_id: str) -> None:
         for m in _in_memory_db["org_memberships"]
         if not (m.get("user_id") == user_id and m.get("org_id") == org_id)
     ]
+
+
 # --- Invitations Repository ---
 async def db_save_invitation(
     token: str, email: str, org_id: str, role: str, created_by: str, expires_at: str
@@ -785,6 +829,8 @@ async def db_save_invitation(
         "expires_at": expires_at,
         "accepted": False,
     }
+
+
 async def db_get_invitation(token: str) -> dict[str, Any] | None:
     pool = await init_db_pool()
     if pool is not None:
@@ -809,6 +855,8 @@ async def db_get_invitation(token: str) -> dict[str, Any] | None:
                         }
                     return None
     return _in_memory_db["org_invitations"].get(token)
+
+
 async def db_accept_invitation(token: str) -> None:
     pool = await init_db_pool()
     if pool is not None:
@@ -822,6 +870,8 @@ async def db_accept_invitation(token: str) -> None:
                 return
     if token in _in_memory_db["org_invitations"]:
         _in_memory_db["org_invitations"][token]["accepted"] = True
+
+
 # --- SCIM Tokens Repository ---
 async def db_save_scim_token(org_id: str, token_hash: str) -> str:
     token_id = f"scim_tok_{uuid.uuid4().hex[:12]}"
@@ -841,6 +891,8 @@ async def db_save_scim_token(org_id: str, token_hash: str) -> str:
         "token_hash": token_hash,
     }
     return token_id
+
+
 async def db_get_scim_token_by_hash(token_hash: str) -> dict[str, Any] | None:
     pool = await init_db_pool()
     if pool is not None:
@@ -863,6 +915,8 @@ async def db_get_scim_token_by_hash(token_hash: str) -> dict[str, Any] | None:
         if tok["token_hash"] == token_hash:
             return tok
     return None
+
+
 # --- IdP Config Repository ---
 async def db_get_idp_config(org_id: str) -> dict[str, Any] | None:
     pool = await init_db_pool()
@@ -895,6 +949,8 @@ async def db_get_idp_config(org_id: str) -> dict[str, Any] | None:
                         }
                     return None
     return _in_memory_db["idp_configs"].get(org_id)
+
+
 async def db_save_idp_config(cfg_dict: dict[str, Any]) -> None:
     org_id = cfg_dict["org_id"]
     pool = await init_db_pool()
@@ -934,6 +990,8 @@ async def db_save_idp_config(cfg_dict: dict[str, Any]) -> None:
                     )
                 return
     _in_memory_db["idp_configs"][org_id] = cfg_dict
+
+
 async def db_list_all_idp_configs() -> list[dict[str, Any]]:
     configs = []
     pool = await init_db_pool()
@@ -966,6 +1024,8 @@ async def db_list_all_idp_configs() -> list[dict[str, Any]]:
                         )
                     return configs
     return list(_in_memory_db["idp_configs"].values())
+
+
 # --- SCIM Users & Groups Repository ---
 async def db_save_scim_user(
     user_data: dict[str, Any], org_id: str | None = None
@@ -999,6 +1059,8 @@ async def db_save_scim_user(
                     )
                 return
     _in_memory_db["scim_users"][scim_id] = user_data
+
+
 async def db_get_scim_user(
     scim_id: str, org_id: str | None = None
 ) -> dict[str, Any] | None:
@@ -1022,6 +1084,8 @@ async def db_get_scim_user(
                         return json.loads(row[0]) if isinstance(row[0], str) else row[0]
                     return None
     return _in_memory_db["scim_users"].get(scim_id)
+
+
 async def db_delete_scim_user(scim_id: str, org_id: str | None = None) -> bool:
     pool = await init_db_pool()
     if pool is not None:
@@ -1042,6 +1106,8 @@ async def db_delete_scim_user(scim_id: str, org_id: str | None = None) -> bool:
         del _in_memory_db["scim_users"][scim_id]
         return True
     return False
+
+
 async def db_list_scim_users(org_id: str | None = None) -> list[dict[str, Any]]:
     users = []
     pool = await init_db_pool()
@@ -1063,6 +1129,8 @@ async def db_list_scim_users(org_id: str | None = None) -> list[dict[str, Any]]:
                         )
                     return users
     return list(_in_memory_db["scim_users"].values())
+
+
 async def db_save_scim_group(
     group_data: dict[str, Any], org_id: str | None = None
 ) -> None:
@@ -1081,6 +1149,8 @@ async def db_save_scim_group(
                     )
                 return
     _in_memory_db["scim_groups"][grp_id] = group_data
+
+
 async def db_get_scim_group(
     group_id: str, org_id: str | None = None
 ) -> dict[str, Any] | None:
@@ -1110,6 +1180,8 @@ async def db_get_scim_group(
                         }
                     return None
     return _in_memory_db["scim_groups"].get(group_id)
+
+
 async def db_delete_scim_group(group_id: str, org_id: str | None = None) -> bool:
     pool = await init_db_pool()
     if pool is not None:
@@ -1130,6 +1202,8 @@ async def db_delete_scim_group(group_id: str, org_id: str | None = None) -> bool
         del _in_memory_db["scim_groups"][group_id]
         return True
     return False
+
+
 async def db_list_scim_groups(org_id: str | None = None) -> list[dict[str, Any]]:
     groups = []
     pool = await init_db_pool()
@@ -1159,6 +1233,8 @@ async def db_list_scim_groups(org_id: str | None = None) -> list[dict[str, Any]]
                         )
                     return groups
     return list(_in_memory_db["scim_groups"].values())
+
+
 # --- Delegated Permissions & Trip Sharing Repository ---
 async def db_save_delegated_permission(delegation_dict: dict[str, Any]) -> str:
     del_id = delegation_dict.get("id") or f"del_{uuid.uuid4().hex[:12]}"
@@ -1184,6 +1260,8 @@ async def db_save_delegated_permission(delegation_dict: dict[str, Any]) -> str:
                 return del_id
     _in_memory_db["delegated_permissions"][del_id] = delegation_dict
     return del_id
+
+
 async def db_save_trip_share(share_dict: dict[str, Any]) -> str:
     share_id = share_dict.get("id") or f"share_{uuid.uuid4().hex[:12]}"
     share_dict["id"] = share_id
@@ -1208,6 +1286,8 @@ async def db_save_trip_share(share_dict: dict[str, Any]) -> str:
                 return share_id
     _in_memory_db["trip_shares"][share_id] = share_dict
     return share_id
+
+
 # --- Trips & Usage Repository ---
 async def upsert_trip_result(
     tenant_id: str,
@@ -1275,6 +1355,8 @@ async def upsert_trip_result(
         "weather_degraded": weather_degraded,
         "status": status,
     }
+
+
 async def db_can_access_trip(
     user_id: str, trip_id: str, tenant_id: str, action: str = "read"
 ) -> bool:
@@ -1349,6 +1431,8 @@ async def db_can_access_trip(
                 ):
                     return True
     return False
+
+
 async def get_trip_by_id(
     correlation_id: str, tenant_id: str = "default"
 ) -> dict[str, Any] | None:
@@ -1394,6 +1478,8 @@ async def get_trip_by_id(
     if trip and (trip.get("tenant_id") == tenant_id or tenant_id == "default"):
         return trip
     return None
+
+
 async def db_list_user_trips(
     user_id: str, tenant_id: str = "default"
 ) -> list[dict[str, Any]]:
@@ -1430,11 +1516,15 @@ async def db_list_user_trips(
         ) and (t.get("tenant_id") in (tenant_id, "default")):
             trips.append(t)
     return trips
+
+
 def db_can_access_trip_sync_memory(user_id: str, trip_id: str) -> bool:
     for s in _in_memory_db["trip_shares"].values():
         if s.get("trip_id") == trip_id and s.get("grantee_id") == user_id:
             return True
     return False
+
+
 async def record_trip_event(
     tenant_id: str,
     correlation_id: str,
@@ -1469,6 +1559,8 @@ async def record_trip_event(
         }
     )
     return evt_id
+
+
 def calculate_cost(
     provider_name: str, model_name: str, prompt_tokens: int, completion_tokens: int
 ) -> float:
@@ -1482,6 +1574,8 @@ def calculate_cost(
             completion_tokens * 0.60 / 1_000_000.0
         )
     return 0.0
+
+
 async def record_llm_usage(
     tenant_id: str,
     user_id: str,
@@ -1539,6 +1633,8 @@ async def record_llm_usage(
         }
     )
     return usage_id
+
+
 # --- Outbox Relay Functions ---
 async def write_outbox(
     tenant_id: str,
@@ -1552,9 +1648,20 @@ async def write_outbox(
         async with get_tenant_conn(tenant_id) as conn:
             if conn:
                 async with conn.transaction(), conn.cursor() as cur:
-                    data_dict = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-                    user_id = data_dict.get("user_id") or payload.get("subject") or payload.get("user_id") or "guest"
-                    query = data_dict.get("user_query") or payload.get("user_query") or ""
+                    data_dict = (
+                        payload.get("data")
+                        if isinstance(payload.get("data"), dict)
+                        else payload
+                    )
+                    user_id = (
+                        data_dict.get("user_id")
+                        or payload.get("subject")
+                        or payload.get("user_id")
+                        or "guest"
+                    )
+                    query = (
+                        data_dict.get("user_query") or payload.get("user_query") or ""
+                    )
                     email = payload.get("email") or f"{user_id}@{tenant_id}.local"
                     await cur.execute(
                         "INSERT INTO user_profiles (user_id, tenant_id, email, status) "
@@ -1602,6 +1709,8 @@ async def write_outbox(
         "status": "GATHERING",
     }
     return correlation_id
+
+
 async def relay_outbox(event_bus: Any) -> int:
     relayed_count = 0
     pool = await init_db_pool()
@@ -1618,6 +1727,7 @@ async def relay_outbox(event_bus: Any) -> int:
                     if isinstance(payload, str):
                         payload = json.loads(payload)
                     from services.common.schemas import CloudEvent
+
                     ce = CloudEvent[Any](
                         source="/services/outbox-relay",
                         type=event_type,
@@ -1635,6 +1745,7 @@ async def relay_outbox(event_bus: Any) -> int:
     for item in _in_memory_db["outbox"]:
         if not item["processed"]:
             from services.common.schemas import CloudEvent
+
             ce = CloudEvent[Any](
                 source="/services/outbox-relay",
                 type=item["event_type"],
@@ -1645,6 +1756,8 @@ async def relay_outbox(event_bus: Any) -> int:
             item["processed"] = True
             relayed_count += 1
     return relayed_count
+
+
 async def db_record_login_history(entry_dict: dict[str, Any]) -> str:
     log_id = entry_dict.get("id") or f"log_{uuid.uuid4().hex[:12]}"
     entry_dict["id"] = log_id
@@ -1670,6 +1783,8 @@ async def db_record_login_history(entry_dict: dict[str, Any]) -> str:
                 return log_id
     _in_memory_db["login_history"].append(entry_dict)
     return log_id
+
+
 async def db_get_login_history(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
     logs = []
     pool = await init_db_pool()
@@ -1701,6 +1816,8 @@ async def db_get_login_history(user_id: str, limit: int = 20) -> list[dict[str, 
     return [l for l in _in_memory_db["login_history"] if l.get("user_id") == user_id][
         :limit
     ]
+
+
 async def db_save_active_session(session_dict: dict[str, Any]) -> str:
     sid = session_dict["session_id"]
     pool = await init_db_pool()
@@ -1725,6 +1842,8 @@ async def db_save_active_session(session_dict: dict[str, Any]) -> str:
                 return sid
     _in_memory_db["active_sessions"][sid] = session_dict
     return sid
+
+
 async def db_get_active_sessions(user_id: str) -> list[dict[str, Any]]:
     sessions = []
     pool = await init_db_pool()
@@ -1758,6 +1877,8 @@ async def db_get_active_sessions(user_id: str) -> list[dict[str, Any]]:
         for s in _in_memory_db["active_sessions"].values()
         if s.get("user_id") == user_id
     ]
+
+
 async def db_delete_active_session(user_id: str, session_id: str) -> bool:
     pool = await init_db_pool()
     if pool is not None:
@@ -1773,6 +1894,8 @@ async def db_delete_active_session(user_id: str, session_id: str) -> bool:
         del _in_memory_db["active_sessions"][session_id]
         return True
     return False
+
+
 async def db_delete_all_sessions(user_id: str) -> int:
     pool = await init_db_pool()
     if pool is not None:
@@ -1792,6 +1915,8 @@ async def db_delete_all_sessions(user_id: str) -> int:
     for sid in to_del:
         del _in_memory_db["active_sessions"][sid]
     return len(to_del)
+
+
 # --- Added P0 Identity & Session Helpers ---
 async def db_get_user_roles_for_org(
     user_id: str, org_id: str, tenant_id: str = "default"
@@ -1861,27 +1986,73 @@ async def db_get_user_roles_for_org(
     if not roles:
         roles.add("member")
     return list(roles)
-async def db_verify_domain(
-    domain: str, org_id: str, verification_token: str = "verified_manual"
-) -> None:
+
+
+import secrets
+
+
+async def db_create_domain_challenge(domain: str, org_id: str) -> str:
     domain_clean = domain.lower().strip()
+    token = f"txt-verify-{secrets.token_hex(16)}"
     pool = await init_db_pool()
     if pool is not None:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO verified_domains (domain, org_id, verification_token, verified, verified_at) "
-                    "VALUES (%s, %s, %s, TRUE, NOW()) "
-                    "ON CONFLICT (domain) DO UPDATE SET verified = TRUE, verified_at = NOW();",
-                    (domain_clean, org_id, verification_token),
+                    "INSERT INTO verified_domains (domain, org_id, verification_token, verified) "
+                    "VALUES (%s, %s, %s, FALSE) "
+                    "ON CONFLICT (domain) DO UPDATE SET verification_token = EXCLUDED.verification_token, verified = FALSE;",
+                    (domain_clean, org_id, token),
                 )
             await conn.commit()
     else:
         _in_memory_db.setdefault("verified_domains", {})[domain_clean] = {
             "domain": domain_clean,
             "org_id": org_id,
-            "verified": True,
+            "verification_token": token,
+            "verified": False,
         }
+    return token
+
+
+async def db_verify_domain(
+    domain: str, org_id: str, verification_token: str | None = None
+) -> bool:
+    domain_clean = domain.lower().strip()
+    pool = await init_db_pool()
+    if pool is not None:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                if verification_token:
+                    await cur.execute(
+                        "SELECT verification_token FROM verified_domains WHERE domain = %s AND org_id = %s;",
+                        (domain_clean, org_id),
+                    )
+                    row = await cur.fetchone()
+                    if not row or (
+                        row[0] != verification_token
+                        and row[0] != f"travelbrain-verification={verification_token}"
+                    ):
+                        return False
+                await cur.execute(
+                    "UPDATE verified_domains SET verified = TRUE, verified_at = NOW() WHERE domain = %s AND org_id = %s;",
+                    (domain_clean, org_id),
+                )
+            await conn.commit()
+            return True
+    else:
+        vd = _in_memory_db.setdefault("verified_domains", {}).get(domain_clean)
+        if vd and vd.get("org_id") == org_id:
+            if verification_token and vd.get("verification_token") not in (
+                verification_token,
+                f"travelbrain-verification={verification_token}",
+            ):
+                return False
+            vd["verified"] = True
+            return True
+        return False
+
+
 async def db_is_domain_verified(domain: str, org_id: str) -> bool:
     domain_clean = domain.lower().strip()
     pool = await init_db_pool()
@@ -1896,6 +2067,8 @@ async def db_is_domain_verified(domain: str, org_id: str) -> bool:
                 return bool(row and row[0])
     vd = _in_memory_db.get("verified_domains", {}).get(domain_clean)
     return bool(vd and vd.get("org_id") == org_id and vd.get("verified"))
+
+
 async def db_save_mfa_factor(
     user_id: str,
     secret_enc: str,
@@ -1923,6 +2096,8 @@ async def db_save_mfa_factor(
             "mfa_type": mfa_type,
             "enabled": enabled,
         }
+
+
 async def db_get_mfa_factor(user_id: str) -> dict[str, Any] | None:
     pool = await init_db_pool()
     if pool is not None:
@@ -1944,6 +2119,8 @@ async def db_get_mfa_factor(user_id: str) -> dict[str, Any] | None:
                     }
                 return None
     return _in_memory_db.get("mfa_factors", {}).get(user_id)
+
+
 async def db_delete_mfa_factor(user_id: str) -> None:
     pool = await init_db_pool()
     if pool is not None:
@@ -1955,6 +2132,8 @@ async def db_delete_mfa_factor(user_id: str) -> None:
             await conn.commit()
     else:
         _in_memory_db.get("mfa_factors", {}).pop(user_id, None)
+
+
 async def db_save_cancellation_token(
     token_hash: str, user_id: str, expires_at: str
 ) -> None:
@@ -1973,6 +2152,8 @@ async def db_save_cancellation_token(
             "user_id": user_id,
             "expires_at": expires_at,
         }
+
+
 async def db_get_cancellation_token(token_hash: str) -> dict[str, Any] | None:
     pool = await init_db_pool()
     if pool is not None:
@@ -1987,6 +2168,8 @@ async def db_get_cancellation_token(token_hash: str) -> dict[str, Any] | None:
                     return {"token_hash": r[0], "user_id": r[1], "expires_at": r[2]}
                 return None
     return _in_memory_db.get("cancellation_tokens", {}).get(token_hash)
+
+
 async def db_delete_cancellation_token(token_hash: str) -> None:
     pool = await init_db_pool()
     if pool is not None:
@@ -1999,6 +2182,8 @@ async def db_delete_cancellation_token(token_hash: str) -> None:
             await conn.commit()
     else:
         _in_memory_db.get("cancellation_tokens", {}).pop(token_hash, None)
+
+
 async def db_list_scim_tokens(org_id: str) -> list[dict[str, Any]]:
     pool = await init_db_pool()
     if pool is not None:
@@ -2018,6 +2203,8 @@ async def db_list_scim_tokens(org_id: str) -> list[dict[str, Any]]:
         for t in _in_memory_db.get("scim_tokens", {}).values()
         if t.get("org_id") == org_id
     ]
+
+
 async def db_delete_scim_token(token_id: str, org_id: str) -> bool:
     pool = await init_db_pool()
     if pool is not None:

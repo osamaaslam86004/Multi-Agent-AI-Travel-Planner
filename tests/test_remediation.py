@@ -7,6 +7,7 @@ Step 4: Email Delivery, Masked Token Logging, and Verification Infrastructure
 Step 5: Per-Organization SCIM 2.0 Token Authentication and Authorization
 Step 6: Cryptographic Random Internal User IDs & Federated Identity Binding
 """
+
 import hashlib
 import uuid
 from unittest.mock import patch
@@ -71,6 +72,8 @@ async def test_step1_user_profile_persistence_and_lookup():
     by_email = await db_get_user_by_email(email)
     assert by_email is not None
     assert by_email["user_id"] == user_id
+
+
 @pytest.mark.asyncio
 async def test_step1_idp_config_db_persistence():
     """Verify IdP configurations persist through database repository functions."""
@@ -92,6 +95,8 @@ async def test_step1_idp_config_db_persistence():
     assert fetched["org_id"] == org_id
     assert fetched["idp_name"] == "Enterprise IdP"
     assert "example.com" in fetched["allowed_domains"]
+
+
 @pytest.mark.asyncio
 async def test_step1_scim_user_db_persistence():
     """Verify SCIM users persist through database repository functions."""
@@ -110,6 +115,8 @@ async def test_step1_scim_user_db_persistence():
     deleted = await db_delete_scim_user(scim_id, org_id="org_corp")
     assert deleted is True
     assert await db_get_scim_user(scim_id) is None
+
+
 # ============================================================================
 # STEP 2 TESTS: Real, Secure SAML 2.0 Authentication
 # ============================================================================
@@ -130,6 +137,8 @@ async def test_step2_saml_issuer_mismatch_rejection():
     with pytest.raises(ValueError) as excinfo:
         await adapter.parse_saml_response(xml_mismatched_issuer)
     assert "Issuer mismatch" in str(excinfo.value)
+
+
 @pytest.mark.asyncio
 async def test_step2_saml_missing_nameid_rejection():
     """Verify SAML adapter rejects assertions missing NameID claims."""
@@ -144,6 +153,8 @@ async def test_step2_saml_missing_nameid_rejection():
     with pytest.raises(ValueError) as excinfo:
         await adapter.parse_saml_response(xml_no_nameid)
     assert "Missing required SAML NameID" in str(excinfo.value)
+
+
 # ============================================================================
 # STEP 3 TESTS: Account Lifecycle, Routes, Reauth & Recovery
 # ============================================================================
@@ -161,6 +172,8 @@ async def test_step3_stepup_reauthentication_validation():
         verify_sudo_token("arbitrary_header_string_value", expected_user_id=user_id)
         is False
     )
+
+
 @pytest.mark.asyncio
 async def test_step3_password_recovery_actually_updates_password():
     """Verify password recovery sets and updates stored credential hash in database."""
@@ -183,6 +196,8 @@ async def test_step3_password_recovery_actually_updates_password():
     stored2 = await db_get_user_password(user_id)
     assert verify_password(old_pwd, stored2) is False
     assert verify_password(new_pwd, stored2) is True
+
+
 @pytest.mark.asyncio
 async def test_step3_account_status_change_contract():
     """Verify AccountStatusChangeRequest supports status field and lifecycle transition."""
@@ -191,6 +206,8 @@ async def test_step3_account_status_change_contract():
     )
     assert req.status == AccountStatus.SUSPENDED
     assert req.reason == "Policy Violation"
+
+
 # ============================================================================
 # STEP 4 TESTS: Mailer Infrastructure & Masked Logging
 # ============================================================================
@@ -200,6 +217,8 @@ async def test_step4_masked_token_logging():
     secret_url = "https://auth.example.com/recovery?token=secret_recovery_token_12345"
     masked = _mask_token_in_url(secret_url)
     assert "secret_recovery_token_12345" not in masked
+
+
 @pytest.mark.asyncio
 async def test_step4_smtp_mailer_async_nonblocking():
     """Verify SMTPMailer executes delivery without blocking the event loop."""
@@ -209,6 +228,8 @@ async def test_step4_smtp_mailer_async_nonblocking():
             "user@example.com", "http://auth/reset?token=xyz"
         )
         assert res is True
+
+
 # ============================================================================
 # STEP 5 TESTS: Per-Organization SCIM Tokens
 # ============================================================================
@@ -227,6 +248,8 @@ async def test_step5_per_org_scim_token_generation_and_auth():
     # Mismatched/invalid token hash must return None
     invalid_hash = hashlib.sha256(b"invalid_token").hexdigest()
     assert await db_get_scim_token_by_hash(invalid_hash) is None
+
+
 # ============================================================================
 # STEP 6 TESTS: Random Internal User IDs & Federated Identity Binding
 # ============================================================================
@@ -239,6 +262,8 @@ async def test_step6_random_internal_user_ids():
     assert uid2.startswith("usr_")
     assert uid1 != uid2  # Non-deterministic random IDs
     assert len(uid1) >= 36  # Full entropy length
+
+
 @pytest.mark.asyncio
 async def test_step6_federated_identity_binding_and_lookup():
     """Verify federated identity stores and resolves via (provider, issuer, sub)."""

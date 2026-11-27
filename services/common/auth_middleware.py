@@ -2,6 +2,7 @@
 Stateless JWT verification middleware using JWKS public keys, non-blocking async fetching,
 revocation checking, token typing ("access" vs "refresh"), role/permission inheritance, and scoped dependencies.
 """
+
 import asyncio
 import logging
 from typing import Annotated, Any
@@ -27,6 +28,8 @@ security_scheme = HTTPBearer(auto_error=False)
 CredentialsDep = Annotated[
     HTTPAuthorizationCredentials | None, Depends(security_scheme)
 ]
+
+
 def get_jwks_client() -> PyJWKClient:
     global _jwks_client
     if _jwks_client is None:
@@ -34,8 +37,11 @@ def get_jwks_client() -> PyJWKClient:
             AUTH_SERVICE_JWKS_URL, cache_keys=True, max_cached_keys=16
         )
     return _jwks_client
+
+
 class AuthenticatedUser:
     """Holds claims parsed from cryptographically verified JWT with RBAC capability."""
+
     def __init__(self, claims: dict[str, Any]):
         self.user_id: str = claims.get("sub", "")
         self.tenant_id: str = claims.get("tenant_id", "default")
@@ -48,11 +54,13 @@ class AuthenticatedUser:
         self.token_use: str = claims.get("token_use", "access")
         self.mfa_verified: bool = claims.get("mfa_verified", True)
         self.raw_claims: dict[str, Any] = claims
+
     def has_role(self, role: str) -> bool:
         target = role.lower().strip()
         return any(
             r.lower().strip() == target for r in self.roles
         ) or "platform_owner" in [r.lower() for r in self.roles]
+
     def has_permission(self, permission: str) -> bool:
         if "*" in self.permissions or permission in self.permissions:
             return True
@@ -60,6 +68,8 @@ class AuthenticatedUser:
         return f"{prefix}:*" in self.permissions or "platform_owner" in [
             r.lower() for r in self.roles
         ]
+
+
 async def get_current_user(
     request: Request, credentials: CredentialsDep = None
 ) -> AuthenticatedUser:
@@ -144,7 +154,11 @@ async def get_current_user(
             detail="Invalid authentication credentials.",
             headers={"WWW-Authenticate": "Bearer error='invalid_token'"},
         )
+
+
 CurrentUserDep = Annotated[AuthenticatedUser, Depends(get_current_user)]
+
+
 def require_roles(*required_roles: str, require_all: bool = False):
     async def role_checker(user: CurrentUserDep) -> AuthenticatedUser:
         if require_all:
@@ -161,11 +175,18 @@ def require_roles(*required_roles: str, require_all: bool = False):
                     detail="User lacks required access role.",
                 )
         return user
+
     return role_checker
+
+
 def require_any_role(*roles: str):
     return require_roles(*roles, require_all=False)
+
+
 def require_all_roles(*roles: str):
     return require_roles(*roles, require_all=True)
+
+
 def require_permission(required_permission: str):
     async def perm_checker(user: CurrentUserDep) -> AuthenticatedUser:
         if not user.has_permission(required_permission):
@@ -174,7 +195,10 @@ def require_permission(required_permission: str):
                 detail=f"Permission denied: missing '{required_permission}'",
             )
         return user
+
     return perm_checker
+
+
 def require_reauth():
     async def reauth_checker(
         request: Request, user: CurrentUserDep
@@ -201,6 +225,7 @@ def require_reauth():
                 status_code=401, detail="Step-up token expired or already consumed."
             )
         import json
+
         try:
             record = json.loads(token_record)
         except ValueError:
@@ -214,4 +239,5 @@ def require_reauth():
                 status_code=403, detail="Step-up token context mismatch."
             )
         return user
+
     return reauth_checker

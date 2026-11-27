@@ -1,6 +1,7 @@
 """
 Observability & Telemetry Domain Settings.
 """
+
 from services.core.config.base import BaseDomainSettings
 
 
@@ -11,6 +12,7 @@ class ObservabilitySettings(BaseDomainSettings):
     log_level: str = "INFO"
     log_format: str = "json"
     prometheus_metrics_enabled: bool = True
+
     @classmethod
     def load(cls) -> "ObservabilitySettings":
         aliases = {

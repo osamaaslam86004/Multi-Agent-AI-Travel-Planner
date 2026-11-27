@@ -123,7 +123,17 @@ spec:
     - Ingress
   ingress:
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - bff-gateway
+                  - auth-service
+                  - flight-service
+                  - hotel-service
+                  - weather-service
+                  - synthesis-service
       ports:
         - protocol: TCP
           port: 5432
@@ -145,7 +155,17 @@ spec:
     - Ingress
   ingress:
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - bff-gateway
+                  - auth-service
+                  - flight-service
+                  - hotel-service
+                  - weather-service
+                  - synthesis-service
       ports:
         - protocol: TCP
           port: 6379
@@ -182,6 +202,8 @@ spec:
           port: 8004
         - protocol: TCP
           port: 8005
+        - protocol: TCP
+          port: 8080
   egress:
     - to:
         - podSelector:

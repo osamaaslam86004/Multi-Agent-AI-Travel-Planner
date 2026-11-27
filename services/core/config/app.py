@@ -1,6 +1,7 @@
 """
 Application Domain Settings.
 """
+
 from pydantic import Field
 
 from services.core.config.base import BaseDomainSettings
@@ -19,6 +20,7 @@ class ApplicationSettings(BaseDomainSettings):
     request_timeout_seconds: float = 30.0
     retry_max_attempts: int = 3
     retry_backoff_factor: float = 0.5
+
     @classmethod
     def load(cls) -> "ApplicationSettings":
         aliases = {

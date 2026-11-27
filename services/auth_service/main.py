@@ -253,7 +253,11 @@ def assert_admin_mfa_enrolled(profile: UserProfile):
         and not profile.mfa_enabled
     ):
         logger.warning(
-            f"Admin user '{profile.user_id}' logged in without MFA enrolled; enrollment required."
+            f"Admin user '{profile.user_id}' accessed privileged flow without MFA enrolled."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator MFA enforcement: MFA enrollment is required for administrator accounts. Please complete MFA setup.",
         )
 
 
@@ -284,7 +288,10 @@ async def _check_domain_sso_policy(email: str, method: str = "direct"):
         allowed = {d.lower().strip().lstrip("@") for d in config.allowed_domains}
         if config.enforce_sso and domain in allowed:
             if not await db_is_domain_verified(domain, config.org_id):
-                continue
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Enterprise SSO policy is enforced for domain '{domain}', but organization domain verification is incomplete.",
+                )
             expected = config.idp_name.lower().strip()
             permitted = {expected}
             if config.sso_type == "oidc":
@@ -1022,7 +1029,7 @@ async def refresh_tokens(req: TokenRefreshRequest):
 # Organization Invitations
 @app.post("/api/v1/orgs/{org_id}/invitations", response_model=InvitationResponse)
 async def create_invitation_route(
-    org_id: str, req: InvitationCreateRequest, user: CurrentUserDep
+    org_id: str, req: InvitationCreateRequest, user: CurrentUserDep, reauth: ReauthDep
 ):
     _require_org_scope(user, org_id, "org:manage")
     validate_role_assignment(
@@ -1564,8 +1571,10 @@ async def change_status_route(
         if not target:
             raise HTTPException(status_code=404, detail="Target user not found.")
         if not user.has_permission("platform:admin"):
-            if target.tenant_id != user.tenant_id or (
-                user.org_id and target.org_id != user.org_id
+            if (
+                target.tenant_id != user.tenant_id
+                or (target.org_id and target.org_id != user.org_id)
+                or (user.org_id and not target.org_id)
             ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -1943,8 +1952,8 @@ async def get_idp_config_route(org_id: str, user: CurrentUserDep):
     return cfg
 
 
-@app.post("/api/v1/orgs/{org_id}/domains/verify")
-async def verify_org_domain_route(
+@app.post("/api/v1/orgs/{org_id}/domains/challenge")
+async def challenge_org_domain_route(
     org_id: str,
     domain: str,
     user: CurrentUserDep,
@@ -1954,7 +1963,38 @@ async def verify_org_domain_route(
     domain_clean = domain.lower().strip().lstrip("@")
     if "." not in domain_clean:
         raise HTTPException(status_code=400, detail="Invalid domain name.")
-    await db_verify_domain(domain_clean, org_id)
+    from services.common.db import db_create_domain_challenge
+
+    token = await db_create_domain_challenge(domain_clean, org_id)
+    return {
+        "org_id": org_id,
+        "domain": domain_clean,
+        "verification_token": token,
+        "dns_txt_record": f"travelbrain-verification={token}",
+        "status": "pending_verification",
+    }
+
+
+@app.post("/api/v1/orgs/{org_id}/domains/verify")
+async def verify_org_domain_route(
+    org_id: str,
+    domain: str,
+    user: CurrentUserDep,
+    reauth: ReauthDep,
+    verification_token: str | None = None,
+):
+    _require_org_scope(user, org_id, "sso:manage")
+    domain_clean = domain.lower().strip().lstrip("@")
+    if "." not in domain_clean:
+        raise HTTPException(status_code=400, detail="Invalid domain name.")
+    success = await db_verify_domain(
+        domain_clean, org_id, verification_token=verification_token
+    )
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail="Domain ownership challenge verification failed. Valid verification token or matching DNS TXT record required.",
+        )
     return {"org_id": org_id, "domain": domain_clean, "verified": True}
 
 

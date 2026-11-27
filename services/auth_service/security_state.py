@@ -1,6 +1,7 @@
 """Distributed, fail-closed one-time state for OAuth, MFA, refresh, and step-up.
 All security-critical records use Redis atomic operations with test fallback support.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -18,7 +19,11 @@ from services.shared.redis_client import get_redis_client
 
 class SecurityStateUnavailable(RuntimeError):
     pass
+
+
 _in_memory_sec_state: dict[str, Any] = {}
+
+
 async def _redis():
     client = await get_redis_client()
     settings = get_settings()
@@ -34,8 +39,12 @@ async def _redis():
         if is_prod:
             raise SecurityStateUnavailable("Distributed security state unavailable")
         return None
+
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _secret_cipher() -> Fernet:
     settings = get_settings()
     configured = settings.auth.identity_encryption_key
@@ -53,10 +62,16 @@ def _secret_cipher() -> Fernet:
         hashlib.sha256(master + b"|identity-secrets").digest()
     )
     return Fernet(key)
+
+
 def _encrypt_secret(secret: str) -> str:
     return _secret_cipher().encrypt(secret.encode()).decode()
+
+
 def _decrypt_secret(ciphertext: str) -> str:
     return _secret_cipher().decrypt(ciphertext.encode()).decode()
+
+
 async def put_once(key: str, value: dict[str, Any], ttl: int) -> None:
     r = await _redis()
     if r is not None:
@@ -69,6 +84,8 @@ async def put_once(key: str, value: dict[str, Any], ttl: int) -> None:
     if key in _in_memory_sec_state:
         raise HTTPException(status_code=409, detail="Security token collision")
     _in_memory_sec_state[key] = value
+
+
 async def consume_once(key: str) -> dict[str, Any] | None:
     r = await _redis()
     if r is not None:
@@ -80,6 +97,8 @@ async def consume_once(key: str) -> dict[str, Any] | None:
             except (ValueError, TypeError):
                 pass
     return _in_memory_sec_state.pop(key, None)
+
+
 async def oauth_begin(
     provider: str,
     redirect_uri: str,
@@ -118,6 +137,8 @@ async def oauth_begin(
         "nonce": nonce,
         "challenge": challenge,
     }
+
+
 async def oauth_consume(state: str, provider: str) -> dict[str, Any]:
     tx = await consume_once(f"oauth_tx:{digest(state)}")
     if not tx or tx.get("provider") != provider:
@@ -127,6 +148,8 @@ async def oauth_consume(state: str, provider: str) -> dict[str, Any]:
     if int(tx.get("created_at", 0)) + 600 < int(time.time()):
         raise HTTPException(status_code=401, detail="OAuth transaction expired")
     return tx
+
+
 async def refresh_register(jti: str, user_id: str, sid: str, expires_at: int) -> None:
     ttl = max(1, expires_at - int(time.time()))
     await put_once(
@@ -134,15 +157,21 @@ async def refresh_register(jti: str, user_id: str, sid: str, expires_at: int) ->
         {"user_id": user_id, "sid": sid, "expires_at": expires_at},
         ttl,
     )
+
+
 async def refresh_consume(jti: str, user_id: str, sid: str) -> bool:
     entry = await consume_once(f"refresh:{digest(jti)}")
     return bool(entry and entry.get("user_id") == user_id and entry.get("sid") == sid)
+
+
 async def sudo_register(
     jti: str, user_id: str, sid: str, action: str, ttl: int
 ) -> None:
     await put_once(
         f"sudo:{digest(jti)}", {"user_id": user_id, "sid": sid, "action": action}, ttl
     )
+
+
 async def sudo_consume(jti: str, user_id: str, sid: str, action: str) -> bool:
     entry = await consume_once(f"sudo:{digest(jti)}")
     return bool(
@@ -151,6 +180,8 @@ async def sudo_consume(jti: str, user_id: str, sid: str, action: str) -> bool:
         and entry.get("sid") == sid
         and entry.get("action") == action
     )
+
+
 async def store_mfa_login_challenge(
     user_id: str,
     email: str,
@@ -171,8 +202,12 @@ async def store_mfa_login_challenge(
     }
     await put_once(f"mfa_login_challenge:{digest(jti)}", state_payload, ttl)
     return jti
+
+
 async def consume_mfa_login_challenge(jti: str) -> dict[str, Any] | None:
     return await consume_once(f"mfa_login_challenge:{digest(jti)}")
+
+
 async def store_mfa_enrollment(user_id: str, secret: str, ttl: int = 600) -> None:
     r = await _redis()
     if r is not None:
@@ -181,6 +216,8 @@ async def store_mfa_enrollment(user_id: str, secret: str, ttl: int = 600) -> Non
         )
         return
     _in_memory_sec_state[f"mfa_enrollment:{digest(user_id)}"] = _encrypt_secret(secret)
+
+
 async def consume_mfa_enrollment(user_id: str) -> str | None:
     r = await _redis()
     if r is not None:
@@ -188,8 +225,12 @@ async def consume_mfa_enrollment(user_id: str) -> str | None:
         return _decrypt_secret(raw) if raw else None
     raw = _in_memory_sec_state.pop(f"mfa_enrollment:{digest(user_id)}", None)
     return _decrypt_secret(raw) if raw else None
+
+
 async def store_mfa_secret(user_id: str, secret: str, ttl: int = 600) -> None:
     await store_mfa_enrollment(user_id, secret, ttl)
+
+
 async def save_mfa_secret(user_id: str, secret: str) -> None:
     enc_secret = _encrypt_secret(secret)
     r = await _redis()
@@ -198,11 +239,14 @@ async def save_mfa_secret(user_id: str, secret: str) -> None:
     _in_memory_sec_state[f"mfa_secret:{digest(user_id)}"] = enc_secret
     # Persist in DB
     from services.common.db import db_get_mfa_factor, db_save_mfa_factor
+
     existing = await db_get_mfa_factor(user_id)
     backup_enc = existing.get("backup_codes_encrypted", "") if existing else ""
     await db_save_mfa_factor(
         user_id, enc_secret, backup_enc, mfa_type="totp", enabled=True
     )
+
+
 async def get_mfa_secret(user_id: str) -> str | None:
     r = await _redis()
     if r is not None:
@@ -214,6 +258,7 @@ async def get_mfa_secret(user_id: str) -> str | None:
         return _decrypt_secret(raw)
     # Fallback to DB
     from services.common.db import db_get_mfa_factor
+
     fac = await db_get_mfa_factor(user_id)
     if fac and fac.get("secret_encrypted"):
         dec = _decrypt_secret(fac["secret_encrypted"])
@@ -222,6 +267,8 @@ async def get_mfa_secret(user_id: str) -> str | None:
         _in_memory_sec_state[f"mfa_secret:{digest(user_id)}"] = fac["secret_encrypted"]
         return dec
     return None
+
+
 async def delete_mfa_secret(user_id: str) -> None:
     r = await _redis()
     if r is not None:
@@ -234,7 +281,10 @@ async def delete_mfa_secret(user_id: str) -> None:
     _in_memory_sec_state.pop(f"mfa_backup:{digest(user_id)}", None)
     _in_memory_sec_state.pop(f"mfa_enrollment:{digest(user_id)}", None)
     from services.common.db import db_delete_mfa_factor
+
     await db_delete_mfa_factor(user_id)
+
+
 async def save_backup_codes(user_id: str, codes: list[str]) -> None:
     encoded = json.dumps([digest(c) for c in codes])
     enc_codes = _encrypt_secret(encoded)
@@ -244,11 +294,14 @@ async def save_backup_codes(user_id: str, codes: list[str]) -> None:
     _in_memory_sec_state[f"mfa_backup:{digest(user_id)}"] = [digest(c) for c in codes]
     # Persist in DB
     from services.common.db import db_get_mfa_factor, db_save_mfa_factor
+
     existing = await db_get_mfa_factor(user_id)
     secret_enc = existing.get("secret_encrypted", "") if existing else ""
     await db_save_mfa_factor(
         user_id, secret_enc, enc_codes, mfa_type="totp", enabled=True
     )
+
+
 async def consume_backup_code(user_id: str, code: str) -> bool:
     r = await _redis()
     code_digest = digest(code)
@@ -272,6 +325,7 @@ async def consume_backup_code(user_id: str, code: str) -> bool:
         return True
     # Check DB fallback
     from services.common.db import db_get_mfa_factor, db_save_mfa_factor
+
     fac = await db_get_mfa_factor(user_id)
     if fac and fac.get("backup_codes_encrypted"):
         try:
@@ -290,15 +344,21 @@ async def consume_backup_code(user_id: str, code: str) -> bool:
         except Exception:
             pass
     return False
+
+
 async def revoke_session(sid: str, user_id: str, ttl: int = 86400) -> None:
     r = await _redis()
     if r is not None:
         await r.set(f"revoked_sid:{digest(sid)}", user_id, ex=ttl)
     _in_memory_sec_state[f"revoked_sid:{digest(sid)}"] = user_id
+
+
 async def is_session_revoked(sid: str) -> bool:
     r = await _redis()
     if r is not None:
         return bool(await r.get(f"revoked_sid:{digest(sid)}"))
+
+
 async def check_and_mark_totp_used(
     user_id: str, code: str, window_seconds: int = 90
 ) -> bool:

@@ -2,22 +2,27 @@
 Base configuration settings engine built on Pydantic v2 with environment variable parsing,
 aliases, profile management, and validation.
 """
+
 import os
 from typing import Any, Self, TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T", bound="BaseDomainSettings")
+
+
 class BaseDomainSettings(BaseModel):
     """
     Base domain settings model. Automatically populates fields from environment variables
     matching field names or explicit aliases, with support for environment prefixes.
     """
+
     model_config = {
         "arbitrary_types_allowed": True,
         "populate_by_name": True,
         "extra": "ignore",
     }
+
     @classmethod
     def load_from_env(
         cls, prefix: str = "", aliases: dict[str, str] | None = None

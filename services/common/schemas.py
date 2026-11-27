@@ -1,6 +1,7 @@
 """
 Shared CloudEvents schemas and Pydantic models for inter-service communication.
 """
+
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
@@ -8,8 +9,11 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, Field
 
 T = TypeVar("T")
+
+
 class CloudEvent(BaseModel, Generic[T]):
     """CloudEvents v1.0 specification compliant envelope."""
+
     specversion: str = "1.0"
     id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex}")
     source: str
@@ -20,11 +24,16 @@ class CloudEvent(BaseModel, Generic[T]):
     dataschema: str | None = "https://travelbrain.ai/schemas/v1"
     traceparent: str | None = None
     data: T
+
+
 class ProviderResult(BaseModel):
     """Explicit result returned by domain providers indicating source and degradation status."""
+
     text: str
     source: str = "unknown"
     degraded: bool = False
+
+
 # Domain Payloads
 class PlanningInitiatedPayload(BaseModel):
     correlation_id: str
@@ -37,6 +46,8 @@ class PlanningInitiatedPayload(BaseModel):
     end_date: str | None = None
     dates: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class FlightResultPayload(BaseModel):
     correlation_id: str
     user_id: str = "unknown"
@@ -48,6 +59,8 @@ class FlightResultPayload(BaseModel):
     degraded: bool = False
     cached: bool = False
     error: str | None = None
+
+
 class HotelResultPayload(BaseModel):
     correlation_id: str
     user_id: str = "unknown"
@@ -59,6 +72,8 @@ class HotelResultPayload(BaseModel):
     degraded: bool = False
     cached: bool = False
     error: str | None = None
+
+
 class WeatherResultPayload(BaseModel):
     correlation_id: str
     user_id: str = "unknown"
@@ -70,6 +85,8 @@ class WeatherResultPayload(BaseModel):
     degraded: bool = False
     cached: bool = False
     error: str | None = None
+
+
 class SynthesisCompletedPayload(BaseModel):
     correlation_id: str
     user_id: str
@@ -85,14 +102,19 @@ class SynthesisCompletedPayload(BaseModel):
     weather_degraded: bool = False
     llm_calls: int = 1
     completed_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class StreamProgressUpdate(BaseModel):
     correlation_id: str
     stage: str
     message: str
     percentage: int
     payload: dict[str, Any] | None = None
+
+
 class LLMResult(BaseModel):
     """Standardized result returned by all LLM providers."""
+
     content: str
     provider_name: str
     model_name: str

@@ -1,6 +1,7 @@
 """
 FastAPI Lifespan Manager and Worker Lifecycle Orchestrator.
 """
+
 import asyncio
 import logging
 import signal
@@ -13,6 +14,8 @@ from services.core.config import get_settings
 from services.core.lifecycle.teardown import get_teardown_registry
 
 logger = logging.getLogger("travelbrain.lifecycle.manager")
+
+
 @asynccontextmanager
 async def lifespan_manager(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -31,16 +34,20 @@ async def lifespan_manager(app: FastAPI) -> AsyncGenerator[None, None]:
         await registry.teardown_all(
             deadline_seconds=settings.app.request_timeout_seconds
         )
+
+
 class WorkerLifespan:
     """
     Standardized startup/shutdown orchestrator for background queue/stream workers.
     Ensures zero resource initialization at import time and safe SIGINT/SIGTERM handling.
     """
+
     def __init__(self, service_name: str, deadline_seconds: float = 10.0) -> None:
         self.service_name = service_name
         self.deadline_seconds = deadline_seconds
         self.running = False
         self._shutdown_event = asyncio.Event()
+
     def setup_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -49,12 +56,14 @@ class WorkerLifespan:
             except NotImplementedError:
                 # Signal handlers not implemented on some non-Unix loops
                 pass
+
     def _handle_signal(self, sig: signal.Signals) -> None:
         logger.info(
             f"Worker '{self.service_name}' received signal {sig.name}. Initiating graceful shutdown..."
         )
         self.running = False
         self._shutdown_event.set()
+
     async def run(
         self,
         startup_cb: Callable[[], None] | None = None,

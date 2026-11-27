@@ -1,6 +1,7 @@
 """
 Version 1 REST API Transport Schemas.
 """
+
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -10,6 +11,8 @@ class TripPlanRequestV1(BaseModel):
     message: str = Field(
         default="", max_length=2000, description="User query for trip planning"
     )
+
+
 class TripResponseV1(BaseModel):
     trip_id: str
     tenant_id: str
@@ -27,9 +30,13 @@ class TripResponseV1(BaseModel):
     weather_degraded: bool = False
     created_at: str
     updated_at: str
+
+
 class AuthLoginRequestV1(BaseModel):
     email: str
     password: str
+
+
 class TokenResponseV1(BaseModel):
     access_token: str
     token_type: str = "bearer"

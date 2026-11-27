@@ -3,6 +3,7 @@ Scatter-Gather Barrier State Machine for Synthesis Service.
 State Transitions: GATHERING -> SYNTHESIZING -> DONE.
 Uses atomic Lua claims, deadline ZSET tracking, and Janitor-driven partial synthesis on expiration.
 """
+
 import logging
 import time
 from typing import Any
@@ -32,15 +33,19 @@ if (fl == 1 and ht == 1 and wt == 1) or force_partial == 'true' then
 end
 return 0
 """
+
+
 class BarrierStateMachine:
     """
     Scatter-Gather state machine orchestrating multi-agent synchronization
     with deadline timeouts and partial degradation support.
     """
+
     def __init__(self, redis_client: Any, default_deadline_seconds: float = 15.0):
         self.redis = redis_client
         self.deadline_seconds = default_deadline_seconds
         self.deadline_zset = "barrier:deadlines"
+
     async def init_barrier(
         self,
         correlation_id: str,
@@ -67,6 +72,7 @@ class BarrierStateMachine:
         await self.redis.expire(barrier_key, 3600)
         # Register in deadline ZSET
         await self.redis.zadd(self.deadline_zset, {correlation_id: deadline_ts})
+
     async def record_agent_result(
         self,
         correlation_id: str,
@@ -86,6 +92,7 @@ class BarrierStateMachine:
         }
         await self.redis.hset(barrier_key, mapping=mapping)
         await self.redis.expire(barrier_key, 3600)
+
     async def try_claim_synthesis(
         self, correlation_id: str, force_partial: bool = False
     ) -> bool:
@@ -108,12 +115,14 @@ class BarrierStateMachine:
             now_str,
         )
         return res == 1
+
     async def get_barrier_data(self, correlation_id: str) -> dict[str, str]:
         """Returns full barrier state data."""
         if not self.redis:
             return {}
         barrier_key = f"barrier:{correlation_id}"
         return await self.redis.hgetall(barrier_key)
+
     async def check_expired_barriers(self) -> list[str]:
         """
         Janitor scan: finds barriers whose deadline_ts score <= current_time,
@@ -160,6 +169,7 @@ class BarrierStateMachine:
                 )
                 ready_for_synthesis.append(cid)
         return ready_for_synthesis
+
     async def mark_done(self, correlation_id: str) -> None:
         """Marks barrier status as DONE and cleans up deadline ZSET."""
         if not self.redis:
